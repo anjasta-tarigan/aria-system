@@ -17,6 +17,7 @@ import {
   type ToolCall,
 } from "./api";
 import { mockInvoke, mockListen, seed } from "./mock";
+import { renderMarkdown } from "./format";
 
 /// Thin adapters the UI goes through, so `?mock=1` can swap the whole Rust
 /// side for the in-browser fake.
@@ -47,6 +48,7 @@ function h<K extends keyof HTMLElementTagNameMap>(
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
     if (k === "class") el.className = String(v);
+    else if (k === "html") el.innerHTML = String(v);
     else if (k === "dataset") Object.assign(el.dataset, v as object);
     else if (k.startsWith("on") && typeof v === "function") {
       el.addEventListener(k.slice(2).toLowerCase(), v as EventListener);
@@ -769,6 +771,15 @@ function conversationPane(detail: ConversationDetail): HTMLElement {
 
 function messageNode(m: MessageView): HTMLElement {
   const isUser = m.role === "user";
+  // Only the assistant's output is markdown. The user's own text is shown
+  // verbatim, so pasted code or a stray ** isn't silently reformatted.
+  const body = isUser
+    ? m.content
+      ? h("div", { class: "msg-body" }, m.content)
+      : null
+    : m.content
+      ? h("div", { class: "msg-body markdown", html: renderMarkdown(m.content) })
+      : null;
   return h(
     "article",
     { class: `msg ${m.role}`, id: `msg-${m.id}` },
@@ -778,7 +789,7 @@ function messageNode(m: MessageView): HTMLElement {
       h("span", { class: "who" }, isUser ? "You" : "Aria"),
       h("time", { class: "when" }, fmt(m.created_at)),
     ),
-    m.content ? h("div", { class: "msg-body" }, m.content) : null,
+    body,
     ...m.tool_calls.map(toolCard),
   );
 }
@@ -869,7 +880,7 @@ function streamingNode(): HTMLElement | null {
   if (!ui.streaming) return null;
   const else_ =
     ui.streaming.text.length > 0
-      ? h("div", { class: "msg-body" }, ui.streaming.text)
+      ? h("div", { class: "msg-body", html: renderMarkdown(ui.streaming.text) })
       : h("div", { class: "msg-body muted" }, "Thinking…");
   return h("article", { class: "msg assistant streaming" }, else_);
 }
