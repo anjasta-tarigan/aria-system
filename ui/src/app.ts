@@ -1,7 +1,7 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
-  api,
-  onRunEvent,
   type ApprovalClass,
   type ChangedFile,
   type ConversationDetail,
@@ -18,16 +18,17 @@ import {
 } from "./api";
 import { mockInvoke, mockListen, seed } from "./mock";
 
-/// Wired in main.ts so `?mock=1` can run the UI in a plain browser.
-export const call = {
-  invoke: ((cmd: string, args?: Record<string, unknown>) =>
-    Promise.reject(new Error(`no ipc: ${cmd}`))) as <T>(
-    cmd: string,
-    args?: Record<string, unknown>,
-  ) => Promise<T>,
-  listen: ((_cb: (e: { payload: RunEventEnvelope }) => void) => Promise.resolve(() => {})) as (
-    cb: (e: { payload: RunEventEnvelope }) => void,
-  ) => Promise<() => void>,
+/// Thin adapters the UI goes through, so `?mock=1` can swap the whole Rust
+/// side for the in-browser fake.
+export interface Ipc {
+  invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
+  listen: (cb: (e: { payload: RunEventEnvelope }) => void) => Promise<() => void>;
+}
+
+// The real app talks to the Rust commands.
+export const call: Ipc = {
+  invoke: (cmd, args) => invoke(cmd, args) as Promise<never>,
+  listen: (cb) => listen<RunEventEnvelope>("run-event", (e) => cb({ payload: e.payload })),
 };
 
 export function useMock() {
@@ -35,7 +36,6 @@ export function useMock() {
   call.listen = mockListen;
   seed();
 }
-
 
 // ------------------------------------------------------------------ helpers
 
