@@ -64,6 +64,8 @@ export interface ConversationView {
   root_path: string | null;
   created_at: number;
   updated_at: number;
+  /// True when the owning workspace is pinned to the top of the sidebar.
+  pinned?: boolean;
   run: Run | null;
 }
 
@@ -136,6 +138,16 @@ export const api = {
   newConversation: () => invoke<ConversationView>("new_conversation"),
   attachWorkspace: (conversationId: string, rootPath: string) =>
     invoke<ConversationView>("attach_workspace", { conversationId, rootPath }),
+  newSession: (workspaceId: string) =>
+    invoke<ConversationView>("new_session", { workspaceId }),
+  renameConversation: (conversationId: string, title: string) =>
+    invoke<void>("rename_conversation", { conversationId, title }),
+  deleteConversation: (conversationId: string) =>
+    invoke<void>("delete_conversation", { conversationId }),
+  deleteWorkspace: (workspaceId: string) =>
+    invoke<void>("delete_workspace", { workspaceId }),
+  setWorkspacePin: (workspaceId: string, pinned: boolean) =>
+    invoke<void>("set_workspace_pin", { workspaceId, pinned }),
   listConversations: () => invoke<ConversationView[]>("list_conversations"),
   getConversation: (conversationId: string) =>
     invoke<ConversationDetail>("get_conversation", { conversationId }),

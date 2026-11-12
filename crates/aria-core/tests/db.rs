@@ -82,10 +82,10 @@ fn migration_is_idempotent_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("aria.db");
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 2);
+    assert_eq!(db.schema_version().unwrap(), 3);
     drop(db);
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 2);
+    assert_eq!(db.schema_version().unwrap(), 3);
     let (_ws, conv) = seed(&db);
     db.call(|c| db::insert_message(c, &conv, None, Role::User, "persisted"))
         .unwrap();
@@ -200,7 +200,7 @@ fn migrating_v1_keeps_rows_and_allows_a_folderness_conversation() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 2);
+    assert_eq!(db.schema_version().unwrap(), 3);
     db.call(|c| {
         // Existing rows survived the rebuild, and FTS was not disturbed.
         let conv = db::get_conversation(c, "c1")?;
@@ -220,6 +220,40 @@ fn migrating_v1_keeps_rows_and_allows_a_folderness_conversation() {
         Ok(())
     })
     .unwrap();
+}
+
+#[test]
+fn v3_pins_and_deletes_workspaces_and_conversations() {
+    let db = Db::open_in_memory().unwrap();
+    let (ws_id, c1) = db
+        .call(|c| {
+            let ws = db::insert_workspace(c, "/tmp/ws")?;
+            let conv = db::insert_conversation(c, Some(&ws.id), "one")?;
+            Ok((ws.id, conv.id))
+        })
+        .unwrap();
+
+    // New workspaces are not pinned by default.
+    assert!(!db.call(|c| db::get_workspace(c, &ws_id)).unwrap().pinned);
+
+    // Pinning flips the flag and survives a read-back.
+    db.call(|c| db::set_workspace_pin(c, &ws_id, true)).unwrap();
+    assert!(db.call(|c| db::get_workspace(c, &ws_id)).unwrap().pinned);
+
+    // A second session in the same workspace is independently deletable.
+    let c2 = db
+        .call(|c| db::insert_conversation(c, Some(&ws_id), "two"))
+        .unwrap()
+        .id;
+    assert_eq!(db.call(|c| db::count_conversations(c, &ws_id)).unwrap(), 2);
+    db.call(|c| db::delete_conversation(c, &c2)).unwrap();
+    assert_eq!(db.call(|c| db::count_conversations(c, &ws_id)).unwrap(), 1);
+
+    // Deleting the workspace cascades to its remaining conversations.
+    db.call(|c| db::delete_workspace(c, &ws_id)).unwrap();
+    assert!(db.call(|c| db::get_workspace(c, &ws_id)).is_err());
+    assert_eq!(db.call(|c| db::count_conversations(c, &ws_id)).unwrap(), 0);
+    assert!(db.call(|c| db::get_conversation(c, &c1)).is_err());
 }
 
 /// Just enough of schema v1 for the upgrade test: the tables the migration

@@ -27,6 +27,17 @@ const id = (p: string) => `${p}-${++seq}`;
 const now = () => Date.now();
 
 const conversations = new Map<string, ConversationDetail>();
+// One stable workspace id per folder path, so every session in a folder shares
+// the same `workspace_id` and the UI groups them under one parent.
+const workspaces = new Map<string, { id: string; pinned: boolean }>();
+
+function findOrInsertWorkspace(root: string): { id: string; pinned: boolean } {
+  const existing = workspaces.get(root);
+  if (existing) return existing;
+  const ws = { id: id("ws"), pinned: false };
+  workspaces.set(root, ws);
+  return ws;
+}
 const settings: SettingsView = {
   settings: {
     base_url: "https://api.openai.com/v1",
@@ -318,6 +329,7 @@ const handlers: Record<string, Handler> = {
       root_path: null,
       created_at: now(),
       updated_at: now(),
+      pinned: false,
       run: null,
     };
     conversations.set(conv.id, {
@@ -333,8 +345,10 @@ const handlers: Record<string, Handler> = {
     const d = conversations.get(String(a.conversationId));
     if (!d) throw new Error("no such conversation");
     const root = String(a.rootPath);
-    d.conversation.workspace_id = id("ws");
+    const ws = findOrInsertWorkspace(root);
+    d.conversation.workspace_id = ws.id;
     d.conversation.root_path = root;
+    d.conversation.pinned = ws.pinned;
     if (!d.conversation.title || d.conversation.title === "Main System") {
       d.conversation.title = root.split("/").filter(Boolean).pop() ?? root;
     }
@@ -342,17 +356,19 @@ const handlers: Record<string, Handler> = {
   },
   open_workspace: (a) => {
     const root = String(a.rootPath);
+    const ws = findOrInsertWorkspace(root);
     const existing = [...conversations.values()].find(
-      (d) => d.conversation.root_path === root,
+      (d) => d.conversation.workspace_id === ws.id,
     );
     if (existing) return existing.conversation;
     const conv: ConversationView = {
       id: id("conv"),
-      workspace_id: id("ws"),
+      workspace_id: ws.id,
       title: root.split("/").filter(Boolean).pop() ?? root,
       root_path: root,
       created_at: now(),
       updated_at: now(),
+      pinned: ws.pinned,
       run: null,
     };
     conversations.set(conv.id, {
@@ -362,6 +378,63 @@ const handlers: Record<string, Handler> = {
       pending: [],
     });
     return conv;
+  },
+  // Start a fresh chat session inside an existing workspace.
+  new_session: (a) => {
+    const wsId = String(a.workspaceId);
+    const siblings = [...conversations.values()].filter(
+      (d) => d.conversation.workspace_id === wsId,
+    );
+    const existing = siblings[0];
+    const root_path = existing?.conversation.root_path ?? null;
+    const conv: ConversationView = {
+      id: id("conv"),
+      workspace_id: wsId,
+      title: `Chat ${siblings.length + 1}`,
+      root_path,
+      created_at: now(),
+      updated_at: now(),
+      pinned: existing?.conversation.pinned ?? false,
+      run: null,
+    };
+    conversations.set(conv.id, {
+      conversation: conv,
+      messages: [],
+      todos: [],
+      pending: [],
+    });
+    return conv;
+  },
+  rename_conversation: (a) => {
+    const d = conversations.get(String(a.conversationId));
+    if (!d) throw new Error("no such conversation");
+    d.conversation.title = String(a.title);
+    return null;
+  },
+  delete_conversation: (a) => {
+    conversations.delete(String(a.conversationId));
+    return null;
+  },
+  delete_workspace: (a) => {
+    const wsId = String(a.workspaceId);
+    for (const [k, d] of conversations) {
+      if (d.conversation.workspace_id === wsId) conversations.delete(k);
+    }
+    for (const [root, ws] of workspaces) {
+      if (ws.id === wsId) workspaces.delete(root);
+    }
+    return null;
+  },
+  set_workspace_pin: (a) => {
+    const wsId = String(a.workspaceId);
+    const pinned = Boolean(a.pinned);
+    for (const ws of workspaces.values()) {
+      if (ws.id === wsId) ws.pinned = pinned;
+    }
+    for (const d of conversations.values()) {
+      if (d.conversation.workspace_id === wsId) d.conversation.pinned = pinned;
+    }
+    return null;
   },
   list_conversations: () => [...conversations.values()].map((d) => d.conversation),
   get_conversation: (a) => {
@@ -497,4 +570,9 @@ export function seed(): void {
       { id: id("todo"), run_id: "", position: 1, text: "Open a folder when asked to work on files", done: false },
     ];
   }
+  // A sample workspace with two chat sessions, to exercise the sidebar.
+  const sample = handlers.open_workspace({
+    rootPath: "/home/anjasta/Projects/sample-app",
+  }) as ConversationView;
+  handlers.new_session({ workspaceId: sample.workspace_id });
 }

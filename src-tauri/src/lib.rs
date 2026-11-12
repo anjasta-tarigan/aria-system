@@ -104,6 +104,8 @@ pub struct ConversationView {
     pub root_path: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// True when the owning workspace is pinned to the top of the sidebar.
+    pub pinned: bool,
     pub run: Option<Run>,
 }
 
@@ -148,13 +150,12 @@ pub struct SettingsInput {
 // ------------------------------------------------------------------ assembly
 
 fn conversation_view(db: &Db, c: db::Conversation) -> CmdResult<ConversationView> {
-    let root_path = match &c.workspace_id {
-        Some(id) => Some(
-            db.call(|conn| db::get_workspace(conn, id))
-                .map_err(err)?
-                .root_path,
-        ),
-        None => None,
+    let (root_path, pinned) = match &c.workspace_id {
+        Some(id) => {
+            let ws = db.call(|conn| db::get_workspace(conn, id)).map_err(err)?;
+            (Some(ws.root_path), ws.pinned)
+        }
+        None => (None, false),
     };
     let run = db.call(|conn| db::latest_run(conn, &c.id)).map_err(err)?;
     Ok(ConversationView {
@@ -164,6 +165,7 @@ fn conversation_view(db: &Db, c: db::Conversation) -> CmdResult<ConversationView
         root_path,
         created_at: c.created_at,
         updated_at: c.updated_at,
+        pinned,
         run,
     })
 }
@@ -371,6 +373,81 @@ fn validate_folder(root_path: &str) -> CmdResult<PathBuf> {
     }
     WorkspaceRoot::new(&root).map_err(err)?;
     Ok(root)
+}
+
+/// Start a fresh chat session inside an existing workspace.
+#[tauri::command]
+async fn new_session(
+    state: State<'_, App>,
+    workspace_id: String,
+) -> CmdResult<ConversationView> {
+    let db = Arc::clone(&state.inner.db);
+    tokio::task::spawn_blocking(move || {
+        let conv = db
+            .call(|conn| {
+                // The folder must exist; this fails clearly if it was deleted.
+                let _ = db::get_workspace(conn, &workspace_id)?;
+                let n = db::count_conversations(conn, &workspace_id)?;
+                let title = format!("Chat {}", n + 1);
+                db::insert_conversation(conn, Some(&workspace_id), &title)
+            })
+            .map_err(err)?;
+        conversation_view(&db, conv)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Rename a conversation (used by the per-session context menu).
+#[tauri::command]
+fn rename_conversation(
+    state: State<'_, App>,
+    conversation_id: String,
+    title: String,
+) -> CmdResult<()> {
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err("a name is required".into());
+    }
+    state
+        .inner
+        .db
+        .call(|conn| db::rename_conversation(conn, &conversation_id, &title))
+        .map_err(err)
+}
+
+/// Delete a single conversation and its messages.
+#[tauri::command]
+fn delete_conversation(state: State<'_, App>, conversation_id: String) -> CmdResult<()> {
+    state
+        .inner
+        .db
+        .call(|conn| db::delete_conversation(conn, &conversation_id))
+        .map_err(err)
+}
+
+/// Delete a workspace and every conversation beneath it.
+#[tauri::command]
+fn delete_workspace(state: State<'_, App>, workspace_id: String) -> CmdResult<()> {
+    state
+        .inner
+        .db
+        .call(|conn| db::delete_workspace(conn, &workspace_id))
+        .map_err(err)
+}
+
+/// Pin or unpin a workspace so it stays at the top of the sidebar.
+#[tauri::command]
+fn set_workspace_pin(
+    state: State<'_, App>,
+    workspace_id: String,
+    pinned: bool,
+) -> CmdResult<()> {
+    state
+        .inner
+        .db
+        .call(|conn| db::set_workspace_pin(conn, &workspace_id, pinned))
+        .map_err(err)
 }
 
 fn find_or_insert_workspace(conn: &aria_core::db::Connection, root_path: &str) -> db::Result<String> {
@@ -600,6 +677,11 @@ pub fn run() {
             open_workspace,
             new_conversation,
             attach_workspace,
+            new_session,
+            rename_conversation,
+            delete_conversation,
+            delete_workspace,
+            set_workspace_pin,
             list_conversations,
             get_conversation,
             send_message,

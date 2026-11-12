@@ -107,6 +107,8 @@ interface Ui {
   pendingCount: number;
   /// Tool-call ids whose cards have been expanded by the user.
   expanded: Set<string>;
+  /// Conversation id currently being renamed inline in the sidebar, if any.
+  renamingId: string | null;
 }
 
 const ui: Ui = {
@@ -122,6 +124,7 @@ const ui: Ui = {
   jumpTo: null,
   pendingCount: 0,
   expanded: new Set(),
+  renamingId: null,
 };
 
 const root = document.querySelector<HTMLElement>("#app")!;
@@ -170,52 +173,38 @@ function render() {
   }
 }
 
+// --------------------------------------------------------------- sidebar
+
+interface WsGroup {
+  wsId: string;
+  name: string;
+  pinned: boolean;
+  rootPath: string | null;
+  maxUpdated: number;
+  sessions: ConversationView[];
+}
+
+/// Basename of a folder path, used as the workspace's display name.
+function dirName(p: string | null): string {
+  if (!p) return "Workspace";
+  const cleaned = p.replace(/\/+$/, "");
+  const base = cleaned.split("/").pop() ?? cleaned;
+  return base || "Workspace";
+}
+
+/// Compact, 24-hour timestamp for a sidebar entry.
+function fmtShort(ms: number): string {
+  const d = new Date(ms);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false });
+  }
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 function sidebar(): HTMLElement {
-  // Two groups: the folderless System chat (main session only) and the
-  // folder-bound Workspace chats.
   const systems = ui.conversations.filter((c) => !c.workspace_id);
-  const workspaces = ui.conversations
-    .filter((c) => !!c.workspace_id)
-    .sort((a, b) => b.updated_at - a.updated_at);
-
-  const convButton = (c: ConversationView) =>
-    h(
-      "button",
-      {
-        class: `conv${ui.detail?.conversation.id === c.id ? " active" : ""}${c.workspace_id ? "" : " main"}`,
-        title: c.root_path ?? "Main System — available everywhere",
-        onclick: () => void selectConversation(c.id),
-      },
-      h("span", { class: "conv-title" }, c.title),
-      h(
-        "span",
-        { class: "conv-meta" },
-        c.run
-          ? stateLabel[c.run.state]
-          : c.workspace_id
-            ? "Workspace"
-            : "System",
-      ),
-    );
-
-  const group = (label: string, convs: ConversationView[], withPlus: boolean) =>
-    h(
-      "div",
-      { class: "conv-group" },
-      h(
-        "div",
-        { class: "section-row" },
-        h("span", { class: "section-title" }, label),
-        withPlus
-          ? h(
-              "button",
-              { class: "icon", title: "Open a folder", onclick: () => void chooseFolder() },
-              "+",
-            )
-          : null,
-      ),
-      h("div", { class: "conv-list" }, ...convs.map(convButton)),
-    );
+  const groups = groupWorkspaces(ui.conversations.filter((c) => !!c.workspace_id));
 
   const searchResults = ui.search.length
     ? h(
@@ -224,10 +213,7 @@ function sidebar(): HTMLElement {
         ...ui.search.map((hit) =>
           h(
             "button",
-            {
-              class: "hit",
-              onclick: () => void jumpToHit(hit),
-            },
+            { class: "hit", onclick: () => void jumpToHit(hit) },
             h("span", { class: "hit-role" }, hit.role),
             h("span", { class: "hit-text" }, hit.snippet),
           ),
@@ -235,23 +221,63 @@ function sidebar(): HTMLElement {
       )
     : null;
 
-  const emptySearch = ui.search.length === 0 && lastSearchNonEmpty
-    ? h("p", { class: "muted small search-empty" }, "No matches")
-    : null;
+  const emptySearch =
+    ui.search.length === 0 && lastSearchNonEmpty
+      ? h("p", { class: "muted small search-empty" }, "No matches")
+      : null;
+
+  const systemGroup = h(
+    "div",
+    { class: "conv-group" },
+    h("div", { class: "section-row" }, h("span", { class: "section-title" }, "System")),
+    h(
+      "div",
+      { class: "conv-list" },
+      ...systems.map((c) =>
+        h(
+          "button",
+          {
+            class: `conv main${ui.detail?.conversation.id === c.id ? " active" : ""}`,
+            title: "Main System — available everywhere",
+            onclick: () => void selectConversation(c.id),
+          },
+          h("span", { class: "conv-title" }, c.title),
+        ),
+      ),
+    ),
+  );
+
+  const workspaceGroup = h(
+    "div",
+    { class: "conv-group" },
+    h(
+      "div",
+      { class: "section-row" },
+      h("span", { class: "section-title" }, "Workspaces"),
+      h(
+        "button",
+        { class: "icon", title: "Open a folder", onclick: () => void chooseFolder() },
+        "+",
+      ),
+    ),
+    ...groups.map(renderWorkspace),
+  );
+
+  const footer = h(
+    "div",
+    { class: "sidebar-foot" },
+    h(
+      "button",
+      { class: "icon", title: "Settings", onclick: () => void openSettings() },
+      "⚙",
+    ),
+    h("span", { class: "foot-label" }, "Settings"),
+  );
 
   return h(
     "aside",
     { class: "sidebar" },
-    h(
-      "div",
-      { class: "brand" },
-      h("span", { class: "logo" }, "Aria"),
-      h(
-        "button",
-        { class: "icon", title: "Settings", onclick: () => void openSettings() },
-        "⚙",
-      ),
-    ),
+    h("div", { class: "brand" }, h("span", { class: "logo" }, "Aria")),
     h(
       "input",
       {
@@ -263,9 +289,290 @@ function sidebar(): HTMLElement {
     ),
     searchResults,
     emptySearch,
-    group("System", systems, false),
-    group("Workspaces", workspaces, true),
+    systemGroup,
+    workspaceGroup,
+    footer,
   );
+}
+
+function groupWorkspaces(convs: ConversationView[]): WsGroup[] {
+  const byWs = new Map<string, ConversationView[]>();
+  for (const c of convs) {
+    const id = c.workspace_id as string;
+    const list = byWs.get(id) ?? [];
+    list.push(c);
+    byWs.set(id, list);
+  }
+  const groups: WsGroup[] = [];
+  for (const [wsId, sessions] of byWs) {
+    const sorted = [...sessions].sort((a, b) => b.updated_at - a.updated_at);
+    const rootPath = sorted[0].root_path ?? null;
+    groups.push({
+      wsId,
+      name: dirName(rootPath),
+      pinned: sorted[0].pinned ?? false,
+      rootPath,
+      maxUpdated: Math.max(...sorted.map((s) => s.updated_at)),
+      sessions: sorted,
+    });
+  }
+  groups.sort((a, b) => {
+    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+    return b.maxUpdated - a.maxUpdated;
+  });
+  return groups;
+}
+
+function renderWorkspace(ws: WsGroup): HTMLElement {
+  const head = h(
+    "div",
+    { class: "workspace-head" },
+    h(
+      "button",
+      {
+        class: "ws-name",
+        title: ws.rootPath ?? ws.name,
+        onclick: () => void selectConversation(ws.sessions[0].id),
+      },
+      ws.name,
+    ),
+    h(
+      "button",
+      {
+        class: "icon ws-action",
+        title: "Workspace menu",
+        onclick: (e: MouseEvent) => {
+          e.stopPropagation();
+          openMenuAt(e.currentTarget as HTMLElement, [
+            {
+              label: ws.pinned ? "Unpin" : "Pin",
+              onClick: () => void pinWorkspace(ws.wsId, !ws.pinned),
+            },
+            {
+              label: "Delete workspace",
+              danger: true,
+              onClick: () => void removeWorkspace(ws.wsId),
+            },
+          ]);
+        },
+      },
+      "⋮",
+    ),
+    h(
+      "button",
+      {
+        class: "icon ws-action",
+        title: "New chat in this workspace",
+        onclick: (e: MouseEvent) => {
+          e.stopPropagation();
+          void newSessionIn(ws.wsId);
+        },
+      },
+      "+",
+    ),
+  );
+  return h(
+    "div",
+    { class: `workspace${ws.pinned ? " pinned" : ""}` },
+    head,
+    h("div", { class: "conv-list" }, ...ws.sessions.map(renderSession)),
+  );
+}
+
+function renderSession(c: ConversationView): HTMLElement {
+  if (ui.renamingId === c.id) {
+    return h("div", { class: "conv session renaming" }, renameInput(c));
+  }
+  const meta = h(
+    "span",
+    { class: "conv-meta" },
+    h("span", { class: "when" }, fmtShort(c.updated_at)),
+    h(
+      "button",
+      {
+        class: "icon sess-action",
+        title: "Session menu",
+        onclick: (e: MouseEvent) => {
+          e.stopPropagation();
+          openMenuAt(e.currentTarget as HTMLElement, [
+            { label: "Rename", onClick: () => void startRename(c.id) },
+            { label: "Delete", danger: true, onClick: () => void removeSession(c.id) },
+          ]);
+        },
+      },
+      "⋮",
+    ),
+  );
+  return h(
+    "div",
+    {
+      class: `conv session${ui.detail?.conversation.id === c.id ? " active" : ""}`,
+      onclick: () => void selectConversation(c.id),
+    },
+    h("span", { class: "conv-title" }, c.title),
+    meta,
+  );
+}
+
+function renameInput(c: ConversationView): HTMLElement {
+  const input = h("input", {
+    class: "rename-input",
+    type: "text",
+    value: c.title,
+  }) as HTMLInputElement;
+  input.value = c.title;
+  const commit = async () => {
+    const v = input.value.trim();
+    ui.renamingId = null;
+    if (v && v !== c.title) {
+      try {
+        await call.invoke("rename_conversation", { conversationId: c.id, title: v });
+        await refreshConversations();
+      } catch (e) {
+        ui.notice = String(e);
+      }
+    }
+    render();
+  };
+  input.onkeydown = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void commit();
+    } else if (e.key === "Escape") {
+      ui.renamingId = null;
+      render();
+    }
+  };
+  input.onblur = () => void commit();
+  setTimeout(() => {
+    input.focus();
+    input.select();
+  }, 0);
+  return input;
+}
+
+// -------------------------------------------------------- workspace actions
+
+async function pinWorkspace(wsId: string, pinned: boolean) {
+  try {
+    await call.invoke("set_workspace_pin", { workspaceId: wsId, pinned });
+    await refreshConversations();
+    render();
+  } catch (e) {
+    ui.notice = String(e);
+    render();
+  }
+}
+
+async function newSessionIn(wsId: string) {
+  try {
+    const conv = await call.invoke<ConversationView>("new_session", { workspaceId: wsId });
+    await refreshConversations();
+    await selectConversation(conv.id);
+  } catch (e) {
+    ui.notice = String(e);
+    render();
+  }
+}
+
+async function removeWorkspace(wsId: string) {
+  if (!window.confirm("Delete this workspace and all its chat sessions?")) return;
+  try {
+    await call.invoke("delete_workspace", { workspaceId: wsId });
+    if (ui.detail && ui.detail.conversation.workspace_id === wsId) {
+      ui.detail = null;
+      await selectFirst();
+    }
+    await refreshConversations();
+    render();
+  } catch (e) {
+    ui.notice = String(e);
+    render();
+  }
+}
+
+async function removeSession(id: string) {
+  if (!window.confirm("Delete this chat session?")) return;
+  try {
+    await call.invoke("delete_conversation", { conversationId: id });
+    if (ui.detail?.conversation.id === id) {
+      ui.detail = null;
+      await selectFirst();
+    }
+    await refreshConversations();
+    render();
+  } catch (e) {
+    ui.notice = String(e);
+    render();
+  }
+}
+
+function startRename(id: string) {
+  ui.renamingId = id;
+  render();
+}
+
+async function selectFirst() {
+  if (ui.conversations.length === 0) {
+    const main = await call.invoke<ConversationView>("new_conversation");
+    ui.conversations = [main];
+  }
+  await selectConversation(ui.conversations[0].id);
+}
+
+// ------------------------------------------------------------- context menu
+
+interface MenuItem {
+  label: string;
+  danger?: boolean;
+  onClick: () => void;
+}
+
+let menuEl: HTMLDivElement | null = null;
+
+function openMenuAt(anchor: HTMLElement, items: MenuItem[]) {
+  closeMenu();
+  const menu = document.createElement("div");
+  menu.className = "ctx-menu";
+  for (const item of items) {
+    const btn = document.createElement("button");
+    btn.className = "ctx-item" + (item.danger ? " danger" : "");
+    btn.textContent = item.label;
+    btn.onclick = () => {
+      closeMenu();
+      item.onClick();
+    };
+    menu.appendChild(btn);
+  }
+  document.body.appendChild(menu);
+  menuEl = menu;
+  const r = anchor.getBoundingClientRect();
+  const mw = menu.offsetWidth;
+  const mh = menu.offsetHeight;
+  const left = Math.min(r.left, window.innerWidth - mw - 8);
+  const top = Math.min(r.bottom, window.innerHeight - mh - 8);
+  menu.style.left = `${Math.max(8, left)}px`;
+  menu.style.top = `${Math.max(8, top)}px`;
+  // Close on any outside interaction or Escape.
+  setTimeout(() => {
+    window.addEventListener("click", onMenuOutside, true);
+    window.addEventListener("keydown", onMenuKey, true);
+  }, 0);
+}
+
+function onMenuOutside(e: Event) {
+  if (menuEl && !menuEl.contains(e.target as Node)) closeMenu();
+}
+function onMenuKey(e: KeyboardEvent) {
+  if (e.key === "Escape") closeMenu();
+}
+function closeMenu() {
+  if (menuEl) {
+    menuEl.remove();
+    menuEl = null;
+  }
+  window.removeEventListener("click", onMenuOutside, true);
+  window.removeEventListener("keydown", onMenuKey, true);
 }
 
 function emptyPane(): HTMLElement {

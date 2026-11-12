@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use super::{DbError, Result};
 
 /// Maximum schema version understood by this build.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// A handle to the application database.
 ///
@@ -99,6 +99,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if current < 2 {
         migrate_v2(conn)?;
+    }
+    if current < 3 {
+        migrate_v3(conn)?;
     }
     Ok(())
 }
@@ -267,3 +270,13 @@ DROP TABLE conversations;
 ALTER TABLE conversations_v2 RENAME TO conversations;
 CREATE INDEX conversations_by_workspace ON conversations(workspace_id, updated_at DESC);
 "#;
+
+/// Version 3: workspaces gain a `pinned` flag so a folder can be kept at the
+/// top of the sidebar regardless of recency.
+fn migrate_v3(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE workspaces ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;",
+    )?;
+    conn.pragma_update(None, "user_version", 3)?;
+    Ok(())
+}

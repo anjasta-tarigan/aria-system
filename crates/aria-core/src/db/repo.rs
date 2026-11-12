@@ -113,9 +113,10 @@ pub fn insert_workspace(conn: &Connection, root_path: &str) -> Result<Workspace>
         id: nid(),
         root_path: root_path.to_string(),
         created_at: now_ms(),
+        pinned: false,
     };
     conn.execute(
-        "INSERT INTO workspaces (id, root_path, created_at) VALUES (?1, ?2, ?3)",
+        "INSERT INTO workspaces (id, root_path, created_at, pinned) VALUES (?1, ?2, ?3, 0)",
         params![ws.id, ws.root_path, ws.created_at],
     )?;
     Ok(ws)
@@ -123,13 +124,14 @@ pub fn insert_workspace(conn: &Connection, root_path: &str) -> Result<Workspace>
 
 pub fn get_workspace(conn: &Connection, id: &str) -> Result<Workspace> {
     conn.query_row(
-        "SELECT id, root_path, created_at FROM workspaces WHERE id = ?1",
+        "SELECT id, root_path, created_at, pinned FROM workspaces WHERE id = ?1",
         [id],
         |r| {
             Ok(Workspace {
                 id: r.get(0)?,
                 root_path: r.get(1)?,
                 created_at: r.get(2)?,
+                pinned: r.get::<_, i64>(3)? != 0,
             })
         },
     )
@@ -140,17 +142,49 @@ pub fn get_workspace(conn: &Connection, id: &str) -> Result<Workspace> {
 pub fn find_workspace_by_root(conn: &Connection, root_path: &str) -> Result<Option<Workspace>> {
     Ok(conn
         .query_row(
-            "SELECT id, root_path, created_at FROM workspaces WHERE root_path = ?1",
+            "SELECT id, root_path, created_at, pinned FROM workspaces WHERE root_path = ?1",
             [root_path],
             |r| {
                 Ok(Workspace {
                     id: r.get(0)?,
                     root_path: r.get(1)?,
                     created_at: r.get(2)?,
+                    pinned: r.get::<_, i64>(3)? != 0,
                 })
             },
         )
         .optional()?)
+}
+
+/// Pin or unpin a workspace, keeping it at the top of the sidebar.
+pub fn set_workspace_pin(conn: &Connection, id: &str, pinned: bool) -> Result<()> {
+    let n = conn.execute(
+        "UPDATE workspaces SET pinned = ?2 WHERE id = ?1",
+        params![id, pinned as i64],
+    )?;
+    if n == 0 {
+        return Err(DbError::NotFound("workspace"));
+    }
+    Ok(())
+}
+
+/// Remove a workspace and, via `ON DELETE CASCADE`, every conversation,
+/// message, run, tool call and approval beneath it.
+pub fn delete_workspace(conn: &Connection, id: &str) -> Result<()> {
+    let n = conn.execute("DELETE FROM workspaces WHERE id = ?1", [id])?;
+    if n == 0 {
+        return Err(DbError::NotFound("workspace"));
+    }
+    Ok(())
+}
+
+/// Remove a single conversation and everything under it.
+pub fn delete_conversation(conn: &Connection, id: &str) -> Result<()> {
+    let n = conn.execute("DELETE FROM conversations WHERE id = ?1", [id])?;
+    if n == 0 {
+        return Err(DbError::NotFound("conversation"));
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------- conversations
@@ -233,6 +267,15 @@ pub fn list_conversations(conn: &Connection) -> Result<Vec<Conversation>> {
     ))?;
     let rows = stmt.query_map([], conversation_from_row)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// How many conversations belong to a workspace (used to name new sessions).
+pub fn count_conversations(conn: &Connection, workspace_id: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM conversations WHERE workspace_id = ?1",
+        [workspace_id],
+        |r| r.get(0),
+    )?)
 }
 
 pub fn set_conversation_title(conn: &Connection, id: &str, title: &str) -> Result<()> {

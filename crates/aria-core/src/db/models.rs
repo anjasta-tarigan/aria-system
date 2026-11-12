@@ -247,6 +247,8 @@ pub struct Workspace {
     pub id: String,
     pub root_path: String,
     pub created_at: i64,
+    /// Kept at the top of the sidebar when true.
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
