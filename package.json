@@ -1,0 +1,21 @@
+{
+  "name": "aria",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@12.17.0",
+  "scripts": {
+    "dev": "vite --config ui/vite.config.ts",
+    "build": "tsc -p ui/tsconfig.json --noEmit && vite build --config ui/vite.config.ts",
+    "tauri": "tauri dev"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "typescript": "^5",
+    "vite": "^7"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.12.4",
+    "@tauri-apps/plugin-dialog": "^2.8.4"
+  }
+}

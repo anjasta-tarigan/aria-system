@@ -1,0 +1,4 @@
+data: {"choices":[{"index":0,"delta":{"content":"Partial answer"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_x","type":"function","function":{"name":"run_shell","arguments":"{\"cmd\":\"ls"}}]},"finish_reason":null}]}
+
