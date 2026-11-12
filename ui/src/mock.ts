@@ -38,6 +38,15 @@ function findOrInsertWorkspace(root: string): { id: string; pinned: boolean } {
   workspaces.set(root, ws);
   return ws;
 }
+
+/** Name for a new chat inside a workspace. Every chat is numbered so the
+    workspace header stays the only place the folder name appears. */
+function nextChatTitle(workspaceId: string): string {
+  const n = [...conversations.values()].filter(
+    (d) => d.conversation.workspace_id === workspaceId,
+  ).length;
+  return `Chat ${n + 1}`;
+}
 const settings: SettingsView = {
   settings: {
     base_url: "https://api.openai.com/v1",
@@ -349,8 +358,9 @@ const handlers: Record<string, Handler> = {
     d.conversation.workspace_id = ws.id;
     d.conversation.root_path = root;
     d.conversation.pinned = ws.pinned;
+    // Keep a title the user set; otherwise number it like the other chats.
     if (!d.conversation.title || d.conversation.title === "Main System") {
-      d.conversation.title = root.split("/").filter(Boolean).pop() ?? root;
+      d.conversation.title = nextChatTitle(ws.id);
     }
     return d.conversation;
   },
@@ -364,7 +374,7 @@ const handlers: Record<string, Handler> = {
     const conv: ConversationView = {
       id: id("conv"),
       workspace_id: ws.id,
-      title: root.split("/").filter(Boolean).pop() ?? root,
+      title: nextChatTitle(ws.id),
       root_path: root,
       created_at: now(),
       updated_at: now(),
@@ -390,7 +400,7 @@ const handlers: Record<string, Handler> = {
     const conv: ConversationView = {
       id: id("conv"),
       workspace_id: wsId,
-      title: `Chat ${siblings.length + 1}`,
+      title: nextChatTitle(wsId),
       root_path,
       created_at: now(),
       updated_at: now(),

@@ -109,6 +109,8 @@ interface Ui {
   expanded: Set<string>;
   /// Conversation id currently being renamed inline in the sidebar, if any.
   renamingId: string | null;
+  /// Workspace ids whose session list is collapsed in the sidebar tree.
+  collapsed: Set<string>;
 }
 
 const ui: Ui = {
@@ -125,6 +127,7 @@ const ui: Ui = {
   pendingCount: 0,
   expanded: new Set(),
   renamingId: null,
+  collapsed: new Set(),
 };
 
 const root = document.querySelector<HTMLElement>("#app")!;
@@ -192,6 +195,12 @@ function dirName(p: string | null): string {
   return base || "Workspace";
 }
 
+/// Label for a chat row: an empty title (older rows stored none, or the
+/// default main session before it was named) falls back to "Main System".
+function convTitle(c: ConversationView): string {
+  return c.title.trim() || "Main System";
+}
+
 /// Compact, 24-hour timestamp for a sidebar entry.
 function fmtShort(ms: number): string {
   const d = new Date(ms);
@@ -241,7 +250,7 @@ function sidebar(): HTMLElement {
             title: "Main System — available everywhere",
             onclick: () => void selectConversation(c.id),
           },
-          h("span", { class: "conv-title" }, c.title),
+          h("span", { class: "conv-title" }, convTitle(c)),
         ),
       ),
     ),
@@ -332,9 +341,24 @@ function groupWorkspaces(convs: ConversationView[]): WsGroup[] {
 }
 
 function renderWorkspace(ws: WsGroup): HTMLElement {
+  const collapsed = ui.collapsed.has(ws.wsId);
   const head = h(
     "div",
     { class: "workspace-head" },
+    h(
+      "button",
+      {
+        class: "tree-caret",
+        title: collapsed ? "Expand" : "Collapse",
+        onclick: (e: MouseEvent) => {
+          e.stopPropagation();
+          if (ui.collapsed.has(ws.wsId)) ui.collapsed.delete(ws.wsId);
+          else ui.collapsed.add(ws.wsId);
+          render();
+        },
+      },
+      "▸",
+    ),
     h(
       "button",
       {
@@ -379,11 +403,16 @@ function renderWorkspace(ws: WsGroup): HTMLElement {
       "+",
     ),
   );
+  const children = h(
+    "div",
+    { class: "tree-children" },
+    ...ws.sessions.map(renderSession),
+  );
   return h(
     "div",
-    { class: `workspace${ws.pinned ? " pinned" : ""}` },
+    { class: `workspace${ws.pinned ? " pinned" : ""}${collapsed ? " collapsed" : ""}` },
     head,
-    h("div", { class: "conv-list" }, ...ws.sessions.map(renderSession)),
+    children,
   );
 }
 
@@ -417,7 +446,7 @@ function renderSession(c: ConversationView): HTMLElement {
       class: `conv session${ui.detail?.conversation.id === c.id ? " active" : ""}`,
       onclick: () => void selectConversation(c.id),
     },
-    h("span", { class: "conv-title" }, c.title),
+    h("span", { class: "conv-title" }, convTitle(c)),
     meta,
   );
 }
@@ -669,7 +698,7 @@ function conversationPane(detail: ConversationDetail): HTMLElement {
   const header = h(
     "header",
     { class: "conv-header" },
-    h("div", {}, h("h2", {}, conv.title), folderSlot),
+    h("div", {}, h("h2", {}, convTitle(conv)), folderSlot),
     run ? h("span", { class: `badge ${run.state}` }, stateLabel[run.state]) : null,
     run?.state === "cancelled" || run?.state === "errored"
       ? h("span", { class: "error-text" }, run.error ?? run.stop_reason ?? "")

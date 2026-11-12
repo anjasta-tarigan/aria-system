@@ -291,7 +291,7 @@ async fn open_workspace(
     state: State<'_, App>,
     root_path: String,
 ) -> CmdResult<ConversationView> {
-    let root = validate_folder(&root_path)?;
+    validate_folder(&root_path)?;
 
     let db = Arc::clone(&state.inner.db);
     tokio::task::spawn_blocking(move || {
@@ -306,10 +306,7 @@ async fn open_workspace(
                 match existing {
                     Some(c) => Ok(c),
                     None => {
-                        let title = root
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| root_path.clone());
+                        let title = next_chat_title(conn, &ws)?;
                         db::insert_conversation(conn, Some(&ws), &title)
                     }
                 }
@@ -338,22 +335,22 @@ async fn attach_workspace(
     conversation_id: String,
     root_path: String,
 ) -> CmdResult<ConversationView> {
-    let root = validate_folder(&root_path)?;
+    validate_folder(&root_path)?;
 
     let db = Arc::clone(&state.inner.db);
     tokio::task::spawn_blocking(move || {
         let conv = db
             .call(|conn| {
-                // Was this a System chat becoming a workspace? Rename it to the
-                // folder so it reads naturally in the Workspaces group.
+                // Was this a System chat becoming a workspace? Give it the same
+                // numbering as the workspace's other chats, so the folder name
+                // stays in the header alone. A title the user set is kept.
                 let before = db::get_conversation(conn, &conversation_id)?;
                 let ws = find_or_insert_workspace(conn, &root_path)?;
                 db::set_conversation_workspace(conn, &conversation_id, Some(&ws))?;
-                if before.workspace_id.is_none() {
-                    let title = root
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| root_path.clone());
+                if before.workspace_id.is_none()
+                    && (before.title.is_empty() || before.title == "Main System")
+                {
+                    let title = next_chat_title(conn, &ws)?;
                     db::rename_conversation(conn, &conversation_id, &title)?;
                 }
                 db::get_conversation(conn, &conversation_id)
@@ -387,8 +384,7 @@ async fn new_session(
             .call(|conn| {
                 // The folder must exist; this fails clearly if it was deleted.
                 let _ = db::get_workspace(conn, &workspace_id)?;
-                let n = db::count_conversations(conn, &workspace_id)?;
-                let title = format!("Chat {}", n + 1);
+                let title = next_chat_title(conn, &workspace_id)?;
                 db::insert_conversation(conn, Some(&workspace_id), &title)
             })
             .map_err(err)?;
@@ -455,6 +451,16 @@ fn find_or_insert_workspace(conn: &aria_core::db::Connection, root_path: &str) -
         Some(ws) => ws.id,
         None => db::insert_workspace(conn, root_path)?.id,
     })
+}
+
+/// Name for a new chat inside a workspace.
+///
+/// Every chat is numbered ("Chat 1", "Chat 2", …) so the workspace header stays
+/// the only place the folder name appears; a chat titled after the folder would
+/// read as a duplicate of its own parent.
+fn next_chat_title(conn: &aria_core::db::Connection, workspace_id: &str) -> db::Result<String> {
+    let n = db::count_conversations(conn, workspace_id)?;
+    Ok(format!("Chat {}", n + 1))
 }
 
 #[tauri::command]
@@ -697,4 +703,46 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running aria");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Chats in a workspace are numbered, and the folder name is left to the
+    /// workspace header alone — a chat titled after its folder reads as a
+    /// duplicate of its own parent in the sidebar.
+    #[test]
+    fn chat_titles_are_numbered_per_workspace() {
+        let db = Db::open_in_memory().unwrap();
+        let ws_a = db
+            .call(|c| db::insert_workspace(c, "/tmp/aria-demo-a"))
+            .unwrap()
+            .id;
+        let ws_b = db
+            .call(|c| db::insert_workspace(c, "/tmp/aria-demo-b"))
+            .unwrap()
+            .id;
+
+        // Each workspace numbers its own chats from 1.
+        let (a1, a2, b1) = db
+            .call(|c| {
+                Ok((
+                    next_chat_title(c, &ws_a)?,
+                    next_chat_title(c, &ws_b)?,
+                    next_chat_title(c, &ws_b)?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(a1, "Chat 1");
+        assert_eq!(a2, "Chat 1");
+        assert_eq!(b1, "Chat 1");
+
+        // After one chat exists, the next one is numbered 2.
+        db.call(|c| db::insert_conversation(c, Some(&ws_a), "Chat 1")).unwrap();
+        assert_eq!(db.call(|c| next_chat_title(c, &ws_a)).unwrap(), "Chat 2");
+
+        // A title is never the folder name.
+        assert!(!a1.contains("aria-demo-a"));
+    }
 }
