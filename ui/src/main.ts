@@ -1,4 +1,3 @@
-import "./style.css";
 import { start, testHooks, useMock } from "./app";
 
 // `?mock=1` runs the same UI against an in-browser fake of the Rust side, for
