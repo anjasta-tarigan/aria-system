@@ -7,6 +7,7 @@ import {
   type ConversationDetail,
   type ConversationView,
   type MessageHit,
+  type Memory,
   type RunEventEnvelope,
   type MessageView,
   type PendingApproval,
@@ -113,6 +114,9 @@ interface Ui {
   renamingId: string | null;
   /// Workspace ids whose session list is collapsed in the sidebar tree.
   collapsed: Set<string>;
+  /// Whether the stored-memories viewer is open.
+  memoriesOpen: boolean;
+  memories: Memory[];
 }
 
 const ui: Ui = {
@@ -130,6 +134,8 @@ const ui: Ui = {
   expanded: new Set(),
   renamingId: null,
   collapsed: new Set(),
+  memoriesOpen: false,
+  memories: [],
 };
 
 const root = document.querySelector<HTMLElement>("#app")!;
@@ -165,6 +171,7 @@ function render() {
   root.replaceChildren(
     shell,
     ...(ui.settingsOpen && ui.settings ? [settingsModal(ui.settings)] : []),
+    ...(ui.memoriesOpen ? [memoriesModal()] : []),
   );
   if (ui.jumpTo) {
     const el = document.getElementById(`msg-${ui.jumpTo}`);
@@ -297,6 +304,16 @@ function sidebar(): HTMLElement {
       "⚙",
     ),
     h("span", { class: "foot-label" }, "Settings"),
+    h(
+      "button",
+      {
+        class: "icon",
+        title: "Memories",
+        onclick: () => void openMemories(ui.detail?.conversation.workspace_id ?? null),
+      },
+      "🧠",
+    ),
+    h("span", { class: "foot-label" }, "Memories"),
   );
 
   return h(
@@ -1180,6 +1197,15 @@ function settingsModal(view: SettingsView): HTMLElement {
       field("Max turns", s.caps.max_turns, "number"),
       field("Max prompt tokens", s.caps.max_prompt_tokens, "number"),
       field("Shell timeout (s)", s.shell_timeout_secs, "number"),
+      h("hr", {}),
+      h("h3", { class: "small muted" }, "Embeddings (memory)"),
+      field("Embedding model", s.embedding_model ?? ""),
+      field("Embedding base URL", s.embedding_base_url ?? ""),
+      h(
+        "p",
+        { class: "muted small" },
+        "OpenAI-compatible embeddings endpoint. Leave blank to reuse the chat Base URL and model default (text-embedding-3-small).",
+      ),
       h(
         "label",
         {},
@@ -1210,6 +1236,8 @@ function settingsModal(view: SettingsView): HTMLElement {
                     max_turns: Number(val("Max turns")) || 1,
                     max_prompt_tokens: Number(val("Max prompt tokens")) || 1,
                     shell_timeout_secs: Number(val("Shell timeout (s)")) || 1,
+                    embedding_model: val("Embedding model") || null,
+                    embedding_base_url: val("Embedding base URL") || null,
                     api_key: val("API key") || null,
                   },
                 });
@@ -1224,6 +1252,68 @@ function settingsModal(view: SettingsView): HTMLElement {
           },
           "Save",
         ),
+        h("button", { class: "ghost", onclick: close }, "Close"),
+      ),
+    ),
+  );
+}
+
+async function openMemories(workspaceId: string | null) {
+  ui.memories = await call.invoke<Memory[]>("list_memories", {
+    workspaceId: workspaceId ?? null,
+  });
+  ui.memoriesOpen = true;
+  render();
+}
+
+function memoriesModal(): HTMLElement {
+  const close = () => {
+    ui.memoriesOpen = false;
+    render();
+  };
+  const list = ui.memories.length
+    ? h(
+        "ul",
+        { class: "memory-list" },
+        ...ui.memories.map((m) =>
+          h(
+            "li",
+            {},
+            h("div", { class: "memory-key" }, m.key),
+            h("div", { class: "memory-content" }, m.content),
+            h(
+              "button",
+              {
+                class: "icon danger",
+                title: "Forget",
+                onclick: async () => {
+                  await call.invoke("delete_memory", { id: m.id });
+                  ui.memories = ui.memories.filter((x) => x.id !== m.id);
+                  render();
+                },
+              },
+              "🗑",
+            ),
+          ),
+        ),
+      )
+    : h("p", { class: "muted small" }, "No memories stored yet.");
+  return h(
+    "div",
+    { class: "modal-backdrop", onclick: (e: MouseEvent) => e.target === e.currentTarget && close() },
+    h(
+      "div",
+      { class: "modal" },
+      h("h2", {}, "Memories"),
+      h(
+        "p",
+        { class: "muted small" },
+        "Facts Aria has stored. Recalled automatically each turn; items here are global plus this workspace's.",
+      ),
+      list,
+      h(
+        "div",
+        { class: "approval-actions" },
         h("button", { class: "ghost", onclick: close }, "Close"),
       ),
     ),

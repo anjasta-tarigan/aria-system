@@ -9,6 +9,7 @@ import type {
   ChangedFile,
   ConversationDetail,
   ConversationView,
+  Memory,
   MessageHit,
   PendingApproval,
   Run,
@@ -53,10 +54,14 @@ const settings: SettingsView = {
     model: "gpt-4o-mini",
     caps: { max_turns: 50, max_prompt_tokens: 200000 },
     shell_timeout_secs: 120,
+    embedding_base_url: null,
+    embedding_model: null,
   },
   has_key: true,
   key_backend: "keyring",
 };
+
+const memories: Memory[] = [];
 
 const listeners: Array<(e: { payload: RunEventEnvelope }) => void> = [];
 function emit(event: RunEvent, runId: string) {
@@ -545,9 +550,16 @@ const handlers: Record<string, Handler> = {
         max_prompt_tokens: Number(input.max_prompt_tokens),
       },
       shell_timeout_secs: Number(input.shell_timeout_secs),
+      embedding_base_url: (input.embedding_base_url as string) ?? null,
+      embedding_model: (input.embedding_model as string) ?? null,
     };
     if (input.api_key) settings.has_key = true;
     return settings;
+  },
+  list_memories: () => memories.slice(),
+  delete_memory: (a) => {
+    const i = memories.findIndex((m) => m.id === (a.id as string));
+    if (i >= 0) memories.splice(i, 1);
   },
 };
 

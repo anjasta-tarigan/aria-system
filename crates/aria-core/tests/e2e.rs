@@ -648,3 +648,52 @@ fn chat_messages_serialise_like_openai() {
 
 #[allow(dead_code)]
 fn _types(_: ToolSpec, _: TurnResult, _: ProviderEvent, _: &dyn Provider) {}
+
+// ------------------------------------------------------------------- memory
+
+/// spec.md: durable facts persist across runs and survive in the database, and
+/// recall returns them without needing an embedding-capable provider.
+#[tokio::test]
+async fn memory_is_stored_and_recalled_across_runs() {
+    let repo = Repo::new();
+    let stub = Stub::start(vec![
+        Reply::call("c1", "remember", json!({"key": "user_name", "content": "Sam"})),
+        Reply::say("Got it, I'll remember that. "),
+        Reply::call("c2", "recall", json!({})),
+        Reply::say("Your name is Sam. "),
+    ]);
+    let agent = repo.agent(&stub, Caps::default());
+    let handle = agent.start(&repo.conversation_id, "my name is Sam").await.unwrap();
+    assert_eq!(
+        settle(&repo, &agent, &handle, Decision::Approve).await,
+        RunState::Finished
+    );
+
+    // The fact is durable: it lives in the database, scoped to the workspace.
+    let stored = repo
+        .db
+        .call(|c| db::list_memories(c, Some(&repo.workspace_id)))
+        .unwrap();
+    assert!(stored.iter().any(|m| m.key == "user_name" && m.content == "Sam"));
+
+    // A fresh run in the same conversation recalls it from the store.
+    let handle2 = agent
+        .start(&repo.conversation_id, "what's my name?")
+        .await
+        .unwrap();
+    assert_eq!(
+        settle(&repo, &agent, &handle2, Decision::Approve).await,
+        RunState::Finished
+    );
+    let recalled = repo
+        .db
+        .call(|c| db::list_tool_calls(c, handle2.run_id()))
+        .unwrap()
+        .into_iter()
+        .find(|c| c.tool == "recall")
+        .expect("recall was not called")
+        .result
+        .expect("recall produced no result");
+    assert!(recalled.contains("user_name"), "recall missed the memory: {recalled}");
+    assert!(recalled.contains("Sam"), "recall missed the memory: {recalled}");
+}

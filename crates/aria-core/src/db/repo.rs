@@ -855,3 +855,159 @@ pub fn blob_usage(conn: &Connection) -> Result<BTreeMap<String, i64>> {
     }
     Ok(map)
 }
+
+// ----------------------------------------------------------------- memories
+
+/// Upsert a memory keyed by `(workspace_id, key)`: an existing row updates its
+/// content/embedding/timestamp, otherwise a fresh row is inserted.
+pub fn insert_or_update_memory(
+    conn: &Connection,
+    workspace_id: Option<&str>,
+    key: &str,
+    content: &str,
+    embedding: Option<&[u8]>,
+) -> Result<Memory> {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM memories
+             WHERE (workspace_id = ?1 OR (workspace_id IS NULL AND ?1 IS NULL))
+               AND key = ?2",
+            params![workspace_id, key],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    let now = now_ms();
+    if let Some(id) = existing {
+        conn.execute(
+            "UPDATE memories SET content = ?2, embedding = ?3, updated_at = ?4 WHERE id = ?1",
+            params![id, content, embedding, now],
+        )?;
+        return get_memory(conn, &id);
+    }
+
+    let m = Memory {
+        id: nid(),
+        workspace_id: workspace_id.map(str::to_string),
+        key: key.to_string(),
+        content: content.to_string(),
+        embedding: embedding.map(|b| b.to_vec()),
+        created_at: now,
+        updated_at: now,
+    };
+    conn.execute(
+        "INSERT INTO memories (id, workspace_id, key, content, embedding, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![m.id, m.workspace_id, m.key, m.content, m.embedding, m.created_at, m.updated_at],
+    )?;
+    Ok(m)
+}
+
+pub fn get_memory(conn: &Connection, id: &str) -> Result<Memory> {
+    conn.query_row(
+        "SELECT id, workspace_id, key, content, embedding, created_at, updated_at
+         FROM memories WHERE id = ?1",
+        [id],
+        memory_from_row,
+    )
+    .optional()?
+    .ok_or(DbError::NotFound("memory"))
+}
+
+/// Memories for the workspace plus global ones (workspace_id IS NULL), newest
+/// first. A `None` workspace returns only global memories.
+pub fn list_memories(conn: &Connection, workspace_id: Option<&str>) -> Result<Vec<Memory>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, workspace_id, key, content, embedding, created_at, updated_at
+         FROM memories
+         WHERE (?1 IS NULL AND workspace_id IS NULL)
+            OR (workspace_id = ?1 OR workspace_id IS NULL)
+         ORDER BY updated_at DESC, id DESC",
+    )?;
+    let rows = stmt.query_map(params![workspace_id], memory_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub fn delete_memory(conn: &Connection, id: &str) -> Result<()> {
+    let n = conn.execute("DELETE FROM memories WHERE id = ?1", [id])?;
+    if n == 0 {
+        return Err(DbError::NotFound("memory"));
+    }
+    Ok(())
+}
+
+pub fn delete_memory_by_key(conn: &Connection, workspace_id: Option<&str>, key: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM memories
+         WHERE (workspace_id = ?1 OR (workspace_id IS NULL AND ?1 IS NULL)) AND key = ?2",
+        params![workspace_id, key],
+    )?;
+    Ok(())
+}
+
+/// Rank memories in the workspace scope by cosine similarity to the query,
+/// returning the top `limit`. Memories without an embedding are skipped.
+pub fn search_memories_by_embedding(
+    conn: &Connection,
+    workspace_id: Option<&str>,
+    query_embedding: &[f32],
+    limit: usize,
+) -> Result<Vec<(Memory, f32)>> {
+    let mut scored: Vec<(Memory, f32)> = list_memories(conn, workspace_id)?
+        .into_iter()
+        .filter_map(|m| {
+            let emb = m.embedding.as_ref()?;
+            let floats = bytes_to_floats(emb);
+            Some((m, cosine_similarity(query_embedding, &floats)))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(limit);
+    Ok(scored)
+}
+
+fn memory_from_row(r: &Row<'_>) -> rusqlite::Result<Memory> {
+    Ok(Memory {
+        id: r.get(0)?,
+        workspace_id: r.get(1)?,
+        key: r.get(2)?,
+        content: r.get(3)?,
+        embedding: r.get(4)?,
+        created_at: r.get(5)?,
+        updated_at: r.get(6)?,
+    })
+}
+
+/// Serialize `f32`s as little-endian bytes so embeddings round-trip losslessly.
+pub fn floats_to_bytes(floats: &[f32]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(floats.len() * 4);
+    for f in floats {
+        buf.extend_from_slice(&f.to_le_bytes());
+    }
+    buf
+}
+
+pub fn bytes_to_floats(bytes: &[u8]) -> Vec<f32> {
+    // shortcut: ignore a trailing partial f32 (corrupt/old data), don't panic.
+    let n = bytes.len() / 4;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut b = [0u8; 4];
+        b.copy_from_slice(&bytes[i * 4..i * 4 + 4]);
+        out.push(f32::from_le_bytes(b));
+    }
+    out
+}
+
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let na = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na * nb)
+}

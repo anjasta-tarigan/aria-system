@@ -326,3 +326,16 @@ pub struct MessageHit {
     pub snippet: String,
     pub created_at: i64,
 }
+
+/// A persisted memory, scoped to a workspace or global (workspace_id NULL).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Memory {
+    pub id: String,
+    pub workspace_id: Option<String>,
+    pub key: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<u8>>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}

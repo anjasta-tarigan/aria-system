@@ -383,6 +383,45 @@ button.icon:hover {
   font-size: var(--fs-sm);
 }
 
+.memory-list {
+  list-style: none;
+  margin: var(--sp-2) 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.memory-list > li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "key del" "content del";
+  gap: 0 var(--sp-2);
+  align-items: start;
+  padding: var(--sp-2);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.memory-key {
+  grid-area: key;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.memory-content {
+  grid-area: content;
+  white-space: pre-wrap;
+  font-size: var(--fs-sm);
+}
+
+.memory-list > li > button.icon {
+  grid-area: del;
+}
+
 .ws-hint {
   margin: 0 0 var(--sp-1);
   padding: 0 var(--sp-2);

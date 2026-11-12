@@ -102,6 +102,8 @@ export interface Settings {
   model: string;
   caps: { max_turns: number; max_prompt_tokens: number };
   shell_timeout_secs: number;
+  embedding_base_url: string | null;
+  embedding_model: string | null;
 }
 
 export interface SettingsView {
@@ -175,9 +177,24 @@ export const api = {
     max_turns: number;
     max_prompt_tokens: number;
     shell_timeout_secs: number;
-    api_key: string | null;
+    embedding_base_url?: string | null;
+    embedding_model?: string | null;
+    api_key?: string | null;
   }) => invoke<SettingsView>("set_settings", { input }),
+  listMemories: (workspaceId?: string | null) =>
+    invoke<Memory[]>("list_memories", { workspaceId: workspaceId ?? null }),
+  deleteMemory: (id: string) => invoke<void>("delete_memory", { id }),
 };
+
+export interface Memory {
+  id: string;
+  workspace_id: string | null;
+  key: string;
+  content: string;
+  embedding: string | null;
+  created_at: number;
+  updated_at: number;
+}
 
 export function onRunEvent(cb: (envelope: RunEventEnvelope) => void): Promise<UnlistenFn> {
   return listen<RunEventEnvelope>("run-event", (e) => cb(e.payload));

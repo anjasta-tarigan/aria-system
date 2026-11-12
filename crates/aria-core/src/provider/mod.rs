@@ -183,6 +183,24 @@ pub trait Provider: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<TurnResult>> + Send + 'a>>;
 }
 
+/// Turns text into an embedding vector. Implemented by [`OpenAiProvider`]; absent
+/// for test fakes, in which case memory recall falls back to a textual listing.
+pub trait Embedder: Send + Sync {
+    fn embed<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<f32>>> + Send + 'a>>;
+}
+
+impl Embedder for OpenAiProvider {
+    fn embed<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<f32>>> + Send + 'a>> {
+        Box::pin(self.embed(text))
+    }
+}
+
 #[derive(Clone)]
 pub struct OpenAiProvider {
     client: reqwest::Client,
@@ -252,6 +270,55 @@ impl OpenAiProvider {
             body["tools"] = serde_json::Value::Array(tools);
         }
         body
+    }
+
+    /// Embeddings endpoint: per-`embedding_base_url` override or the chat base URL.
+    pub fn embedding_endpoint(&self) -> String {
+        let base = self
+            .settings
+            .embedding_base_url
+            .as_deref()
+            .unwrap_or(&self.settings.base_url)
+            .trim_end_matches('/');
+        format!("{base}/embeddings")
+    }
+
+    /// The configured embedding model, defaulting to `text-embedding-3-small`.
+    pub fn embedding_model(&self) -> &str {
+        self.settings
+            .embedding_model
+            .as_deref()
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or("text-embedding-3-small")
+    }
+
+    pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let body = serde_json::json!({
+            "input": text,
+            "model": self.embedding_model(),
+        });
+        let response = self
+            .client
+            .post(self.embedding_endpoint())
+            .bearer_auth(&self.api_key)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ProviderError::Status { status, body });
+        }
+        let value: serde_json::Value = response.json().await?;
+        let embedding = value
+            .get("data")
+            .and_then(|d| d.as_array())
+            .and_then(|d| d.first())
+            .and_then(|d| d.get("embedding"))
+            .and_then(|e| serde_json::from_value(e.clone()).ok())
+            .ok_or_else(|| ProviderError::Decode("missing embedding vector".into()))?;
+        Ok(embedding)
     }
 }
 

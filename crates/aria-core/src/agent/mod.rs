@@ -122,6 +122,17 @@ enum AnyProvider {
     Custom(Arc<dyn Provider>),
 }
 
+impl AnyProvider {
+    /// Embedding capability, when the provider supports it. Enables memory
+    /// recall to rank by similarity; `None` for test fakes.
+    fn embedder(&self) -> Option<Arc<dyn crate::provider::Embedder>> {
+        match self {
+            AnyProvider::OpenAi(p) => Some(Arc::new(p.clone())),
+            AnyProvider::Custom(_) => None,
+        }
+    }
+}
+
 /// Handle to a live Run: watch it, cancel it, answer its Approvals.
 #[derive(Clone)]
 pub struct RunHandle {
@@ -399,6 +410,7 @@ impl LoopCtx {
             db: Arc::clone(&self.db),
             blobs: Arc::clone(&self.blobs),
             shell_timeout_secs: self.shell_timeout_secs,
+            embed: self.provider.embedder(),
         };
         let has_folder = workspace.is_some();
 
@@ -722,17 +734,38 @@ impl LoopCtx {
         Ok(())
     }
 
+    /// A system-prompt suffix listing stored memories the model should keep in
+    /// mind, so it does not have to recall on every turn. Global memories always
+    /// accompany the folder's own, newest first.
+    fn memory_block(&self, workspace_id: Option<&str>) -> Result<String> {
+        let memories = self
+            .call(|c| db::list_memories(c, workspace_id))?
+            .into_iter()
+            .take(20)
+            .map(|m| format!("- [{}] {}", m.key, m.content))
+            .collect::<Vec<_>>();
+        Ok(if memories.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nStored memories:\n{}", memories.join("\n"))
+        })
+    }
+
     /// System prompt plus the conversation so far, with each Turn's Tool Calls
     /// (as the assistant asked them) and Tool Results (as the tools returned).
     fn request_messages(&self, run: &Run, has_folder: bool) -> Result<Vec<ChatMessage>> {
+        let conversation = self.call(|c| db::get_conversation(c, &run.conversation_id))?;
+        let memory_block = self.memory_block(conversation.workspace_id.as_deref())?;
+
         let prompt = format!(
-            "{}\n\n{}",
+            "{}\n\n{}{}",
             tools::SYSTEM_PROMPT,
             if has_folder {
                 tools::FOLDER_PROMPT
             } else {
                 tools::NO_FOLDER_PROMPT
-            }
+            },
+            memory_block,
         );
         let mut messages = vec![ChatMessage::system(prompt)];
         let history = self.call(|c| db::list_messages(c, &run.conversation_id))?;

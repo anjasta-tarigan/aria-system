@@ -143,6 +143,10 @@ pub struct SettingsInput {
     pub max_turns: u32,
     pub max_prompt_tokens: u64,
     pub shell_timeout_secs: u64,
+    /// Optional OpenAI-compatible embeddings endpoint override.
+    pub embedding_base_url: Option<String>,
+    /// Optional embeddings model id; defaults to `text-embedding-3-small`.
+    pub embedding_model: Option<String>,
     /// Only present when the user replaces the key.
     pub api_key: Option<String>,
 }
@@ -587,6 +591,29 @@ fn search_messages(
         .map_err(err)
 }
 
+/// Stored memories for a conversation: its workspace's memories plus the global
+/// set. A `None` workspace id lists only global memories.
+#[tauri::command]
+fn list_memories(
+    state: State<'_, App>,
+    workspace_id: Option<String>,
+) -> CmdResult<Vec<db::Memory>> {
+    state
+        .inner
+        .db
+        .call(|conn| db::list_memories(conn, workspace_id.as_deref()))
+        .map_err(err)
+}
+
+#[tauri::command]
+fn delete_memory(state: State<'_, App>, id: String) -> CmdResult<()> {
+    state
+        .inner
+        .db
+        .call(|conn| db::delete_memory(conn, &id))
+        .map_err(err)
+}
+
 #[tauri::command]
 fn get_settings(state: State<'_, App>) -> CmdResult<SettingsView> {
     let config = &state.inner.config;
@@ -609,6 +636,14 @@ fn set_settings(state: State<'_, App>, input: SettingsInput) -> CmdResult<Settin
             max_prompt_tokens: input.max_prompt_tokens.max(1),
         },
         shell_timeout_secs: input.shell_timeout_secs.max(1),
+        embedding_base_url: input
+            .embedding_base_url
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        embedding_model: input
+            .embedding_model
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
     };
     if settings.model.is_empty() {
         return Err("a model name is required".into());
@@ -700,6 +735,8 @@ pub fn run() {
             search_messages,
             get_settings,
             set_settings,
+            list_memories,
+            delete_memory,
         ])
         .run(tauri::generate_context!())
         .expect("error while running aria");

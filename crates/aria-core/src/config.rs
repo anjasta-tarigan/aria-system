@@ -61,6 +61,8 @@ pub struct Settings {
     pub model: String,
     pub caps: Caps,
     pub shell_timeout_secs: u64,
+    pub embedding_base_url: Option<String>,
+    pub embedding_model: Option<String>,
 }
 
 impl Default for Settings {
@@ -70,6 +72,8 @@ impl Default for Settings {
             model: String::new(),
             caps: Caps::default(),
             shell_timeout_secs: 120,
+            embedding_base_url: None,
+            embedding_model: None,
         }
     }
 }

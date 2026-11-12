@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use super::{DbError, Result};
 
 /// Maximum schema version understood by this build.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// A handle to the application database.
 ///
@@ -102,6 +102,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if current < 3 {
         migrate_v3(conn)?;
+    }
+    if current < 4 {
+        migrate_v4(conn)?;
     }
     Ok(())
 }
@@ -278,5 +281,25 @@ fn migrate_v3(conn: &Connection) -> Result<()> {
         "ALTER TABLE workspaces ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;",
     )?;
     conn.pragma_update(None, "user_version", 3)?;
+    Ok(())
+}
+
+/// Version 4: persistent memory. `workspace_id` NULL means global memory shared
+/// across every workspace.
+fn migrate_v4(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE memories (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+            key          TEXT NOT NULL,
+            content      TEXT NOT NULL,
+            embedding    BLOB,
+            created_at   INTEGER NOT NULL,
+            updated_at   INTEGER NOT NULL
+        );
+        CREATE INDEX memories_by_workspace ON memories(workspace_id, updated_at DESC);
+        CREATE INDEX memories_by_key ON memories(key);",
+    )?;
+    conn.pragma_update(None, "user_version", 4)?;
     Ok(())
 }

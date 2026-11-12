@@ -30,6 +30,7 @@ fn fx() -> Fx {
         db: Arc::clone(&db),
         blobs: Arc::new(Blobs::new(blob_dir.path(), Arc::clone(&db))),
         shell_timeout_secs: 10,
+        embed: None,
     };
     Fx {
         _ws: ws,
@@ -54,7 +55,7 @@ async fn call(f: &Fx, tool: &str, args: serde_json::Value) -> ToolOutcome {
 #[test]
 fn registry_advertises_ten_tools_with_classes() {
     let specs = ToolRegistry::describe(true);
-    assert_eq!(specs.len(), 10);
+    assert_eq!(specs.len(), 12);
     assert_eq!(specs.len(), tools::TOOLS.len());
     assert_eq!(tools::approval_class(tools::READ_FILE), Some(ApprovalClass::Read));
     assert_eq!(tools::approval_class(tools::RUN_SHELL), Some(ApprovalClass::Exec));
@@ -366,7 +367,10 @@ fn summary_shows_exact_content_for_edits_and_commands() {
 async fn without_a_folder_only_filesystem_free_tools_are_offered() {
     let specs = ToolRegistry::describe(false);
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(names, vec![tools::WEB_FETCH, tools::TODOS]);
+    assert_eq!(
+        names,
+        vec![tools::WEB_FETCH, tools::TODOS, tools::REMEMBER, tools::RECALL]
+    );
 
     // The folder tools are not advertised, but asking for one is recoverable.
     let ws = tempfile::tempdir().unwrap();
@@ -380,6 +384,7 @@ async fn without_a_folder_only_filesystem_free_tools_are_offered() {
         db: Arc::clone(&db),
         blobs: Arc::new(Blobs::new(ws.path(), db)),
         shell_timeout_secs: 10,
+        embed: None,
     };
 
     let cases = [

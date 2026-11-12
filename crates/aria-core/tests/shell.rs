@@ -31,6 +31,7 @@ fn fx() -> Fx {
         db: Arc::clone(&db),
         blobs: Arc::new(Blobs::new(blob_dir.path(), Arc::clone(&db))),
         shell_timeout_secs: 10,
+        embed: None,
     };
     Fx { _ws: ws, ctx }
 }

@@ -82,10 +82,10 @@ fn migration_is_idempotent_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("aria.db");
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 3);
+    assert_eq!(db.schema_version().unwrap(), 4);
     drop(db);
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 3);
+    assert_eq!(db.schema_version().unwrap(), 4);
     let (_ws, conv) = seed(&db);
     db.call(|c| db::insert_message(c, &conv, None, Role::User, "persisted"))
         .unwrap();
@@ -200,7 +200,7 @@ fn migrating_v1_keeps_rows_and_allows_a_folderness_conversation() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 3);
+    assert_eq!(db.schema_version().unwrap(), 4);
     db.call(|c| {
         // Existing rows survived the rebuild, and FTS was not disturbed.
         let conv = db::get_conversation(c, "c1")?;
@@ -288,3 +288,102 @@ CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
     INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
 END;
 "#;
+
+// ----------------------------------------------------------------- memories
+
+#[test]
+fn migration_v4_creates_memories_table() {
+    let db = Db::open_in_memory().unwrap();
+    assert_eq!(db.schema_version().unwrap(), 4);
+    db.call(|c| {
+        c.execute_batch("INSERT INTO memories (id, key, content, created_at, updated_at)
+                         VALUES ('m1', 'k', 'v', 1, 1)")?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn memory_upsert_updates_existing_key() {
+    let db = Db::open_in_memory().unwrap();
+    let ws = db.call(|c| db::insert_workspace(c, "/tmp/ws")).unwrap().id;
+    let (a, b) = db
+        .call(|c| {
+            let m1 = db::insert_or_update_memory(c, Some(&ws), "project", "rust", None)?;
+            let m2 = db::insert_or_update_memory(c, Some(&ws), "project", "python", None)?;
+            Ok((m1, m2))
+        })
+        .unwrap();
+    // Same id reused: this is an upsert, not an insert.
+    assert_eq!(a.id, b.id);
+    assert_eq!(b.content, "python");
+    assert_eq!(db.call(|c| db::list_memories(c, Some(&ws))).unwrap().len(), 1);
+}
+
+#[test]
+fn memory_scope_is_workspace_plus_global() {
+    let db = Db::open_in_memory().unwrap();
+    let w1 = db.call(|c| db::insert_workspace(c, "/tmp/w1")).unwrap().id;
+    let w2 = db.call(|c| db::insert_workspace(c, "/tmp/w2")).unwrap().id;
+    db.call(|c| {
+        db::insert_or_update_memory(c, Some(&w1), "k1", "w1 only", None)?;
+        db::insert_or_update_memory(c, Some(&w2), "k2", "w2 only", None)?;
+        db::insert_or_update_memory(c, None, "kg", "global", None)?;
+        Ok(())
+    })
+    .unwrap();
+
+    let w1mem = db.call(|c| db::list_memories(c, Some(&w1))).unwrap();
+    assert_eq!(w1mem.len(), 2); // w1's own + the global one
+    assert!(w1mem.iter().any(|m| m.workspace_id.is_none()));
+
+    let global = db.call(|c| db::list_memories(c, None)).unwrap();
+    assert_eq!(global.len(), 1);
+    assert_eq!(global[0].key, "kg");
+
+    // Deleting a workspace-scoped memory leaves the global one untouched.
+    let id = w1mem
+        .iter()
+        .find(|m| m.workspace_id.as_deref() == Some(w1.as_str()))
+        .unwrap()
+        .id
+        .clone();
+    db.call(|c| db::delete_memory(c, &id)).unwrap();
+    assert_eq!(db.call(|c| db::list_memories(c, Some(&w1))).unwrap().len(), 1);
+}
+
+#[test]
+fn memory_delete_by_key_and_get() {
+    let db = Db::open_in_memory().unwrap();
+    let m = db
+        .call(|c| db::insert_or_update_memory(c, None, "k", "v", None))
+        .unwrap();
+    db.call(|c| db::delete_memory_by_key(c, None, "k")).unwrap();
+    assert!(db.call(|c| db::get_memory(c, &m.id)).is_err());
+}
+
+#[test]
+fn embedding_roundtrip_and_similarity_search() {
+    let db = Db::open_in_memory().unwrap();
+    let ws = db.call(|c| db::insert_workspace(c, "/tmp/ws")).unwrap().id;
+    let emb = db::floats_to_bytes(&[1.0, 0.0, 0.0]);
+    let emb2 = db::floats_to_bytes(&[0.0, 1.0, 0.0]);
+    db.call(|c| {
+        db::insert_or_update_memory(c, Some(&ws), "close", "a", Some(&emb))?;
+        db::insert_or_update_memory(c, Some(&ws), "orth", "b", Some(&emb2))?;
+        db::insert_or_update_memory(c, Some(&ws), "noemb", "c", None)?;
+        Ok(())
+    })
+    .unwrap();
+
+    let q = db::floats_to_bytes(&[1.0, 0.0, 0.0]);
+    let floats = db::bytes_to_floats(&q);
+    let hits = db
+        .call(|c| db::search_memories_by_embedding(c, Some(&ws), &floats, 10))
+        .unwrap();
+    // The no-embedding one is excluded; "close" ranks first.
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].0.key, "close");
+    assert!((hits[0].1 - 1.0).abs() < 1e-6);
+    assert!(hits[1].1 < hits[0].1);
+}

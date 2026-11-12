@@ -11,12 +11,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::{ApprovalClass, Db, ToolCallState};
 use crate::journal::Blobs;
-use crate::provider::ToolSpec;
+use crate::provider::{Embedder, ToolSpec};
 use crate::workspace::WorkspaceRoot;
 
 mod files;
 mod fetch;
 mod shell;
+mod memories;
 
 pub use fetch::{FetchOutcome, classify_ip, fetch_url};
 pub use shell::{ShellArgs, ShellOutcome, run_shell};
@@ -76,6 +77,9 @@ pub struct ToolContext {
     pub db: Arc<Db>,
     pub blobs: Arc<Blobs>,
     pub shell_timeout_secs: u64,
+    /// Embedding capability, when the provider supports it. Enables similarity
+    /// recall; absent for test fakes, which then fall back to recency.
+    pub embed: Option<Arc<dyn Embedder>>,
 }
 
 impl ToolContext {
@@ -103,9 +107,11 @@ pub const MOVE_FILE: &str = "move_file";
 pub const RUN_SHELL: &str = "run_shell";
 pub const WEB_FETCH: &str = "web_fetch";
 pub const TODOS: &str = "todos";
+pub const REMEMBER: &str = "remember";
+pub const RECALL: &str = "recall";
 
 /// The tool set with its approval classes.
-pub const TOOLS: [(&str, ApprovalClass); 10] = [
+pub const TOOLS: [(&str, ApprovalClass); 12] = [
     (READ_FILE, ApprovalClass::Read),
     (LIST_DIR, ApprovalClass::Read),
     (SEARCH_FILES, ApprovalClass::Read),
@@ -116,6 +122,8 @@ pub const TOOLS: [(&str, ApprovalClass); 10] = [
     (RUN_SHELL, ApprovalClass::Exec),
     (WEB_FETCH, ApprovalClass::Network),
     (TODOS, ApprovalClass::Read),
+    (REMEMBER, ApprovalClass::Read),
+    (RECALL, ApprovalClass::Read),
 ];
 
 pub const SYSTEM_PROMPT: &str = "\
@@ -126,6 +134,10 @@ Rules:
 - Changes to files, shell commands and web fetches need the user's approval;
   if an approval is denied, explain and propose an alternative.
 - Keep the todo list current for multi-step work.
+- Use `remember` to persist durable facts the user shares (preferences, names,
+  project context) so you can recall them in later conversations. Use `recall`
+  when a past fact would help answer. Stored memories are global unless a folder
+  is open, in which case they are scoped to that folder plus the global set.
 - Report what you changed and how you verified it.";
 
 /// Appended when the conversation has a folder open.
@@ -285,11 +297,37 @@ impl ToolRegistry {
                     "required": ["items"]
                 }),
             ),
+            spec(
+                REMEMBER,
+                "Store a durable fact under a key for later recall. Pass an empty \
+                 content to forget it. Global unless a folder is open, then scoped \
+                 to the folder plus the global set.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "key": { "type": "string", "description": "Stable label, e.g. user_name" },
+                        "content": { "type": "string", "description": "The fact to retain" }
+                    },
+                    "required": ["key", "content"]
+                }),
+            ),
+            spec(
+                RECALL,
+                "List stored memories, ranked by similarity to `query` when given. \
+                 Returns the folder's memories plus global ones.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Optional relevance query" },
+                        "limit": { "type": "integer", "minimum": 1, "default": 10 }
+                    }
+                }),
+            ),
         ];
         if has_folder {
             return all;
         }
-        let usable = [WEB_FETCH, TODOS];
+        let usable = [WEB_FETCH, TODOS, REMEMBER, RECALL];
         all.into_iter()
             .filter(|s| usable.contains(&s.name.as_str()))
             .collect()
@@ -318,6 +356,8 @@ impl ToolRegistry {
             RUN_SHELL => shell::run_shell(ctx, parse_args(args)?, None).await.map(outcome),
             WEB_FETCH => fetch::web_fetch(parse_args(args)?).await.map(outcome),
             TODOS => files::todos(ctx, parse_args(args)?).map(outcome),
+            REMEMBER => memories::remember(ctx, parse_args(args)?).await.map(outcome),
+            RECALL => memories::recall(ctx, parse_args(args)?).await.map(outcome),
             other => Err(ToolError::Args(format!("unknown tool {other}"))),
         }
     }
@@ -397,6 +437,7 @@ pub fn context_for(
         db,
         blobs,
         shell_timeout_secs: 120,
+        embed: None,
     })
 }
 
