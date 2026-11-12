@@ -572,6 +572,9 @@ export function mockListen(
 
 /** Seed a main session (and a sample folder conversation) for the demo page. */
 export function seed(): void {
+  // HMR re-boots call this again; keep the existing mock state instead of
+  // stacking duplicate conversations in the sidebar.
+  if (conversations.size > 0) return;
   const main = handlers.new_conversation({}) as ConversationView;
   const d = conversations.get(main.id);
   if (d) {

@@ -19,6 +19,7 @@
   --fs-base: 14px;
   --fs-md: 15px;
   --fs-lg: 18px;
+  --fs-xl: 24px;
 
   /* Spacing scale */
   --sp-1: 4px;
@@ -50,6 +51,7 @@ body,
 body {
   background: var(--bg);
   color: var(--text);
+  line-height: 1.5;
 }
 
 button {
@@ -548,10 +550,7 @@ button.icon:hover {
 }
 
 .msg {
-  /* The message block keeps a definite width so code blocks and tables can use
-     all of it, while prose inside gets a narrower measure (see
-     .msg-body.markdown p) so justified text stays readable. */
-  max-width: 860px;
+  /* Replies use most of the chat column; the width is set per role below. */
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
@@ -559,6 +558,7 @@ button.icon:hover {
 
 .msg.user {
   align-self: flex-end;
+  max-width: 70%;
   background: #1e2a3d;
   padding: var(--sp-2) var(--sp-3);
   border-radius: 10px;
@@ -566,9 +566,10 @@ button.icon:hover {
 
 .msg.assistant {
   align-self: flex-start;
-  /* Stretch to the message's full width instead of shrink-wrapping to the
-     narrowest child, so code blocks and tables can use the whole 860px. */
-  width: 860px;
+  /* Fill ~70% of the chat column so replies reach toward the right edge
+     instead of stopping near the middle on wide windows. The 720px floor keeps
+     replies readable when the window is narrow. */
+  width: max(70%, 720px);
   max-width: 100%;
 }
 
@@ -590,7 +591,7 @@ button.icon:hover {
 
 .msg-body {
   white-space: pre-wrap;
-  line-height: 1.55;
+  line-height: 1.6;
   /* Fill the message so block children (code, tables) can use the full width. */
   width: 100%;
 }
@@ -598,71 +599,73 @@ button.icon:hover {
 /* Rendered markdown inside a message. The base stays pre-wrap so plain lines
    wrap, but block elements get their own flow and inline code keeps its own
    background so it reads as code without the surrounding line wrapping it. */
-.msg-body.markdown > :first-child {
-  margin-top: 0;
-}
-.msg-body.markdown > :last-child {
-  margin-bottom: 0;
-}
 /* The base .msg-body is pre-wrap (for verbatim user text); inside the rendered
    markdown, collapse it so the newlines remark-rehype emits between block nodes
    (including between <li>s) don't become visible blank lines. */
 .msg-body.markdown {
   white-space: normal;
+  /* Break long URLs and identifiers instead of letting them overflow the
+     message box or force huge gaps in justified lines. */
+  overflow-wrap: anywhere;
 }
-.msg-body.markdown p {
-  margin: 0 0 var(--sp-2);
-  /* Justified prose with a bounded measure: ~75 characters, so the extra
-     spacing justification adds stays small. */
-  max-width: 68ch;
+/* Prose fills the message block so justified lines reach the block's edge. */
+.msg-body.markdown p,
+.msg-body.markdown ul,
+.msg-body.markdown ol,
+.msg-body.markdown blockquote {
+  margin: 0 0 var(--sp-3);
+}
+.msg-body.markdown p,
+.msg-body.markdown li,
+.msg-body.markdown blockquote {
   text-align: justify;
   hyphens: auto;
 }
-/* Headings, lists and quotes sit on the full width; only flowing prose is
-   justified and measured. */
 .msg-body.markdown h1,
 .msg-body.markdown h2,
 .msg-body.markdown h3,
 .msg-body.markdown h4,
-.msg-body.markdown ul,
-.msg-body.markdown ol,
-.msg-body.markdown blockquote {
-  text-align: left;
-  max-width: 100%;
-}
-.msg-body.markdown h1,
-.msg-body.markdown h2,
-.msg-body.markdown h3,
-.msg-body.markdown h4 {
-  margin: var(--sp-3) 0 var(--sp-2);
+.msg-body.markdown h5,
+.msg-body.markdown h6 {
+  margin: var(--sp-4) 0 var(--sp-2);
   line-height: 1.3;
   font-weight: 600;
 }
 .msg-body.markdown h1 {
-  font-size: 1.35em;
+  font-size: 1.4em;
 }
 .msg-body.markdown h2 {
-  font-size: 1.2em;
+  font-size: 1.25em;
 }
 .msg-body.markdown h3 {
-  font-size: 1.08em;
+  font-size: 1.1em;
+}
+.msg-body.markdown h4 {
+  font-size: 1em;
+}
+.msg-body.markdown h5,
+.msg-body.markdown h6 {
+  font-size: 0.95em;
+  color: var(--muted);
 }
 .msg-body.markdown ul,
 .msg-body.markdown ol {
-  margin: 0 0 var(--sp-2);
   padding-left: var(--sp-4);
   /* Normal whitespace so the newlines remark-rehype emits between <li>s don't
      render as blank lines; flex would also break ::marker placement. */
   white-space: normal;
 }
 .msg-body.markdown li {
-  margin: 0 0 2px;
+  margin: 0 0 var(--sp-1);
+}
+.msg-body.markdown li > ul,
+.msg-body.markdown li > ol {
+  margin: var(--sp-1) 0 0;
 }
 .msg-body.markdown li::marker {
   color: var(--muted);
 }
 .msg-body.markdown blockquote {
-  margin: 0 0 var(--sp-2);
   padding: 2px var(--sp-3);
   border-left: 3px solid var(--line);
   color: var(--muted);
@@ -670,6 +673,9 @@ button.icon:hover {
 .msg-body.markdown a {
   color: var(--accent);
   text-decoration: none;
+  /* Long URLs may break mid-string rather than forcing a line of stretched
+     word gaps around them. */
+  word-break: break-all;
 }
 .msg-body.markdown a:hover {
   text-decoration: underline;
@@ -679,25 +685,28 @@ button.icon:hover {
   border-top: 1px solid var(--line);
   margin: var(--sp-3) 0;
 }
-/* Inline code: keep the pre-wrap flow but give it a chip of background. */
+/* Inline code: a compact chip that does not inflate the line box. */
 .msg-body.markdown code {
   font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
-  font-size: 0.9em;
+  font-size: 0.875em;
   background: var(--code-bg);
   border: 1px solid var(--line);
   border-radius: 4px;
-  padding: 0.5px 5px;
+  padding: 0.1em 0.35em;
 }
 /* Fenced code blocks: full-width, scrollable, no inline chip padding.
-   Left-aligned — justification would stretch code across the line. */
+   Lines stay unwrapped so indentation survives; scroll horizontally instead. */
 .msg-body.markdown pre {
-  margin: 0 0 var(--sp-2);
+  margin: 0 0 var(--sp-3);
   padding: var(--sp-2) var(--sp-3);
   background: var(--code-bg);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   overflow-x: auto;
   text-align: left;
+  white-space: pre;
+  word-break: normal;
+  line-height: 1.5;
 }
 .msg-body.markdown pre code {
   background: none;
@@ -706,15 +715,11 @@ button.icon:hover {
   font-size: var(--fs-sm);
   text-align: left;
 }
-/* KaTeX output is positioned glyph-by-glyph; justifying it breaks layout. */
-.msg-body.markdown .katex,
-.msg-body.markdown .katex-display {
-  text-align: left;
-}
 .msg-body.markdown table {
-  margin: 0 0 var(--sp-2);
+  margin: 0 0 var(--sp-3);
   border-collapse: collapse;
-  width: 100%;
+  width: auto;
+  max-width: 100%;
   font-size: var(--fs-sm);
 }
 .msg-body.markdown th,
@@ -742,6 +747,15 @@ button.icon:hover {
 .msg-body.markdown li.task-list-item input {
   width: auto;
   margin: 0;
+  padding: 0;
+}
+/* Trim the outer edges last, so the block margins above don't leak into the
+   first/last line of a message. */
+.msg-body.markdown > :first-child {
+  margin-top: 0;
+}
+.msg-body.markdown > :last-child {
+  margin-bottom: 0;
 }
 
 .muted {
@@ -947,7 +961,11 @@ pre {
 
 .welcome h1 {
   margin: 0;
-  font-size: 26px;
+  font-size: var(--fs-xl);
+}
+
+.welcome p {
+  margin: 0;
 }
 
 .chips {
@@ -1042,6 +1060,15 @@ button.send {
   align-items: center;
 }
 
+.empty h1 {
+  margin: 0;
+  font-size: var(--fs-xl);
+}
+
+.empty p {
+  margin: 0;
+}
+
 .todos {
   width: 250px;
   border-left: 1px solid var(--line);
@@ -1059,8 +1086,17 @@ button.send {
   gap: var(--sp-2);
 }
 
+.todos li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-1);
+}
+
 .todos li.done {
   color: var(--muted);
+}
+
+.todos li.done .todo-text {
   text-decoration: line-through;
 }
 

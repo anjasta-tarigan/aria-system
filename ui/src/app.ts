@@ -134,6 +134,11 @@ const ui: Ui = {
 
 const root = document.querySelector<HTMLElement>("#app")!;
 
+/// Live subscription to Run events, kept so HMR can tear the app down cleanly.
+let unsubscribe: (() => void) | null = null;
+/// Set by stop(); stale async work must not paint over the new instance.
+let disposed = false;
+
 function activeRun(): Run | null {
   return ui.detail?.conversation.run ?? null;
 }
@@ -145,6 +150,7 @@ function isBusy(run: Run | null): boolean {
 // -------------------------------------------------------------------- render
 
 function render() {
+  if (disposed) return;
   const detail = ui.detail;
   const previous = document.querySelector<HTMLElement>(".transcript");
   const previousTop = previous?.scrollTop ?? 0;
@@ -880,7 +886,7 @@ function streamingNode(): HTMLElement | null {
   if (!ui.streaming) return null;
   const else_ =
     ui.streaming.text.length > 0
-      ? h("div", { class: "msg-body", html: renderMarkdown(ui.streaming.text) })
+      ? h("div", { class: "msg-body markdown", html: renderMarkdown(ui.streaming.text) })
       : h("div", { class: "msg-body muted" }, "Thinking…");
   return h("article", { class: "msg assistant streaming" }, else_);
 }
@@ -992,7 +998,12 @@ function todoPanel(detail: ConversationDetail): HTMLElement {
           "ul",
           {},
           ...todos.map((t) =>
-            h("li", { class: t.done ? "done" : "" }, t.done ? "☑ " : "☐ ", t.text),
+            h(
+              "li",
+              { class: t.done ? "done" : "" },
+              h("span", { class: "todo-mark", "aria-hidden": "true" }, t.done ? "☑" : "☐"),
+              h("span", { class: "todo-text" }, t.text),
+            ),
           ),
         )
       : h("p", { class: "muted" }, "No plan yet."),
@@ -1222,6 +1233,7 @@ function settingsModal(view: SettingsView): HTMLElement {
 // ------------------------------------------------------------------- events
 
 function applyRunEvent(runId: string, event: RunEvent) {
+  if (disposed) return;
   const detail = ui.detail;
   const run = detail?.conversation.run;
   const current = run?.id === runId;
@@ -1297,9 +1309,18 @@ async function reloadTranscript() {
 
 // --------------------------------------------------------------------- boot
 
-export async function start() {
+export async function start(initialId?: string) {
+  disposed = false;
+  unsubscribe?.();
+  unsubscribe = null;
   // Tauri hands listeners the whole event (`{ payload }`), so unwrap it.
-  await call.listen(({ payload }) => applyRunEvent(payload.run_id, payload.event));
+  const unsub = await call.listen(({ payload }) => applyRunEvent(payload.run_id, payload.event));
+  // stop() may have run while listen() was in flight.
+  if (disposed) {
+    unsub();
+    return;
+  }
+  unsubscribe = unsub;
   await refreshConversations();
   // The default main session is the conversation with no folder. Create one on
   // first launch so the user can talk immediately; afterwards reuse the one we
@@ -1308,7 +1329,20 @@ export async function start() {
     const main = await call.invoke<ConversationView>("new_conversation");
     ui.conversations = [main];
   }
-  await selectConversation(ui.conversations[0].id);
+  // An HMR re-boot keeps the chat the reader was looking at, if it still exists.
+  const target =
+    initialId && ui.conversations.some((c) => c.id === initialId)
+      ? initialId
+      : ui.conversations[0].id;
+  await selectConversation(target);
+}
+
+/// Tear down the live Run subscription before an HMR re-boot. The DOM is left
+/// in place so the next instance can swap it without a blank frame.
+export function stop() {
+  disposed = true;
+  unsubscribe?.();
+  unsubscribe = null;
 }
 
 export type { ApprovalClass, PendingApproval };
