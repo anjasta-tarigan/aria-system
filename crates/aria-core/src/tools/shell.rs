@@ -55,11 +55,12 @@ pub async fn execute(
     timeout: Duration,
     progress: Option<mpsc::UnboundedSender<String>>,
 ) -> Result<ShellOutcome> {
+    let (root, _) = ctx.folder()?;
     let mut command = Command::new("sh");
     command
         .arg("-c")
         .arg(cmd)
-        .current_dir(ctx.root.root())
+        .current_dir(root.root())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

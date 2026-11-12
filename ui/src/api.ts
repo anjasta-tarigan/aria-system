@@ -58,9 +58,10 @@ export interface MessageView {
 
 export interface ConversationView {
   id: string;
-  workspace_id: string;
+  /// `null` for the main session, which has no folder attached.
+  workspace_id: string | null;
   title: string;
-  root_path: string;
+  root_path: string | null;
   created_at: number;
   updated_at: number;
   run: Run | null;
@@ -132,6 +133,9 @@ export interface RunEventEnvelope {
 export const api = {
   openWorkspace: (rootPath: string) =>
     invoke<ConversationView>("open_workspace", { rootPath }),
+  newConversation: () => invoke<ConversationView>("new_conversation"),
+  attachWorkspace: (conversationId: string, rootPath: string) =>
+    invoke<ConversationView>("attach_workspace", { conversationId, rootPath }),
   listConversations: () => invoke<ConversationView[]>("list_conversations"),
   getConversation: (conversationId: string) =>
     invoke<ConversationDetail>("get_conversation", { conversationId }),

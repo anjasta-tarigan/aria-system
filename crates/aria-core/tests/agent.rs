@@ -123,7 +123,7 @@ fn fixture() -> Fx {
         .unwrap()
         .id;
     let conversation_id = db
-        .call(|c| db::insert_conversation(c, &workspace_id, "test"))
+        .call(|c| db::insert_conversation(c, Some(&workspace_id), "test"))
         .unwrap()
         .id;
     Fx {

@@ -98,9 +98,10 @@ pub struct MessageView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationView {
     pub id: String,
-    pub workspace_id: String,
+    /// `None` for the main session, which has no folder attached.
+    pub workspace_id: Option<String>,
     pub title: String,
-    pub root_path: String,
+    pub root_path: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub run: Option<Run>,
@@ -147,15 +148,20 @@ pub struct SettingsInput {
 // ------------------------------------------------------------------ assembly
 
 fn conversation_view(db: &Db, c: db::Conversation) -> CmdResult<ConversationView> {
-    let ws = db
-        .call(|conn| db::get_workspace(conn, &c.workspace_id))
-        .map_err(err)?;
+    let root_path = match &c.workspace_id {
+        Some(id) => Some(
+            db.call(|conn| db::get_workspace(conn, id))
+                .map_err(err)?
+                .root_path,
+        ),
+        None => None,
+    };
     let run = db.call(|conn| db::latest_run(conn, &c.id)).map_err(err)?;
     Ok(ConversationView {
         id: c.id,
         workspace_id: c.workspace_id,
         title: c.title,
-        root_path: ws.root_path,
+        root_path,
         created_at: c.created_at,
         updated_at: c.updated_at,
         run,
@@ -283,44 +289,85 @@ async fn open_workspace(
     state: State<'_, App>,
     root_path: String,
 ) -> CmdResult<ConversationView> {
-    let root = PathBuf::from(&root_path);
-    if !root.is_dir() {
-        return Err(format!("{root_path} is not a directory"));
-    }
-    // A Workspace must be inside its own root, and so must its conversations.
-    WorkspaceRoot::new(&root).map_err(err)?;
+    let root = validate_folder(&root_path)?;
 
     let db = Arc::clone(&state.inner.db);
     tokio::task::spawn_blocking(move || {
-        let (ws, conv) = db
+        let conv = db
             .call(|conn| {
-                let ws = match db::find_workspace_by_root(conn, &root_path)? {
-                    Some(ws) => ws,
-                    None => db::insert_workspace(conn, &root_path)?,
-                };
+                let ws = find_or_insert_workspace(conn, &root_path)?;
                 // Reuse the newest conversation for this Workspace rather than
                 // making a new one each time it is opened.
                 let existing = db::list_conversations(conn)?
                     .into_iter()
-                    .find(|c| c.workspace_id == ws.id);
-                let conv = match existing {
-                    Some(c) => c,
+                    .find(|c| c.workspace_id.as_deref() == Some(ws.as_str()));
+                match existing {
+                    Some(c) => Ok(c),
                     None => {
                         let title = root
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| root_path.clone());
-                        db::insert_conversation(conn, &ws.id, &title)?
+                        db::insert_conversation(conn, Some(&ws), &title)
                     }
-                };
-                Ok((ws, conv))
+                }
             })
             .map_err(err)?;
-        let _ = ws;
         conversation_view(&db, conv)
     })
     .await
     .map_err(err)?
+}
+
+/// Start an empty conversation with no folder: the main session.
+#[tauri::command]
+fn new_conversation(state: State<'_, App>) -> CmdResult<ConversationView> {
+    let db = &state.inner.db;
+    let conv = db
+        .call(|conn| db::insert_conversation(conn, None, ""))
+        .map_err(err)?;
+    conversation_view(db, conv)
+}
+
+/// Attach a folder to an existing conversation, keeping its history.
+#[tauri::command]
+async fn attach_workspace(
+    state: State<'_, App>,
+    conversation_id: String,
+    root_path: String,
+) -> CmdResult<ConversationView> {
+    validate_folder(&root_path)?;
+
+    let db = Arc::clone(&state.inner.db);
+    tokio::task::spawn_blocking(move || {
+        let conv = db
+            .call(|conn| {
+                let ws = find_or_insert_workspace(conn, &root_path)?;
+                db::set_conversation_workspace(conn, &conversation_id, Some(&ws))?;
+                db::get_conversation(conn, &conversation_id)
+            })
+            .map_err(err)?;
+        conversation_view(&db, conv)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// A folder is only usable if it is a directory and can be contained.
+fn validate_folder(root_path: &str) -> CmdResult<PathBuf> {
+    let root = PathBuf::from(root_path);
+    if !root.is_dir() {
+        return Err(format!("{root_path} is not a directory"));
+    }
+    WorkspaceRoot::new(&root).map_err(err)?;
+    Ok(root)
+}
+
+fn find_or_insert_workspace(conn: &aria_core::db::Connection, root_path: &str) -> db::Result<String> {
+    Ok(match db::find_workspace_by_root(conn, root_path)? {
+        Some(ws) => ws.id,
+        None => db::insert_workspace(conn, root_path)?.id,
+    })
 }
 
 #[tauri::command]
@@ -414,7 +461,14 @@ fn undo(state: State<'_, App>, workspace_id: String, path: String) -> CmdResult<
 }
 
 #[tauri::command]
-fn changed_files(state: State<'_, App>, workspace_id: String) -> CmdResult<Vec<ChangedFile>> {
+fn changed_files(
+    state: State<'_, App>,
+    workspace_id: Option<String>,
+) -> CmdResult<Vec<ChangedFile>> {
+    // A conversation with no folder has no journal, so nothing has changed.
+    let Some(workspace_id) = workspace_id else {
+        return Ok(Vec::new());
+    };
     let blobs = &state.inner.blobs;
     Ok(blobs
         .changed_paths(&workspace_id)
@@ -534,6 +588,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             open_workspace,
+            new_conversation,
+            attach_workspace,
             list_conversations,
             get_conversation,
             send_message,

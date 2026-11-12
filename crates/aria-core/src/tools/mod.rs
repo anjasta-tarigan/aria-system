@@ -63,16 +63,35 @@ impl ToolOutcome {
     }
 }
 
-/// Everything a Tool needs to act in one workspace for one run.
+/// Everything a Tool needs to act for one run.
+///
+/// `root` and `workspace_id` are `None` in the main session, which has no
+/// folder: only the tools that never touch the filesystem are advertised, and
+/// the rest refuse cleanly if the model asks for them anyway.
 #[derive(Clone)]
 pub struct ToolContext {
-    pub root: WorkspaceRoot,
-    pub workspace_id: String,
+    pub root: Option<WorkspaceRoot>,
+    pub workspace_id: Option<String>,
     pub run_id: String,
     pub db: Arc<Db>,
     pub blobs: Arc<Blobs>,
     pub shell_timeout_secs: u64,
 }
+
+impl ToolContext {
+    /// The folder Tools act in, or a recoverable refusal when there is none.
+    pub fn folder(&self) -> Result<(&WorkspaceRoot, &str)> {
+        match (&self.root, &self.workspace_id) {
+            (Some(root), Some(id)) => Ok((root, id)),
+            _ => Err(ToolError::Refused(NO_FOLDER.to_string())),
+        }
+    }
+}
+
+/// Error text for a file Tool called in a conversation with no folder open.
+pub const NO_FOLDER: &str =
+    "No folder is open in this conversation. Ask the user to choose one, or answer \
+     without file access.";
 
 pub const READ_FILE: &str = "read_file";
 pub const LIST_DIR: &str = "list_dir";
@@ -100,17 +119,30 @@ pub const TOOLS: [(&str, ApprovalClass); 10] = [
 ];
 
 pub const SYSTEM_PROMPT: &str = "\
-You are Aria, a coding and file assistant working inside one project folder.
+You are Aria, a desktop assistant. You help with everyday conversation and, when
+a folder is open, with work on the files inside it.
 
 Rules:
-- All paths are relative to the project root. Never try to leave it.
-- Prefer search_files and read_file before editing.
-- edit_file replaces an exact substring that must occur exactly once; include
-  enough context to make it unique. Use write_file only for new files.
 - Changes to files, shell commands and web fetches need the user's approval;
   if an approval is denied, explain and propose an alternative.
 - Keep the todo list current for multi-step work.
 - Report what you changed and how you verified it.";
+
+/// Appended when the conversation has a folder open.
+pub const FOLDER_PROMPT: &str = "\
+A folder is open in this conversation. Its tools act on that folder.
+
+- All paths are relative to the folder root. Never try to leave it.
+- Prefer search_files and read_file before editing.
+- edit_file replaces an exact substring that must occur exactly once; include
+  enough context to make it unique. Use write_file only for new files.";
+
+/// Appended when no folder is open, so the model does not promise file work it
+/// cannot do.
+pub const NO_FOLDER_PROMPT: &str = "\
+No folder is open in this conversation, so you have no files or shell. Answer
+questions and fetch web pages. If the user asks for work on files, offer to
+open a folder from the conversation header and let them pick one.";
 
 pub fn approval_class(tool: &str) -> Option<ApprovalClass> {
     TOOLS
@@ -123,8 +155,10 @@ pub fn approval_class(tool: &str) -> Option<ApprovalClass> {
 pub struct ToolRegistry;
 
 impl ToolRegistry {
-    pub fn describe() -> Vec<ToolSpec> {
-        vec![
+    /// The tools to advertise. Without a folder only the filesystem-free ones
+    /// are offered, so the model is never told about tools it cannot use.
+    pub fn describe(has_folder: bool) -> Vec<ToolSpec> {
+        let all = vec![
             spec(
                 READ_FILE,
                 "Read a UTF-8 text file from the project. Returns at most `max_bytes`.",
@@ -251,7 +285,14 @@ impl ToolRegistry {
                     "required": ["items"]
                 }),
             ),
-        ]
+        ];
+        if has_folder {
+            return all;
+        }
+        let usable = [WEB_FETCH, TODOS];
+        all.into_iter()
+            .filter(|s| usable.contains(&s.name.as_str()))
+            .collect()
     }
 
     /// Run one tool. Every failure is a [`ToolOutcome`] marked as an error, never
@@ -264,6 +305,8 @@ impl ToolRegistry {
     }
 
     async fn try_execute(tool: &str, args: &str, ctx: &ToolContext) -> Result<ToolOutcome> {
+        // Filesystem tools refuse rather than panic when no folder is open;
+        // they are not advertised in that case, but the model may still ask.
         match tool {
             READ_FILE => files::read_file(ctx, parse_args(args)?).map(outcome),
             LIST_DIR => files::list_dir(ctx, parse_args(args)?).map(outcome),
@@ -348,8 +391,8 @@ pub fn context_for(
     run_id: &str,
 ) -> Result<ToolContext> {
     Ok(ToolContext {
-        root: WorkspaceRoot::new(root)?,
-        workspace_id: workspace_id.to_string(),
+        root: Some(WorkspaceRoot::new(root)?),
+        workspace_id: Some(workspace_id.to_string()),
         run_id: run_id.to_string(),
         db,
         blobs,

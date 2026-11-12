@@ -217,7 +217,7 @@ mod tests {
         let root = dir.path().display().to_string();
         let workspace_id = db.call(|c| db::insert_workspace(c, &root)).unwrap().id;
         let conversation_id = db
-            .call(|c| db::insert_conversation(c, &workspace_id, "toy"))
+            .call(|c| db::insert_conversation(c, Some(&workspace_id), "toy"))
             .unwrap()
             .id;
         let blobs = Arc::new(Blobs::new(data.path().join("blobs"), Arc::clone(&db)));

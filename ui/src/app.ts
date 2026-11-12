@@ -103,6 +103,8 @@ interface Ui {
   jumpTo: string | null;
   /// Pending-approval count at the last render, to notice one appearing.
   pendingCount: number;
+  /// Tool-call ids whose cards have been expanded by the user.
+  expanded: Set<string>;
 }
 
 const ui: Ui = {
@@ -117,6 +119,7 @@ const ui: Ui = {
   settings: null,
   jumpTo: null,
   pendingCount: 0,
+  expanded: new Set(),
 };
 
 const root = document.querySelector<HTMLElement>("#app")!;
@@ -141,7 +144,7 @@ function render() {
     { class: "app" },
     sidebar(),
     h("main", { class: "pane" }, detail ? conversationPane(detail) : emptyPane()),
-    detail && isBusy(detail.conversation.run) ? todoPanel(detail) : h("div"),
+    detail && isBusy(detail.conversation.run) ? todoPanel(detail) : null,
   );
   root.replaceChildren(
     shell,
@@ -166,19 +169,38 @@ function render() {
 }
 
 function sidebar(): HTMLElement {
+  // The folderless main session is pinned first.
+  const ordered = [...ui.conversations].sort((a, b) => {
+    const am = a.workspace_id ? 1 : 0;
+    const bm = b.workspace_id ? 1 : 0;
+    return am - bm;
+  });
+
   const list = h(
     "div",
     { class: "conv-list" },
-    ...ui.conversations.map((c) =>
+    ...ordered.map((c) =>
       h(
         "button",
         {
-          class: `conv${ui.detail?.conversation.id === c.id ? " active" : ""}`,
-          title: c.root_path,
+          class: `conv${ui.detail?.conversation.id === c.id ? " active" : ""}${c.workspace_id ? "" : " main"}`,
+          title: c.root_path ?? "Available everywhere",
           onclick: () => void selectConversation(c.id),
         },
-        h("span", { class: "conv-title" }, c.title),
-        h("span", { class: "conv-meta" }, c.run ? stateLabel[c.run.state] : "New"),
+        h(
+          "span",
+          { class: "conv-title" },
+          c.workspace_id ? c.title : `✦ ${c.title}`,
+        ),
+        h(
+          "span",
+          { class: "conv-meta" },
+          c.run
+            ? stateLabel[c.run.state]
+            : c.workspace_id
+              ? "Folder"
+              : "Everywhere",
+        ),
       ),
     ),
   );
@@ -201,6 +223,10 @@ function sidebar(): HTMLElement {
       )
     : null;
 
+  const emptySearch = ui.search.length === 0 && lastSearchNonEmpty
+    ? h("p", { class: "muted small search-empty" }, "No matches")
+    : null;
+
   return h(
     "aside",
     { class: "sidebar" },
@@ -215,14 +241,6 @@ function sidebar(): HTMLElement {
       ),
     ),
     h(
-      "button",
-      {
-        class: "primary",
-        onclick: () => void chooseFolder(),
-      },
-      "Open folder…",
-    ),
-    h(
       "input",
       {
         class: "search",
@@ -232,7 +250,17 @@ function sidebar(): HTMLElement {
       },
     ),
     searchResults,
-    h("div", { class: "section-title" }, "Conversations"),
+    emptySearch,
+    h(
+      "div",
+      { class: "section-row" },
+      h("span", { class: "section-title" }, "Chats"),
+      h(
+        "button",
+        { class: "icon", title: "Open a folder", onclick: () => void chooseFolder() },
+        "+",
+      ),
+    ),
     list,
   );
 }
@@ -241,30 +269,77 @@ function emptyPane(): HTMLElement {
   return h(
     "div",
     { class: "empty" },
-    h("h1", {}, "Pick a folder to work in"),
+    h("h1", {}, "Hi, I'm Aria"),
     h(
       "p",
       {},
-      "Aria reads, edits and runs commands inside one folder, asking before it changes anything.",
+      "Ask me anything, or open a folder to let me work on the files inside it.",
     ),
-    h("button", { class: "primary", onclick: () => void chooseFolder() }, "Open folder…"),
+    h("button", { class: "ghost", onclick: () => void chooseFolder() }, "📁 Work in a folder…"),
+  );
+}
+
+/// Greeting shown inside a conversation that has no messages yet.
+function welcomeNode(): HTMLElement {
+  const chip = (text: string) =>
+    h(
+      "button",
+      {
+        class: "chip",
+        onclick: () => {
+          const input = document.querySelector<HTMLTextAreaElement>(".composer-input");
+          if (input) {
+            input.value = text;
+            void send();
+          }
+        },
+      },
+      text,
+    );
+  return h(
+    "div",
+    { class: "welcome" },
+    h("h1", {}, "Hi, I'm Aria"),
+    h(
+      "p",
+      {},
+      "Ask me anything — explain something, draft an email, or plan a task. " +
+        "When you want me to work on files, open a folder from the header.",
+    ),
+    h(
+      "div",
+      { class: "chips" },
+      chip("Explain this error message"),
+      chip("Draft a short email about…"),
+      chip("Summarize the pros and cons of…"),
+    ),
   );
 }
 
 function conversationPane(detail: ConversationDetail): HTMLElement {
-  const run = detail.conversation.run;
+  const conv = detail.conversation;
+  const run = conv.run;
   const busy = isBusy(run);
   const pending = detail.pending;
+  const hasFolder = !!conv.workspace_id;
+
+  const folderSlot = hasFolder
+    ? h("span", { class: "path", title: conv.root_path ?? "" }, conv.root_path)
+    : h(
+        "span",
+        { class: "path no-folder" },
+        "No folder · ",
+        h(
+          "button",
+          { class: "link", onclick: () => void attachFolder(conv.id) },
+          "Choose one…",
+        ),
+      );
 
   const header = h(
     "header",
     { class: "conv-header" },
-    h(
-      "div",
-      {},
-      h("h2", {}, detail.conversation.title),
-      h("span", { class: "path" }, detail.conversation.root_path),
-    ),
+    h("div", {}, h("h2", {}, conv.title), folderSlot),
     run ? h("span", { class: `badge ${run.state}` }, stateLabel[run.state]) : null,
     run?.state === "cancelled" || run?.state === "errored"
       ? h("span", { class: "error-text" }, run.error ?? run.stop_reason ?? "")
@@ -277,14 +352,14 @@ function conversationPane(detail: ConversationDetail): HTMLElement {
 
   const transcript = h(
     "div",
-    { class: "transcript" },
+    { class: "transcript", role: "log", "aria-live": "polite" },
+    ...(detail.messages.length === 0 && !busy ? [welcomeNode()] : []),
     ...detail.messages.map((m) => messageNode(m)),
     streamingNode(),
     ...pending.map(approvalNode),
-    ui.notice ? h("div", { class: "notice" }, ui.notice) : null,
   );
 
-  const composer = composerNode(busy);
+  const composer = composerNode(busy, hasFolder);
 
   return h(
     "section",
@@ -315,6 +390,21 @@ function conversationPane(detail: ConversationDetail): HTMLElement {
         )
       : null,
     composer,
+    ui.notice
+      ? h(
+          "div",
+          { class: "notice" },
+          h("span", {}, ui.notice),
+          h(
+            "button",
+            { class: "icon notice-close", title: "Dismiss", onclick: () => {
+              ui.notice = null;
+              render();
+            } },
+            "×",
+          ),
+        )
+      : null,
   );
 }
 
@@ -334,6 +424,28 @@ function messageNode(m: MessageView): HTMLElement {
   );
 }
 
+/// One-line summary of a tool call, shown when its card is collapsed.
+function toolSummary(call: ToolCall): string {
+  const a = args(call);
+  const s = (k: string) => String(a[k] ?? "");
+  switch (call.tool) {
+    case "edit_file":
+    case "write_file":
+    case "delete_file":
+    case "read_file":
+    case "list_dir":
+      return `${call.tool}  ${s("path")}`;
+    case "search_files":
+      return `search_files  ${s("pattern")}`;
+    case "move_file":
+      return `move_file  ${s("from")} → ${s("to")}`;
+    case "run_shell":
+      return `run_shell  ${s("cmd")}`;
+    default:
+      return call.tool;
+  }
+}
+
 function toolCard(call: ToolCall): HTMLElement {
   const a = args(call);
   const output = ui.toolOutput[call.id];
@@ -345,19 +457,52 @@ function toolCard(call: ToolCall): HTMLElement {
         : call.is_error
           ? "error"
           : "done";
+  const expanded = ui.expanded.has(call.id);
+  const detail = expanded
+    ? [
+        h("pre", { class: "tool-args" }, JSON.stringify(a, null, 2)),
+        output?.length ? h("pre", { class: "tool-output" }, output.join("\n")) : null,
+        call.result
+          ? h("pre", { class: `tool-result ${call.is_error ? "bad" : ""}` }, call.result)
+          : null,
+      ]
+    : [];
+  // Collapsed cards keep only one line of output so the transcript stays calm.
+  const collapsedOutput =
+    !expanded && output?.length
+      ? h("pre", { class: "tool-output short" }, output.join("\n"))
+      : null;
+
   return h(
     "div",
-    { class: `tool ${state}`, id: `msg-${call.id}` },
+    {
+      class: `tool ${state}${expanded ? " open" : ""}`,
+      id: `msg-${call.id}`,
+      role: "button",
+      tabindex: "0",
+      onclick: () => {
+        if (expanded) ui.expanded.delete(call.id);
+        else ui.expanded.add(call.id);
+        render();
+      },
+      onkeydown: (e: KeyboardEvent) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          if (expanded) ui.expanded.delete(call.id);
+          else ui.expanded.add(call.id);
+          render();
+        }
+      },
+    },
     h(
       "div",
       { class: "tool-head" },
-      h("code", { class: "tool-name" }, call.tool),
-      h("span", { class: `pill class-${call.approval_class}` }, call.approval_class),
+      h("span", { class: `dot ${state}` }),
+      h("code", { class: "tool-name" }, toolSummary(call)),
       h("span", { class: "pill state" }, state),
     ),
-    h("pre", { class: "tool-args" }, JSON.stringify(a, null, 2)),
-    output?.length ? h("pre", { class: "tool-output" }, output.join("\n")) : null,
-    call.result ? h("pre", { class: `tool-result ${call.is_error ? "bad" : ""}` }, call.result) : null,
+    collapsedOutput,
+    ...detail,
   );
 }
 
@@ -398,8 +543,14 @@ function approvalNode(p: PendingApproval): HTMLElement {
     h(
       "div",
       { class: "approval-head" },
-      h("strong", {}, p.summary.title),
-      h("span", { class: `pill class-${p.class}` }, p.class),
+      h("span", { class: "warn-icon", "aria-hidden": "true" }, "⚠"),
+      h(
+        "span",
+        { class: "approval-title" },
+        "Aria wants to ",
+        h("strong", {}, p.summary.title),
+      ),
+      h("span", { class: `pill class-${p.class}`, title: `${p.class} action` }, p.class),
     ),
     body,
     h(
@@ -419,17 +570,27 @@ function approvalNode(p: PendingApproval): HTMLElement {
   );
 }
 
-function composerNode(busy: boolean): HTMLElement {
+function composerNode(busy: boolean, hasFolder: boolean): HTMLElement {
   const input = h("textarea", {
     class: "composer-input",
-    rows: "2",
-    placeholder: busy ? "Aria is working…" : "Ask Aria to do something in this folder",
+    rows: "1",
+    placeholder: busy
+      ? "Aria is working…"
+      : hasFolder
+        ? "Ask Aria about this folder"
+        : "Message Aria",
     disabled: busy,
+    oninput: (e: Event) => {
+      const t = e.target as HTMLTextAreaElement;
+      t.style.height = "auto";
+      t.style.height = `${Math.min(t.scrollHeight, 160)}px`;
+    },
     onkeydown: (e: KeyboardEvent) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         void send();
       }
+      if (e.key === "Escape") (e.target as HTMLElement).blur();
     },
   });
   input.dataset.role = "composer";
@@ -439,7 +600,12 @@ function composerNode(busy: boolean): HTMLElement {
     input,
     h(
       "button",
-      { class: "primary", disabled: busy, onclick: () => void send() },
+      {
+        class: "primary send",
+        disabled: busy,
+        title: "Send (Enter)",
+        onclick: () => void send(),
+      },
       "Send",
     ),
   );
@@ -512,6 +678,19 @@ async function chooseFolder() {
   await selectConversation(conv.id);
 }
 
+/// Attach a folder to an existing conversation, keeping its history (this is how
+/// the main session gains a workspace).
+async function attachFolder(conversationId: string) {
+  const picked = await openDialog({ directory: true, multiple: false });
+  if (typeof picked !== "string") return;
+  const conv = await call.invoke<ConversationView>("attach_workspace", {
+    conversationId,
+    rootPath: picked,
+  });
+  await refreshConversations();
+  await selectConversation(conv.id);
+}
+
 async function send() {
   const detail = ui.detail;
   const input = document.querySelector<HTMLTextAreaElement>(".composer-input");
@@ -573,16 +752,20 @@ async function undo(path: string) {
 }
 
 let searchTimer: number | undefined;
+let lastSearchNonEmpty = false;
 async function runSearch(query: string) {
+  const trimmed = query.trim();
   window.clearTimeout(searchTimer);
-  if (!query.trim()) {
+  if (!trimmed) {
     ui.search = [];
+    lastSearchNonEmpty = false;
     render();
     return;
   }
+  lastSearchNonEmpty = true;
   searchTimer = window.setTimeout(async () => {
     ui.search = await call.invoke<MessageHit[]>("search_messages", {
-      query: query.trim(),
+      query: trimmed,
       conversationId: null,
     });
     render();
@@ -761,9 +944,14 @@ export async function start() {
   // Tauri hands listeners the whole event (`{ payload }`), so unwrap it.
   await call.listen(({ payload }) => applyRunEvent(payload.run_id, payload.event));
   await refreshConversations();
-  render();
-  // Closing the window does not stop a Run: the Rust loop is detached and owns
-  // the state, and this boot path rebuilds the view from the database.
+  // The default main session is the conversation with no folder. Create one on
+  // first launch so the user can talk immediately; afterwards reuse the one we
+  // already have.
+  if (ui.conversations.length === 0) {
+    const main = await call.invoke<ConversationView>("new_conversation");
+    ui.conversations = [main];
+  }
+  await selectConversation(ui.conversations[0].id);
 }
 
 export type { ApprovalClass, PendingApproval };
@@ -779,4 +967,12 @@ export const testHooks = {
     await send();
   },
   answer,
+  attachWorkspace: async (rootPath: string) => {
+    const conv = await call.invoke<ConversationView>("attach_workspace", {
+      conversationId: ui.detail!.conversation.id,
+      rootPath,
+    });
+    await refreshConversations();
+    await selectConversation(conv.id);
+  },
 };

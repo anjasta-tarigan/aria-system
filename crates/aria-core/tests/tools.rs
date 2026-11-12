@@ -21,11 +21,11 @@ fn fx() -> Fx {
         .call(|c| db::insert_workspace(c, &ws.path().display().to_string()))
         .unwrap()
         .id;
-    let conv = db.call(|c| db::insert_conversation(c, &ws_id, "")).unwrap();
+    let conv = db.call(|c| db::insert_conversation(c, Some(&ws_id), "")).unwrap();
     let run = db.call(|c| db::insert_run(c, &conv.id)).unwrap();
     let ctx = ToolContext {
-        root: WorkspaceRoot::new(ws.path()).unwrap(),
-        workspace_id: ws_id,
+        root: Some(WorkspaceRoot::new(ws.path()).unwrap()),
+        workspace_id: Some(ws_id),
         run_id: run.id,
         db: Arc::clone(&db),
         blobs: Arc::new(Blobs::new(blob_dir.path(), Arc::clone(&db))),
@@ -40,7 +40,7 @@ fn fx() -> Fx {
 }
 
 fn write(f: &Fx, rel: &str, content: &str) {
-    let p = f.ctx.root.root().join(rel);
+    let p = f.ctx.root.as_ref().unwrap().root().join(rel);
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent).unwrap();
     }
@@ -53,7 +53,7 @@ async fn call(f: &Fx, tool: &str, args: serde_json::Value) -> ToolOutcome {
 
 #[test]
 fn registry_advertises_ten_tools_with_classes() {
-    let specs = ToolRegistry::describe();
+    let specs = ToolRegistry::describe(true);
     assert_eq!(specs.len(), 10);
     assert_eq!(specs.len(), tools::TOOLS.len());
     assert_eq!(tools::approval_class(tools::READ_FILE), Some(ApprovalClass::Read));
@@ -89,7 +89,7 @@ async fn read_file_success_and_errors() {
     assert!(dir.is_error);
 
     write(&f, "bin.dat", "\u{0}\u{1}");
-    std::fs::write(f.ctx.root.root().join("bin.dat"), [0xff, 0xfe]).unwrap();
+    std::fs::write(f.ctx.root.as_ref().unwrap().root().join("bin.dat"), [0xff, 0xfe]).unwrap();
     let binary = call(&f, "read_file", serde_json::json!({"path": "bin.dat"})).await;
     assert!(binary.is_error);
     assert!(binary.text.contains("UTF-8"));
@@ -114,7 +114,7 @@ async fn list_dir_orders_dirs_first() {
     let f = fx();
     write(&f, "z.txt", "1");
     write(&f, "a.txt", "22");
-    std::fs::create_dir(f.ctx.root.root().join("sub")).unwrap();
+    std::fs::create_dir(f.ctx.root.as_ref().unwrap().root().join("sub")).unwrap();
     let out = call(&f, "list_dir", serde_json::json!({})).await;
     let lines: Vec<_> = out.text.lines().collect();
     assert_eq!(lines[0], "sub/");
@@ -175,17 +175,17 @@ async fn edit_file_exactly_once() {
     .await;
     assert!(!ok.is_error, "{}", ok.text);
     assert_eq!(
-        std::fs::read_to_string(f.ctx.root.root().join("c.txt")).unwrap(),
+        std::fs::read_to_string(f.ctx.root.as_ref().unwrap().root().join("c.txt")).unwrap(),
         "alpha BETA alpha"
     );
 
     // The edit was journaled, so it can be undone.
     f.ctx
         .blobs
-        .undo(&f.ctx.workspace_id, &f.ctx.root, "c.txt")
+        .undo(f.ctx.workspace_id.as_deref().unwrap(), f.ctx.root.as_ref().unwrap(), "c.txt")
         .unwrap();
     assert_eq!(
-        std::fs::read_to_string(f.ctx.root.root().join("c.txt")).unwrap(),
+        std::fs::read_to_string(f.ctx.root.as_ref().unwrap().root().join("c.txt")).unwrap(),
         "alpha beta alpha"
     );
 }
@@ -195,7 +195,7 @@ async fn edit_file_refuses_symlink_escape() {
     let f = fx();
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
-    std::os::unix::fs::symlink(outside.path().join("secret.txt"), f.ctx.root.root().join("link"))
+    std::os::unix::fs::symlink(outside.path().join("secret.txt"), f.ctx.root.as_ref().unwrap().root().join("link"))
         .unwrap();
     let out = call(
         &f,
@@ -251,16 +251,16 @@ async fn delete_and_move_are_journaled() {
     assert!(!moved.is_error, "{}", moved.text);
     let deleted = call(&f, "delete_file", serde_json::json!({"path": "e.txt"})).await;
     assert!(!deleted.is_error, "{}", deleted.text);
-    assert!(!f.ctx.root.root().join("e.txt").exists());
+    assert!(!f.ctx.root.as_ref().unwrap().root().join("e.txt").exists());
 
-    f.ctx.blobs.undo(&f.ctx.workspace_id, &f.ctx.root, "e.txt").unwrap();
+    f.ctx.blobs.undo(f.ctx.workspace_id.as_deref().unwrap(), f.ctx.root.as_ref().unwrap(), "e.txt").unwrap();
     assert_eq!(
-        std::fs::read_to_string(f.ctx.root.root().join("e.txt")).unwrap(),
+        std::fs::read_to_string(f.ctx.root.as_ref().unwrap().root().join("e.txt")).unwrap(),
         "data"
     );
-    f.ctx.blobs.undo(&f.ctx.workspace_id, &f.ctx.root, "d.txt").unwrap();
+    f.ctx.blobs.undo(f.ctx.workspace_id.as_deref().unwrap(), f.ctx.root.as_ref().unwrap(), "d.txt").unwrap();
     assert_eq!(
-        std::fs::read_to_string(f.ctx.root.root().join("d.txt")).unwrap(),
+        std::fs::read_to_string(f.ctx.root.as_ref().unwrap().root().join("d.txt")).unwrap(),
         "data"
     );
 }
@@ -360,4 +360,47 @@ fn summary_shows_exact_content_for_edits_and_commands() {
     assert!(s.body.contains("old code") && s.body.contains("new code"));
     let s = tools::summarize("run_shell", &serde_json::json!({"cmd": "rm -rf build"}).to_string());
     assert_eq!(s.body, "rm -rf build");
+}
+
+#[tokio::test]
+async fn without_a_folder_only_filesystem_free_tools_are_offered() {
+    let specs = ToolRegistry::describe(false);
+    let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, vec![tools::WEB_FETCH, tools::TODOS]);
+
+    // The folder tools are not advertised, but asking for one is recoverable.
+    let ws = tempfile::tempdir().unwrap();
+    let db = Arc::new(Db::open_in_memory().unwrap());
+    let conv = db.call(|c| db::insert_conversation(c, None, "main")).unwrap();
+    let run = db.call(|c| db::insert_run(c, &conv.id)).unwrap();
+    let ctx = ToolContext {
+        root: None,
+        workspace_id: None,
+        run_id: run.id,
+        db: Arc::clone(&db),
+        blobs: Arc::new(Blobs::new(ws.path(), db)),
+        shell_timeout_secs: 10,
+    };
+
+    let cases = [
+        (tools::READ_FILE, r#"{"path":"x"}"#),
+        (tools::LIST_DIR, r#"{}"#),
+        (tools::EDIT_FILE, r#"{"path":"x","search":"a","replace":"b"}"#),
+        (tools::RUN_SHELL, r#"{"cmd":"true"}"#),
+    ];
+    for (tool, args) in cases {
+        let outcome = ToolRegistry::execute(tool, args, &ctx).await;
+        assert!(outcome.is_error, "{tool} should refuse");
+        assert!(outcome.text.contains("No folder"), "{tool}: {}", outcome.text);
+    }
+
+    // The todo list still works, since it never touches the filesystem.
+    let outcome = ToolRegistry::execute(
+        tools::TODOS,
+        r#"{"items":[{"text":"say hi"}]}"#,
+        &ctx,
+    )
+    .await;
+    assert!(!outcome.is_error, "{}", outcome.text);
+    assert!(outcome.text.contains("say hi"));
 }

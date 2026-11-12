@@ -9,6 +9,7 @@ mod schema;
 
 pub use models::*;
 pub use repo::*;
+pub use rusqlite::Connection;
 pub use schema::Db;
 
 

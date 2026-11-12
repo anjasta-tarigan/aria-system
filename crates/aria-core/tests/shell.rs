@@ -20,13 +20,13 @@ fn fx() -> Fx {
         .call(|c| db::insert_workspace(c, &ws.path().display().to_string()))
         .unwrap()
         .id;
-    let conv = db.call(|c| db::insert_conversation(c, &ws_id, "")).unwrap();
+    let conv = db.call(|c| db::insert_conversation(c, Some(&ws_id), "")).unwrap();
     let run = db.call(|c| db::insert_run(c, &conv.id)).unwrap();
     // Leak the blob dir so it lives as long as the context.
     let blob_dir = Box::leak(Box::new(blob_dir));
     let ctx = ToolContext {
-        root: WorkspaceRoot::new(ws.path()).unwrap(),
-        workspace_id: ws_id,
+        root: Some(WorkspaceRoot::new(ws.path()).unwrap()),
+        workspace_id: Some(ws_id),
         run_id: run.id,
         db: Arc::clone(&db),
         blobs: Arc::new(Blobs::new(blob_dir.path(), Arc::clone(&db))),
@@ -71,7 +71,7 @@ async fn success_exit_is_reported_and_not_an_error() {
 #[tokio::test]
 async fn runs_in_workspace_root() {
     let f = fx();
-    std::fs::write(f.ctx.root.root().join("marker.txt"), "x").unwrap();
+    std::fs::write(f.ctx.root.as_ref().unwrap().root().join("marker.txt"), "x").unwrap();
     let out = shell(&f, "ls").await;
     assert!(out.contains("marker.txt"), "{out}");
 }

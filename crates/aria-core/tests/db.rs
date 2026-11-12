@@ -4,7 +4,7 @@ use aria_core::db::ApprovalClass;
 fn seed(db: &Db) -> (String, String) {
     db.call(|c| {
         let ws = db::insert_workspace(c, "/tmp/ws")?;
-        let conv = db::insert_conversation(c, &ws.id, "test")?;
+        let conv = db::insert_conversation(c, Some(&ws.id), "test")?;
         Ok((ws.id, conv.id))
     })
     .unwrap()
@@ -65,7 +65,7 @@ fn fts_scoped_to_conversation() {
     let db = Db::open_in_memory().unwrap();
     let (ws, a) = seed(&db);
     let b = db
-        .call(|c| db::insert_conversation(c, &ws, "second"))
+        .call(|c| db::insert_conversation(c, Some(&ws), "second"))
         .unwrap();
     db.call(|c| {
         db::insert_message(c, &a, None, Role::User, "shared needle")?;
@@ -82,10 +82,10 @@ fn migration_is_idempotent_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("aria.db");
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 1);
+    assert_eq!(db.schema_version().unwrap(), 2);
     drop(db);
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 1);
+    assert_eq!(db.schema_version().unwrap(), 2);
     let (_ws, conv) = seed(&db);
     db.call(|c| db::insert_message(c, &conv, None, Role::User, "persisted"))
         .unwrap();
@@ -179,3 +179,78 @@ fn todos_replace_and_order() {
     })
     .unwrap();
 }
+
+#[test]
+fn migrating_v1_keeps_rows_and_allows_a_folderness_conversation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("aria.db");
+    // Build a v1 database by hand, with a workspace, conversation and message,
+    // then let `Db::open` upgrade it.
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(V1_MINIMAL).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute_batch(
+            "INSERT INTO workspaces VALUES ('w1', '/tmp/w1', 1);
+             INSERT INTO conversations VALUES ('c1', 'w1', 'old', 1, 1);
+             INSERT INTO messages (id, conversation_id, role, content, created_at)
+                 VALUES ('m1', 'c1', 'user', 'legacy needle', 1);",
+        )
+        .unwrap();
+    }
+
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.schema_version().unwrap(), 2);
+    db.call(|c| {
+        // Existing rows survived the rebuild, and FTS was not disturbed.
+        let conv = db::get_conversation(c, "c1")?;
+        assert_eq!(conv.workspace_id.as_deref(), Some("w1"));
+        assert_eq!(db::search_messages(c, "needle", None, 10)?.len(), 1);
+
+        // A folderness conversation is now insertable.
+        let lonely = db::insert_conversation(c, None, "main")?;
+        assert!(lonely.workspace_id.is_none());
+        db::set_conversation_workspace(c, &lonely.id, Some("w1"))?;
+        assert_eq!(
+            db::get_conversation(c, &lonely.id)?.workspace_id.as_deref(),
+            Some("w1")
+        );
+        db::set_conversation_workspace(c, &lonely.id, None)?;
+        assert!(db::get_conversation(c, &lonely.id)?.workspace_id.is_none());
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// Just enough of schema v1 for the upgrade test: the tables the migration
+/// touches, plus the FTS index over `messages` so we can prove it survives.
+const V1_MINIMAL: &str = r#"
+CREATE TABLE workspaces (
+    id          TEXT PRIMARY KEY,
+    root_path   TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+CREATE TABLE conversations (
+    id            TEXT PRIMARY KEY,
+    workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    title         TEXT NOT NULL DEFAULT '',
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL
+);
+CREATE INDEX conversations_by_workspace ON conversations(workspace_id, updated_at DESC);
+CREATE TABLE messages (
+    id              TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    run_id          TEXT,
+    role            TEXT NOT NULL,
+    content         TEXT NOT NULL DEFAULT '',
+    created_at      INTEGER NOT NULL
+);
+CREATE VIRTUAL TABLE messages_fts USING fts5(
+    content, content='messages', content_rowid='rowid',
+    tokenize='unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+"#;

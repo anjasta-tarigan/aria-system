@@ -18,7 +18,8 @@ pub struct ReadFileArgs {
 }
 
 pub fn read_file(ctx: &ToolContext, args: ReadFileArgs) -> Result<String> {
-    let resolved = ctx.root.resolve_read(&args.path)?;
+    let (root, _) = ctx.folder()?;
+    let resolved = root.resolve_read(&args.path)?;
     if resolved.is_dir() {
         return Err(ToolError::Args(format!("{} is a directory", args.path)));
     }
@@ -40,7 +41,8 @@ fn dot() -> String {
 }
 
 pub fn list_dir(ctx: &ToolContext, args: ListDirArgs) -> Result<String> {
-    let resolved = ctx.root.resolve_read(&args.path)?;
+    let (root, _) = ctx.folder()?;
+    let resolved = root.resolve_read(&args.path)?;
     if !resolved.is_dir() {
         return Err(ToolError::Args(format!("{} is not a directory", args.path)));
     }
@@ -76,6 +78,7 @@ pub struct SearchArgs {
 }
 
 pub fn search_files(ctx: &ToolContext, args: SearchArgs) -> Result<String> {
+    let (root, _) = ctx.folder()?;
     let re = regex::Regex::new(&args.pattern)
         .map_err(|e| ToolError::Args(format!("invalid regex: {e}")))?;
     let glob = match &args.glob {
@@ -89,7 +92,7 @@ pub fn search_files(ctx: &ToolContext, args: SearchArgs) -> Result<String> {
     let max = default_limit(args.max_results, 200);
 
     let mut hits = Vec::new();
-    let walker = ignore::WalkBuilder::new(ctx.root.root())
+    let walker = ignore::WalkBuilder::new(root.root())
         .standard_filters(true)
         .build();
     'outer: for entry in walker.flatten() {
@@ -97,7 +100,7 @@ pub fn search_files(ctx: &ToolContext, args: SearchArgs) -> Result<String> {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
-        let rel = path.strip_prefix(ctx.root.root()).unwrap_or(path);
+        let rel = path.strip_prefix(root.root()).unwrap_or(path);
         if let Some(m) = &glob
             && !m.is_match(rel)
         {
@@ -130,12 +133,13 @@ pub struct EditArgs {
 }
 
 pub fn edit_file(ctx: &ToolContext, args: EditArgs) -> Result<String> {
+    let (root, ws_id) = ctx.folder()?;
     if args.search.is_empty() {
         return Err(ToolError::Args("search text must not be empty".into()));
     }
-    let resolved = ctx.root.resolve_create(&args.path)?;
-    let rel = ctx.root.relativise(&resolved)?;
-    let current = Blobs::read_text(&ctx.root, &rel)?;
+    let resolved = root.resolve_create(&args.path)?;
+    let rel = root.relativise(&resolved)?;
+    let current = Blobs::read_text(root, &rel)?;
     let count = current.matches(&args.search).count();
     if count != 1 {
         return Err(ToolError::Args(format!(
@@ -145,7 +149,7 @@ pub fn edit_file(ctx: &ToolContext, args: EditArgs) -> Result<String> {
     }
     let updated = current.replacen(&args.search, &args.replace, 1);
     ctx.blobs
-        .write_file(&ctx.workspace_id, &ctx.root, &rel, &updated)?;
+        .write_file(ws_id, root, &rel, &updated)?;
     Ok(format!("edited {rel} (1 replacement)"))
 }
 
@@ -156,16 +160,17 @@ pub struct WriteFileArgs {
 }
 
 pub fn write_file(ctx: &ToolContext, args: WriteFileArgs) -> Result<String> {
-    let resolved = ctx.root.resolve_create(&args.path)?;
+    let (root, ws_id) = ctx.folder()?;
+    let resolved = root.resolve_create(&args.path)?;
     if resolved.exists() {
         return Err(ToolError::Args(format!(
             "{} already exists; use edit_file to change it",
             args.path
         )));
     }
-    let rel = ctx.root.relativise(&resolved)?;
+    let rel = root.relativise(&resolved)?;
     ctx.blobs
-        .write_file(&ctx.workspace_id, &ctx.root, &rel, &args.content)?;
+        .write_file(ws_id, root, &rel, &args.content)?;
     Ok(format!("created {rel} ({} bytes)", args.content.len()))
 }
 
@@ -175,12 +180,13 @@ pub struct PathArg {
 }
 
 pub fn delete_file(ctx: &ToolContext, args: PathArg) -> Result<String> {
-    let resolved = ctx.root.resolve_read(&args.path)?;
+    let (root, ws_id) = ctx.folder()?;
+    let resolved = root.resolve_read(&args.path)?;
     if resolved.is_dir() {
         return Err(ToolError::Args("delete_file only removes files".into()));
     }
-    let rel = ctx.root.relativise(&resolved)?;
-    ctx.blobs.delete_file(&ctx.workspace_id, &ctx.root, &rel)?;
+    let rel = root.relativise(&resolved)?;
+    ctx.blobs.delete_file(ws_id, root, &rel)?;
     Ok(format!("deleted {rel}"))
 }
 
@@ -191,18 +197,19 @@ pub struct MoveArgs {
 }
 
 pub fn move_file(ctx: &ToolContext, args: MoveArgs) -> Result<String> {
-    let from = ctx.root.resolve_read(&args.from)?;
+    let (root, ws_id) = ctx.folder()?;
+    let from = root.resolve_read(&args.from)?;
     if from.is_dir() {
         return Err(ToolError::Args("move_file only moves files".into()));
     }
-    let to = ctx.root.resolve_create(&args.to)?;
+    let to = root.resolve_create(&args.to)?;
     if to.exists() {
         return Err(ToolError::Args(format!("{} already exists", args.to)));
     }
-    let from_rel = ctx.root.relativise(&from)?;
-    let to_rel = ctx.root.relativise(&to)?;
+    let from_rel = root.relativise(&from)?;
+    let to_rel = root.relativise(&to)?;
     ctx.blobs
-        .move_file(&ctx.workspace_id, &ctx.root, &from_rel, &to_rel)?;
+        .move_file(ws_id, root, &from_rel, &to_rel)?;
     Ok(format!("moved {from_rel} -> {to_rel}"))
 }
 

@@ -384,15 +384,23 @@ impl LoopCtx {
     async fn drive(&mut self) -> Result<RunState> {
         let run = self.call(|c| db::get_run(c, &self.run_id))?;
         let conversation = self.call(|c| db::get_conversation(c, &run.conversation_id))?;
-        let workspace = self.call(|c| db::get_workspace(c, &conversation.workspace_id))?;
+        // The main session has no folder; only filesystem-free tools apply.
+        let workspace = match &conversation.workspace_id {
+            Some(id) => Some(self.call(|c| db::get_workspace(c, id))?),
+            None => None,
+        };
         let ctx = ToolContext {
-            root: WorkspaceRoot::new(&workspace.root_path)?,
-            workspace_id: workspace.id,
+            root: match &workspace {
+                Some(ws) => Some(WorkspaceRoot::new(&ws.root_path)?),
+                None => None,
+            },
+            workspace_id: workspace.as_ref().map(|ws| ws.id.clone()),
             run_id: self.run_id.clone(),
             db: Arc::clone(&self.db),
             blobs: Arc::clone(&self.blobs),
             shell_timeout_secs: self.shell_timeout_secs,
         };
+        let has_folder = workspace.is_some();
 
         loop {
             if self.handle.is_cancelled() {
@@ -422,7 +430,7 @@ impl LoopCtx {
                 });
             }
 
-            match self.next_turn(&run.conversation_id).await? {
+            match self.next_turn(&run.conversation_id, has_folder).await? {
                 TurnOutcome::Final => return self.finish(RunState::Finished, "no_tool_calls"),
                 TurnOutcome::ToolCalls => {}
                 TurnOutcome::Cancelled => return self.finish(RunState::Cancelled, "cancelled"),
@@ -581,7 +589,7 @@ impl LoopCtx {
     }
 
     /// Request one Turn and persist its outcome.
-    async fn next_turn(&mut self, conversation_id: &str) -> Result<TurnOutcome> {
+    async fn next_turn(&mut self, conversation_id: &str, has_folder: bool) -> Result<TurnOutcome> {
         let run = self.call(|c| db::get_run(c, &self.run_id))?;
         // Resuming resets the counters, so the next Turn's index continues
         // from the Turns already recorded rather than from `turn_count`.
@@ -591,8 +599,8 @@ impl LoopCtx {
             .max()
             .unwrap_or(0)
             .max(self.assistant_turns(&run)?);
-        let messages = self.request_messages(&run)?;
-        let specs = ToolRegistry::describe();
+        let messages = self.request_messages(&run, has_folder)?;
+        let specs = ToolRegistry::describe(has_folder);
         self.emit(RunEvent::TurnStarted { turn_index });
 
         let result = self.stream(&messages, &specs, turn_index).await?;
@@ -716,8 +724,17 @@ impl LoopCtx {
 
     /// System prompt plus the conversation so far, with each Turn's Tool Calls
     /// (as the assistant asked them) and Tool Results (as the tools returned).
-    fn request_messages(&self, run: &Run) -> Result<Vec<ChatMessage>> {
-        let mut messages = vec![ChatMessage::system(tools::SYSTEM_PROMPT)];
+    fn request_messages(&self, run: &Run, has_folder: bool) -> Result<Vec<ChatMessage>> {
+        let prompt = format!(
+            "{}\n\n{}",
+            tools::SYSTEM_PROMPT,
+            if has_folder {
+                tools::FOLDER_PROMPT
+            } else {
+                tools::NO_FOLDER_PROMPT
+            }
+        );
+        let mut messages = vec![ChatMessage::system(prompt)];
         let history = self.call(|c| db::list_messages(c, &run.conversation_id))?;
         let calls = self.call(|c| db::list_tool_calls(c, &self.run_id))?;
 

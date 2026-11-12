@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use super::{DbError, Result};
 
 /// Maximum schema version understood by this build.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// A handle to the application database.
 ///
@@ -93,11 +93,47 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if current < 1 {
         let tx = conn.unchecked_transaction()?;
-        tx.execute_batch(super::schema::V1)?;
+        tx.execute_batch(V1)?;
         tx.pragma_update(None, "user_version", 1)?;
         tx.commit()?;
     }
+    if current < 2 {
+        migrate_v2(conn)?;
+    }
     Ok(())
+}
+
+/// Version 2 makes `conversations.workspace_id` nullable so a conversation can
+/// exist without a folder — the default main session.
+///
+/// SQLite cannot drop `NOT NULL` in place, so `conversations` is rebuilt with
+/// the 12-step procedure. `messages` and `runs` hold FKs at it, so foreign key
+/// enforcement is off for the rebuild, which must happen outside the
+/// transaction (the pragma is a no-op inside one). `messages_fts` is
+/// external-content over `messages` and is untouched. ADR-0003 check: the FTS
+/// index is unaffected because `messages` is not rebuilt.
+fn migrate_v2(conn: &Connection) -> Result<()> {
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let result = (|| -> Result<()> {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(V2_REBUILD)?;
+        tx.pragma_update(None, "user_version", 2)?;
+        tx.commit()?;
+        let violations = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_map([], |_| Ok(()))?
+            .count();
+        if violations > 0 {
+            return Err(DbError::InvalidValue {
+                field: "schema migration 2",
+                value: format!("{violations} foreign key violation(s) after rebuild"),
+            });
+        }
+        Ok(())
+    })();
+    // Restore enforcement even if the rebuild failed.
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    result
 }
 
 /// Version 1 schema text, applied inside a transaction.
@@ -210,4 +246,24 @@ CREATE TRIGGER messages_au AFTER UPDATE OF content ON messages BEGIN
     INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
     INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
 END;
+"#;
+
+/// Version 2: rebuild `conversations` with a nullable `workspace_id`.
+///
+/// Runs with foreign keys disabled (see [`migrate_v2`]).
+const V2_REBUILD: &str = r#"
+CREATE TABLE conversations_v2 (
+    id            TEXT PRIMARY KEY,
+    workspace_id  TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+    title         TEXT NOT NULL DEFAULT '',
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL
+);
+
+INSERT INTO conversations_v2 (id, workspace_id, title, created_at, updated_at)
+    SELECT id, workspace_id, title, created_at, updated_at FROM conversations;
+
+DROP TABLE conversations;
+ALTER TABLE conversations_v2 RENAME TO conversations;
+CREATE INDEX conversations_by_workspace ON conversations(workspace_id, updated_at DESC);
 "#;

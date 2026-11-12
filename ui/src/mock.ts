@@ -110,8 +110,66 @@ function pendingOf(calls: ToolCall[]): PendingApproval[] {
     });
 }
 
+/** A plain chat reply, used when the main session has no folder open. */
+async function runChat(detail: ConversationDetail, text: string) {
+  const conv = detail.conversation;
+  const run: Run = {
+    id: id("run"),
+    conversation_id: conv.id,
+    state: "running",
+    stop_reason: null,
+    turn_count: 0,
+    prompt_tokens: 0,
+    error: null,
+    started_at: now(),
+    ended_at: null,
+  };
+  conv.run = run;
+  detail.messages.push({
+    id: id("msg"),
+    role: "user",
+    content: text,
+    created_at: now(),
+    tool_calls: [],
+  });
+  const setState = (state: Run["state"]) => {
+    run.state = state;
+    emit({ type: "state", run: { ...run } }, run.id);
+  };
+
+  emit({ type: "turn_started", turn_index: 0 }, run.id);
+  let text2 = "";
+  const say = async (words: string) => {
+    for (const w of words.split(/(?<= )/)) {
+      text2 += w;
+      emit({ type: "text_delta", turn_index: 0, text: w, so_far: text2 }, run.id);
+      await sleep(18);
+    }
+    detail.messages.push({
+      id: id("msg"),
+      role: "assistant",
+      content: text2,
+      created_at: now(),
+      tool_calls: [],
+    });
+    emit({ type: "assistant_message", message_id: id("msg"), content: text2 }, run.id);
+  };
+
+  const reply =
+    "I'm Aria, a desktop assistant. You can chat with me here, or open a folder " +
+    "from the header to let me read, edit and run commands inside it. What would " +
+    "you like to do?";
+  await say(reply);
+  run.stop_reason = "no_tool_calls";
+  run.ended_at = now();
+  setState("finished");
+}
+
 /** The scripted task the mock drives: find a bug, fix it, run the tests. */
 async function runScript(detail: ConversationDetail, text: string) {
+  if (!detail.conversation.workspace_id) {
+    return runChat(detail, text);
+  }
   const conv = detail.conversation;
   const run: Run = {
     id: id("run"),
@@ -210,7 +268,7 @@ async function runScript(detail: ConversationDetail, text: string) {
     await finish(edit, "Denied by the user; edit_file was not run.", true);
   } else {
     await finish(edit, "src/lib.rs: replaced 1 occurrence");
-    changed.set(conv.workspace_id, ["src/lib.rs"]);
+    changed.set(conv.workspace_id ?? "", ["src/lib.rs"]);
   }
   setState("running");
 
@@ -251,6 +309,37 @@ function sleep(ms: number) {
 const changed = new Map<string, string[]>();
 
 const handlers: Record<string, Handler> = {
+  // The default main session: a conversation with no folder.
+  new_conversation: () => {
+    const conv: ConversationView = {
+      id: id("conv"),
+      workspace_id: null,
+      title: "Main",
+      root_path: null,
+      created_at: now(),
+      updated_at: now(),
+      run: null,
+    };
+    conversations.set(conv.id, {
+      conversation: conv,
+      messages: [],
+      todos: [],
+      pending: [],
+    });
+    return conv;
+  },
+  // Open a folder by attaching it to an existing conversation, keeping history.
+  attach_workspace: (a) => {
+    const d = conversations.get(String(a.conversationId));
+    if (!d) throw new Error("no such conversation");
+    const root = String(a.rootPath);
+    d.conversation.workspace_id = id("ws");
+    d.conversation.root_path = root;
+    if (!d.conversation.title || d.conversation.title === "Main") {
+      d.conversation.title = root.split("/").filter(Boolean).pop() ?? root;
+    }
+    return d.conversation;
+  },
   open_workspace: (a) => {
     const root = String(a.rootPath);
     const existing = [...conversations.values()].find(
@@ -332,16 +421,13 @@ const handlers: Record<string, Handler> = {
     throw new Error("no such run");
   },
   undo: (a) => {
-    const ws = String(a.workspaceId);
+    const ws = String(a.workspaceId ?? "");
     const p = String(a.path);
-    changed.set(
-      ws,
-      (changed.get(ws) ?? []).filter((x) => x !== p),
-    );
+    changed.set(ws, (changed.get(ws) ?? []).filter((x) => x !== p));
     return null;
   },
   changed_files: (a): ChangedFile[] =>
-    (changed.get(String(a.workspaceId)) ?? []).map((path) => ({
+    (changed.get(String(a.workspaceId ?? "")) ?? []).map((path) => ({
       path,
       can_undo: true,
     })),
@@ -401,14 +487,14 @@ export function mockListen(
   });
 }
 
-/** Seed one conversation so the Mock page has something to show. */
+/** Seed a main session (and a sample folder conversation) for the demo page. */
 export function seed(): void {
-  const conv = handlers.open_workspace({ rootPath: "/home/you/projects/demo" }) as ConversationView;
-  const d = conversations.get(conv.id);
-  if (!d) return;
-  d.todos = [
-    { id: id("todo"), run_id: "", position: 0, text: "Find where the total is computed", done: true },
-    { id: id("todo"), run_id: "", position: 1, text: "Fix the off-by-one", done: false },
-    { id: id("todo"), run_id: "", position: 2, text: "Run the tests", done: false },
-  ];
+  const main = handlers.new_conversation({}) as ConversationView;
+  const d = conversations.get(main.id);
+  if (d) {
+    d.todos = [
+      { id: id("todo"), run_id: "", position: 0, text: "Reply to the user's greetings", done: true },
+      { id: id("todo"), run_id: "", position: 1, text: "Open a folder when asked to work on files", done: false },
+    ];
+  }
 }

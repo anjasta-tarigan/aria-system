@@ -252,7 +252,8 @@ pub struct Workspace {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Conversation {
     pub id: String,
-    pub workspace_id: String,
+    /// `None` for the main session, which has no folder attached.
+    pub workspace_id: Option<String>,
     pub title: String,
     pub created_at: i64,
     pub updated_at: i64,

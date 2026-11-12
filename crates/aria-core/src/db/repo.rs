@@ -157,13 +157,13 @@ pub fn find_workspace_by_root(conn: &Connection, root_path: &str) -> Result<Opti
 
 pub fn insert_conversation(
     conn: &Connection,
-    workspace_id: &str,
+    workspace_id: Option<&str>,
     title: &str,
 ) -> Result<Conversation> {
     let now = now_ms();
     let c = Conversation {
         id: nid(),
-        workspace_id: workspace_id.to_string(),
+        workspace_id: workspace_id.map(str::to_string),
         title: title.to_string(),
         created_at: now,
         updated_at: now,
@@ -174,6 +174,22 @@ pub fn insert_conversation(
         params![c.id, c.workspace_id, c.title, c.created_at, c.updated_at],
     )?;
     Ok(c)
+}
+
+/// Point a conversation at a folder, or detach it with `None`.
+pub fn set_conversation_workspace(
+    conn: &Connection,
+    id: &str,
+    workspace_id: Option<&str>,
+) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE conversations SET workspace_id = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, workspace_id, now_ms()],
+    )?;
+    if changed == 0 {
+        return Err(DbError::NotFound("conversation"));
+    }
+    Ok(())
 }
 
 fn conversation_from_row(r: &Row<'_>) -> rusqlite::Result<Conversation> {
