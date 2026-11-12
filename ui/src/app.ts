@@ -260,7 +260,15 @@ function sidebar(): HTMLElement {
         "+",
       ),
     ),
-    ...groups.map(renderWorkspace),
+    ...(groups.length
+      ? groups.map(renderWorkspace)
+      : [
+          h(
+            "p",
+            { class: "muted small ws-hint" },
+            "Open a folder with + to start a workspace.",
+          ),
+        ]),
   );
 
   const footer = h(
@@ -529,6 +537,7 @@ interface MenuItem {
 }
 
 let menuEl: HTMLDivElement | null = null;
+let menuAnchor: HTMLElement | null = null;
 
 function openMenuAt(anchor: HTMLElement, items: MenuItem[]) {
   closeMenu();
@@ -546,18 +555,27 @@ function openMenuAt(anchor: HTMLElement, items: MenuItem[]) {
   }
   document.body.appendChild(menu);
   menuEl = menu;
-  const r = anchor.getBoundingClientRect();
-  const mw = menu.offsetWidth;
-  const mh = menu.offsetHeight;
-  const left = Math.min(r.left, window.innerWidth - mw - 8);
-  const top = Math.min(r.bottom, window.innerHeight - mh - 8);
-  menu.style.left = `${Math.max(8, left)}px`;
-  menu.style.top = `${Math.max(8, top)}px`;
+  menuAnchor = anchor;
+  positionMenu();
+  window.addEventListener("resize", positionMenu);
   // Close on any outside interaction or Escape.
   setTimeout(() => {
     window.addEventListener("click", onMenuOutside, true);
     window.addEventListener("keydown", onMenuKey, true);
   }, 0);
+}
+
+/// Keep the menu attached just below its trigger inside the sidebar.
+function positionMenu() {
+  if (!menuEl || !menuAnchor) return;
+  const r = menuAnchor.getBoundingClientRect();
+  const mw = menuEl.offsetWidth;
+  const mh = menuEl.offsetHeight;
+  let left = Math.min(r.right - mw, window.innerWidth - mw - 8);
+  let top = r.bottom + 4;
+  if (top + mh > window.innerHeight - 8) top = r.top - mh - 4;
+  menuEl.style.left = `${Math.max(8, left)}px`;
+  menuEl.style.top = `${Math.max(8, top)}px`;
 }
 
 function onMenuOutside(e: Event) {
@@ -571,6 +589,8 @@ function closeMenu() {
     menuEl.remove();
     menuEl = null;
   }
+  menuAnchor = null;
+  window.removeEventListener("resize", positionMenu);
   window.removeEventListener("click", onMenuOutside, true);
   window.removeEventListener("keydown", onMenuKey, true);
 }

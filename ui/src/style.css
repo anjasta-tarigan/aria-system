@@ -258,16 +258,11 @@ button.icon:hover {
   background: var(--panel-2);
 }
 
-/* The per-workspace actions (⋮ and +) only appear on hover/focus. */
+/* The per-workspace actions (⋮ and +) are always visible so they are
+   discoverable; hover just adds a highlight. */
 .ws-action {
   font-size: 15px;
-  opacity: 0;
-  transition: opacity 0.12s ease;
-}
-
-.workspace-head:hover .ws-action,
-.workspace-head:focus-within .ws-action {
-  opacity: 1;
+  padding: 0 var(--sp-2);
 }
 
 .conv.session {
@@ -296,14 +291,7 @@ button.icon:hover {
 
 .sess-action {
   font-size: 15px;
-  opacity: 0;
   padding: 0 var(--sp-1);
-  transition: opacity 0.12s ease;
-}
-
-.conv.session:hover .sess-action,
-.conv.session:focus-within .sess-action {
-  opacity: 1;
 }
 
 .rename-input {
@@ -325,6 +313,11 @@ button.icon:hover {
 .foot-label {
   color: var(--muted);
   font-size: var(--fs-sm);
+}
+
+.ws-hint {
+  margin: 0 0 var(--sp-1);
+  padding: 0 var(--sp-2);
 }
 
 /* ------------------------------------------------------------- ctx menu */
