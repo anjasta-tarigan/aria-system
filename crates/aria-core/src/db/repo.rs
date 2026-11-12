@@ -192,6 +192,18 @@ pub fn set_conversation_workspace(
     Ok(())
 }
 
+/// Update a conversation's title (e.g. when a System chat gains a folder).
+pub fn rename_conversation(conn: &Connection, id: &str, title: &str) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE conversations SET title = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, title, now_ms()],
+    )?;
+    if changed == 0 {
+        return Err(DbError::NotFound("conversation"));
+    }
+    Ok(())
+}
+
 fn conversation_from_row(r: &Row<'_>) -> rusqlite::Result<Conversation> {
     Ok(Conversation {
         id: r.get(0)?,

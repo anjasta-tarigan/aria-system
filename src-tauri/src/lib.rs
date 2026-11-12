@@ -324,7 +324,7 @@ async fn open_workspace(
 fn new_conversation(state: State<'_, App>) -> CmdResult<ConversationView> {
     let db = &state.inner.db;
     let conv = db
-        .call(|conn| db::insert_conversation(conn, None, ""))
+        .call(|conn| db::insert_conversation(conn, None, "Main System"))
         .map_err(err)?;
     conversation_view(db, conv)
 }
@@ -336,14 +336,24 @@ async fn attach_workspace(
     conversation_id: String,
     root_path: String,
 ) -> CmdResult<ConversationView> {
-    validate_folder(&root_path)?;
+    let root = validate_folder(&root_path)?;
 
     let db = Arc::clone(&state.inner.db);
     tokio::task::spawn_blocking(move || {
         let conv = db
             .call(|conn| {
+                // Was this a System chat becoming a workspace? Rename it to the
+                // folder so it reads naturally in the Workspaces group.
+                let before = db::get_conversation(conn, &conversation_id)?;
                 let ws = find_or_insert_workspace(conn, &root_path)?;
                 db::set_conversation_workspace(conn, &conversation_id, Some(&ws))?;
+                if before.workspace_id.is_none() {
+                    let title = root
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| root_path.clone());
+                    db::rename_conversation(conn, &conversation_id, &title)?;
+                }
                 db::get_conversation(conn, &conversation_id)
             })
             .map_err(err)?;

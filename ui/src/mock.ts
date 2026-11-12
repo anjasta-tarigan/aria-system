@@ -314,7 +314,7 @@ const handlers: Record<string, Handler> = {
     const conv: ConversationView = {
       id: id("conv"),
       workspace_id: null,
-      title: "Main",
+      title: "Main System",
       root_path: null,
       created_at: now(),
       updated_at: now(),
@@ -335,7 +335,7 @@ const handlers: Record<string, Handler> = {
     const root = String(a.rootPath);
     d.conversation.workspace_id = id("ws");
     d.conversation.root_path = root;
-    if (!d.conversation.title || d.conversation.title === "Main") {
+    if (!d.conversation.title || d.conversation.title === "Main System") {
       d.conversation.title = root.split("/").filter(Boolean).pop() ?? root;
     }
     return d.conversation;

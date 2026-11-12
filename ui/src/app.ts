@@ -63,10 +63,12 @@ function h<K extends keyof HTMLElementTagNameMap>(
 
 const fmt = (ms: number) =>
   new Date(ms).toLocaleString(undefined, {
+    year: "numeric",
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+    hour12: false,
   });
 
 function args(call: ToolCall): Record<string, unknown> {
@@ -169,41 +171,51 @@ function render() {
 }
 
 function sidebar(): HTMLElement {
-  // The folderless main session is pinned first.
-  const ordered = [...ui.conversations].sort((a, b) => {
-    const am = a.workspace_id ? 1 : 0;
-    const bm = b.workspace_id ? 1 : 0;
-    return am - bm;
-  });
+  // Two groups: the folderless System chat (main session only) and the
+  // folder-bound Workspace chats.
+  const systems = ui.conversations.filter((c) => !c.workspace_id);
+  const workspaces = ui.conversations
+    .filter((c) => !!c.workspace_id)
+    .sort((a, b) => b.updated_at - a.updated_at);
 
-  const list = h(
-    "div",
-    { class: "conv-list" },
-    ...ordered.map((c) =>
+  const convButton = (c: ConversationView) =>
+    h(
+      "button",
+      {
+        class: `conv${ui.detail?.conversation.id === c.id ? " active" : ""}${c.workspace_id ? "" : " main"}`,
+        title: c.root_path ?? "Main System — available everywhere",
+        onclick: () => void selectConversation(c.id),
+      },
+      h("span", { class: "conv-title" }, c.title),
       h(
-        "button",
-        {
-          class: `conv${ui.detail?.conversation.id === c.id ? " active" : ""}${c.workspace_id ? "" : " main"}`,
-          title: c.root_path ?? "Available everywhere",
-          onclick: () => void selectConversation(c.id),
-        },
-        h(
-          "span",
-          { class: "conv-title" },
-          c.workspace_id ? c.title : `✦ ${c.title}`,
-        ),
-        h(
-          "span",
-          { class: "conv-meta" },
-          c.run
-            ? stateLabel[c.run.state]
-            : c.workspace_id
-              ? "Folder"
-              : "Everywhere",
-        ),
+        "span",
+        { class: "conv-meta" },
+        c.run
+          ? stateLabel[c.run.state]
+          : c.workspace_id
+            ? "Workspace"
+            : "System",
       ),
-    ),
-  );
+    );
+
+  const group = (label: string, convs: ConversationView[], withPlus: boolean) =>
+    h(
+      "div",
+      { class: "conv-group" },
+      h(
+        "div",
+        { class: "section-row" },
+        h("span", { class: "section-title" }, label),
+        withPlus
+          ? h(
+              "button",
+              { class: "icon", title: "Open a folder", onclick: () => void chooseFolder() },
+              "+",
+            )
+          : null,
+      ),
+      h("div", { class: "conv-list" }, ...convs.map(convButton)),
+    );
 
   const searchResults = ui.search.length
     ? h(
@@ -251,17 +263,8 @@ function sidebar(): HTMLElement {
     ),
     searchResults,
     emptySearch,
-    h(
-      "div",
-      { class: "section-row" },
-      h("span", { class: "section-title" }, "Chats"),
-      h(
-        "button",
-        { class: "icon", title: "Open a folder", onclick: () => void chooseFolder() },
-        "+",
-      ),
-    ),
-    list,
+    group("System", systems, false),
+    group("Workspaces", workspaces, true),
   );
 }
 
@@ -331,7 +334,7 @@ function conversationPane(detail: ConversationDetail): HTMLElement {
         "No folder · ",
         h(
           "button",
-          { class: "link", onclick: () => void attachFolder(conv.id) },
+          { class: "link", onclick: () => void chooseFolder() },
           "Choose one…",
         ),
       );
@@ -672,19 +675,6 @@ async function chooseFolder() {
   const picked = await openDialog({ directory: true, multiple: false });
   if (typeof picked !== "string") return;
   const conv = await call.invoke<ConversationView>("open_workspace", {
-    rootPath: picked,
-  });
-  await refreshConversations();
-  await selectConversation(conv.id);
-}
-
-/// Attach a folder to an existing conversation, keeping its history (this is how
-/// the main session gains a workspace).
-async function attachFolder(conversationId: string) {
-  const picked = await openDialog({ directory: true, multiple: false });
-  if (typeof picked !== "string") return;
-  const conv = await call.invoke<ConversationView>("attach_workspace", {
-    conversationId,
     rootPath: picked,
   });
   await refreshConversations();
