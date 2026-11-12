@@ -2,6 +2,7 @@
 //! callers can compose several writes into one transaction.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::str::FromStr;
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -201,6 +202,7 @@ pub fn insert_conversation(
         title: title.to_string(),
         created_at: now,
         updated_at: now,
+        main_system: false,
     };
     conn.execute(
         "INSERT INTO conversations (id, workspace_id, title, created_at, updated_at)
@@ -245,11 +247,12 @@ fn conversation_from_row(r: &Row<'_>) -> rusqlite::Result<Conversation> {
         title: r.get(2)?,
         created_at: r.get(3)?,
         updated_at: r.get(4)?,
+        main_system: r.get::<_, i64>(5)? != 0,
     })
 }
 
 const CONVERSATION_COLS: &str =
-    "id, workspace_id, title, created_at, updated_at";
+    "id, workspace_id, title, created_at, updated_at, main_system";
 
 pub fn get_conversation(conn: &Connection, id: &str) -> Result<Conversation> {
     conn.query_row(
@@ -295,6 +298,55 @@ fn touch_conversation(conn: &Connection, id: &str) -> Result<()> {
         params![id, now_ms()],
     )?;
     Ok(())
+}
+
+/// Promote/demote a conversation to main-system mode and replace its allowed
+/// system paths. Relative paths are rejected; existing paths are canonicalised.
+pub fn set_conversation_scope(
+    conn: &Connection,
+    conversation_id: &str,
+    main_system: bool,
+    paths: &[String],
+) -> Result<()> {
+    let mut cannon: Vec<String> = Vec::with_capacity(paths.len());
+    for p in paths {
+        let path = Path::new(p);
+        if !path.is_absolute() {
+            return Err(DbError::InvalidValue {
+                field: "main_system_path",
+                value: format!("{p} must be absolute"),
+            });
+        }
+        let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        cannon.push(resolved.to_string_lossy().replace('\\', "/"));
+    }
+    conn.execute(
+        "UPDATE conversations SET main_system = ?2 WHERE id = ?1",
+        params![conversation_id, main_system as i64],
+    )?;
+    conn.execute(
+        "DELETE FROM main_system_paths WHERE conversation_id = ?1",
+        [conversation_id],
+    )?;
+    let mut stmt = conn.prepare(
+        "INSERT INTO main_system_paths (conversation_id, path) VALUES (?1, ?2)",
+    )?;
+    for p in &cannon {
+        stmt.execute(params![conversation_id, p])?;
+    }
+    Ok(())
+}
+
+/// The absolute paths a main-system conversation is permitted to touch.
+pub fn list_main_system_paths(
+    conn: &Connection,
+    conversation_id: &str,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT path FROM main_system_paths WHERE conversation_id = ?1 ORDER BY path",
+    )?;
+    let rows = stmt.query_map([conversation_id], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 // --------------------------------------------------------------------- runs

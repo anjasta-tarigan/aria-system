@@ -259,6 +259,8 @@ pub struct Conversation {
     pub title: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Full filesystem access (the "main system"); otherwise workspace-scoped.
+    pub main_system: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

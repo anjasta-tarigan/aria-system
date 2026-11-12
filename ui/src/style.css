@@ -579,6 +579,41 @@ button.icon:hover {
   white-space: nowrap;
 }
 
+.badge-system-access {
+  background: var(--accent);
+  color: var(--panel-1, #fff);
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.link.grant-access {
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.sys-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0;
+}
+
+.sys-paths {
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+  font-family: var(--mono, monospace);
+  font-size: var(--fs-sm);
+  padding: var(--sp-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--fg);
+}
+
 .transcript {
   flex: 1;
   overflow-y: auto;

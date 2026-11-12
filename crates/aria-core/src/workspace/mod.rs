@@ -3,6 +3,7 @@
 //! Every path a Tool touches goes through this module. Containment is enforced
 //! here, never in the prompt (issue 03).
 
+use std::env;
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
@@ -118,6 +119,13 @@ impl WorkspaceRoot {
     }
 }
 
+impl std::ops::Deref for WorkspaceRoot {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.canonical
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +228,175 @@ mod tests {
         let root = WorkspaceRoot::new(&alias_path).unwrap();
         assert_eq!(root.root(), std::fs::canonicalize(ws.path()).unwrap());
         assert!(root.resolve_read("a/b/f.txt").is_ok());
+    }
+
+    #[test]
+    fn scope_workspace_contains_only_inside() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let scope = Scope::Workspace(WorkspaceRoot::new(dir.path()).unwrap());
+        std::fs::write(dir.path().join("x"), "").unwrap();
+        let child = std::fs::canonicalize(dir.path().join("x")).unwrap();
+        assert!(scope.contains(&child));
+        assert!(!scope.contains(other.path()));
+    }
+
+    #[test]
+    fn scope_main_system_empty_allows_everything() {
+        let scope = Scope::MainSystem(vec![]);
+        let abs = std::fs::canonicalize("/").unwrap();
+        assert!(scope.contains(&abs));
+    }
+
+    #[test]
+    fn scope_main_system_paths_restricts() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let scope = Scope::MainSystem(vec![std::fs::canonicalize(dir.path()).unwrap()]);
+        std::fs::write(dir.path().join("x"), "").unwrap();
+        let child = std::fs::canonicalize(dir.path().join("x")).unwrap();
+        assert!(scope.contains(&child));
+        assert!(!scope.contains(other.path()));
+    }
+
+    #[test]
+    fn scope_none_contains_nothing() {
+        let scope = Scope::None;
+        let abs = std::fs::canonicalize("/").unwrap();
+        assert!(!scope.contains(&abs));
+    }
+}
+
+/// What part of the filesystem a conversation's Tools may touch.
+///
+/// `None` is the ordinary main session with no file access. `Workspace` confines
+/// every path to one folder. `MainSystem` grants system-wide access, optionally
+/// restricted to the given absolute roots (an empty list means unrestricted).
+#[derive(Debug, Clone)]
+pub enum Scope {
+    None,
+    Workspace(WorkspaceRoot),
+    MainSystem(Vec<PathBuf>),
+}
+
+impl Scope {
+    /// The base directory for recursive searches, or `None` if filesystem access
+    /// is disabled. For the main system this is the first allowed root, or the
+    /// working dir when unrestricted.
+    pub fn root(&self) -> Option<&Path> {
+        match self {
+            Scope::Workspace(w) => Some(w.root()),
+            Scope::MainSystem(paths) => paths.first().map(|p| p.as_path()),
+            Scope::None => None,
+        }
+    }
+
+    /// All roots to walk for a recursive search: the folder root, or the
+    /// permitted system paths (current directory if unrestricted).
+    pub fn roots(&self) -> Vec<PathBuf> {
+        match self {
+            Scope::Workspace(w) => vec![w.root().to_path_buf()],
+            Scope::MainSystem(paths) => {
+                if paths.is_empty() {
+                    vec![std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))]
+                } else {
+                    paths.clone()
+                }
+            }
+            Scope::None => vec![],
+        }
+    }
+
+    /// Whether this is a folder-scoped conversation (file tools use `folder()`).
+    pub fn is_folder(&self) -> bool {
+        matches!(self, Scope::Workspace(_))
+    }
+
+    /// Resolve a path for reading. The result is absolute, canonical, and inside
+    /// this scope; otherwise an error. Workspace paths are folder-relative; for
+    /// the main system the path must be absolute or relative to the working dir.
+    pub fn resolve_read(&self, requested: impl AsRef<Path>) -> Result<PathBuf> {
+        match self {
+            Scope::None => Err(PathError::Escapes("no filesystem access".into())),
+            Scope::Workspace(w) => w.resolve_read(requested),
+            Scope::MainSystem(paths) => {
+                let candidate = if requested.as_ref().is_absolute() {
+                    requested.as_ref().to_path_buf()
+                } else {
+                    env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(requested.as_ref())
+                };
+                let resolved = std::fs::canonicalize(&candidate)?;
+                if paths.is_empty() || paths.iter().any(|p| resolved.starts_with(p)) {
+                    Ok(resolved)
+                } else {
+                    Err(PathError::Escapes(resolved.display().to_string()))
+                }
+            }
+        }
+    }
+
+    /// Resolve a path for creation or replacement (see [`WorkspaceRoot::resolve_create`]).
+    pub fn resolve_create(&self, requested: impl AsRef<Path>) -> Result<PathBuf> {
+        match self {
+            Scope::None => Err(PathError::Escapes("no filesystem access".into())),
+            Scope::Workspace(w) => w.resolve_create(requested),
+            Scope::MainSystem(paths) => {
+                let candidate = if requested.as_ref().is_absolute() {
+                    requested.as_ref().to_path_buf()
+                } else {
+                    env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(requested.as_ref())
+                };
+                if candidate.exists() || std::fs::symlink_metadata(&candidate).is_ok() {
+                    let resolved = std::fs::canonicalize(&candidate)?;
+                    if paths.is_empty() || paths.iter().any(|p| resolved.starts_with(p)) {
+                        Ok(resolved)
+                    } else {
+                        Err(PathError::Escapes(resolved.display().to_string()))
+                    }
+                } else {
+                    let parent = candidate
+                        .parent()
+                        .ok_or_else(|| PathError::MissingParent(candidate.display().to_string()))?;
+                    let parent = std::fs::canonicalize(parent)?;
+                    if paths.is_empty() || paths.iter().any(|p| parent.starts_with(p)) {
+                        Ok(candidate)
+                    } else {
+                        Err(PathError::Escapes(parent.display().to_string()))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Containment test against an absolute, canonical path.
+    pub fn contains(&self, abs: &Path) -> bool {
+        match self {
+            Scope::None => false,
+            Scope::Workspace(w) => w.check_inside(abs).is_ok(),
+            Scope::MainSystem(paths) => {
+                paths.is_empty() || paths.iter().any(|p| abs.starts_with(p))
+            }
+        }
+    }
+
+    /// Convert an absolute resolved path back to a stable relative key for the
+    /// edit journal. For the workspace it is folder-relative; for the main system
+    /// it is relative to the first allowed root (or the working dir when unrestricted).
+    pub fn relativise(&self, absolute: &Path) -> Result<String> {
+        match self {
+            Scope::Workspace(w) => w.relativise(absolute),
+            Scope::MainSystem(paths) => {
+                let base = if paths.is_empty() {
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                } else {
+                    paths[0].clone()
+                };
+                let rel = absolute
+                    .strip_prefix(&base)
+                    .map_err(|_| PathError::Escapes(absolute.display().to_string()))?;
+                Ok(rel.to_string_lossy().replace('\\', "/"))
+            }
+            Scope::None => Err(PathError::Escapes(absolute.display().to_string())),
+        }
     }
 }

@@ -332,6 +332,7 @@ function sleep(ms: number) {
 }
 
 const changed = new Map<string, string[]>();
+const mainPaths = new Map<string, string[]>();
 
 const handlers: Record<string, Handler> = {
   // The default main session: a conversation with no folder.
@@ -344,6 +345,7 @@ const handlers: Record<string, Handler> = {
       created_at: now(),
       updated_at: now(),
       pinned: false,
+      main_system: false,
       run: null,
     };
     conversations.set(conv.id, {
@@ -384,6 +386,7 @@ const handlers: Record<string, Handler> = {
       created_at: now(),
       updated_at: now(),
       pinned: ws.pinned,
+      main_system: false,
       run: null,
     };
     conversations.set(conv.id, {
@@ -410,6 +413,7 @@ const handlers: Record<string, Handler> = {
       created_at: now(),
       updated_at: now(),
       pinned: existing?.conversation.pinned ?? false,
+      main_system: false,
       run: null,
     };
     conversations.set(conv.id, {
@@ -560,6 +564,20 @@ const handlers: Record<string, Handler> = {
   delete_memory: (a) => {
     const i = memories.findIndex((m) => m.id === (a.id as string));
     if (i >= 0) memories.splice(i, 1);
+  },
+  get_main_system_paths: (a) => {
+    const d = conversations.get(String(a.conversationId));
+    return d ? (mainPaths.get(d.conversation.id) ?? []) : [];
+  },
+  set_main_system_scope: (a) => {
+    const d = conversations.get(String(a.conversationId));
+    if (!d) throw new Error("no such conversation");
+    const enabled = Boolean(a.enabled);
+    const paths = (a.paths as string[]) ?? [];
+    d.conversation.main_system = enabled;
+    if (enabled) mainPaths.set(d.conversation.id, paths);
+    else mainPaths.delete(d.conversation.id);
+    return structuredClone(d.conversation);
   },
 };
 

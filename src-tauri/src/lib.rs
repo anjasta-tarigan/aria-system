@@ -106,6 +106,8 @@ pub struct ConversationView {
     pub updated_at: i64,
     /// True when the owning workspace is pinned to the top of the sidebar.
     pub pinned: bool,
+    /// True when this conversation has full main-system (filesystem) access.
+    pub main_system: bool,
     pub run: Option<Run>,
 }
 
@@ -170,6 +172,7 @@ fn conversation_view(db: &Db, c: db::Conversation) -> CmdResult<ConversationView
         created_at: c.created_at,
         updated_at: c.updated_at,
         pinned,
+        main_system: c.main_system,
         run,
     })
 }
@@ -450,6 +453,42 @@ fn set_workspace_pin(
         .map_err(err)
 }
 
+/// Returns the absolute paths a main-system conversation may access (empty = unrestricted).
+#[tauri::command]
+fn get_main_system_paths(
+    state: State<'_, App>,
+    conversation_id: String,
+) -> CmdResult<Vec<String>> {
+    state
+        .inner
+        .db
+        .call(|conn| db::list_main_system_paths(conn, &conversation_id))
+        .map_err(err)
+}
+
+/// Toggle a conversation's main-system access and update its allowed paths.
+/// Paths must be absolute strings.
+#[tauri::command]
+async fn set_main_system_scope(
+    state: State<'_, App>,
+    conversation_id: String,
+    enabled: bool,
+    paths: Vec<String>,
+) -> CmdResult<ConversationView> {
+    let db = Arc::clone(&state.inner.db);
+    tokio::task::spawn_blocking(move || {
+        db.call(|conn| {
+            db::set_conversation_scope(conn, &conversation_id, enabled, &paths)?;
+            let c = db::get_conversation(conn, &conversation_id)?;
+            Ok(c)
+        })
+        .map_err(err)
+    })
+    .await
+    .map_err(err)?
+    .and_then(|c| conversation_view(&state.inner.db, c))
+}
+
 fn find_or_insert_workspace(conn: &aria_core::db::Connection, root_path: &str) -> db::Result<String> {
     Ok(match db::find_workspace_by_root(conn, root_path)? {
         Some(ws) => ws.id,
@@ -723,6 +762,8 @@ pub fn run() {
             delete_conversation,
             delete_workspace,
             set_workspace_pin,
+            get_main_system_paths,
+            set_main_system_scope,
             list_conversations,
             get_conversation,
             send_message,

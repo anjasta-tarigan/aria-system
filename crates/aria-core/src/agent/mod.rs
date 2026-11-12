@@ -8,6 +8,7 @@
 //! its events, answer Approvals and cancel it.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -24,7 +25,7 @@ use crate::db::{
 use crate::journal::Blobs;
 use crate::provider::{ChatMessage, Provider, ProviderEvent, ToolCallRequest};
 use crate::tools::{self, ToolContext, ToolOutcome, ToolRegistry};
-use crate::workspace::WorkspaceRoot;
+use crate::workspace::{Scope, WorkspaceRoot};
 
 /// How often a parked or streaming Run checks for cancellation and Approval
 /// decisions. Small enough to feel instant, large enough to cost nothing.
@@ -400,19 +401,31 @@ impl LoopCtx {
             Some(id) => Some(self.call(|c| db::get_workspace(c, id))?),
             None => None,
         };
+        let scope = if let Some(ws) = &workspace {
+            Scope::Workspace(WorkspaceRoot::new(&ws.root_path)?)
+        } else if conversation.main_system {
+            let paths = self
+                .call(|c| db::list_main_system_paths(c, &conversation.id))?
+                .into_iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>();
+            Scope::MainSystem(paths)
+        } else {
+            Scope::None
+        };
         let ctx = ToolContext {
-            root: match &workspace {
-                Some(ws) => Some(WorkspaceRoot::new(&ws.root_path)?),
-                None => None,
-            },
+            root: workspace
+                .as_ref()
+                .map(|ws| WorkspaceRoot::new(&ws.root_path))
+                .transpose()?,
             workspace_id: workspace.as_ref().map(|ws| ws.id.clone()),
             run_id: self.run_id.clone(),
             db: Arc::clone(&self.db),
             blobs: Arc::clone(&self.blobs),
             shell_timeout_secs: self.shell_timeout_secs,
             embed: self.provider.embedder(),
+            scope: scope.clone(),
         };
-        let has_folder = workspace.is_some();
 
         loop {
             if self.handle.is_cancelled() {
@@ -442,7 +455,7 @@ impl LoopCtx {
                 });
             }
 
-            match self.next_turn(&run.conversation_id, has_folder).await? {
+            match self.next_turn(&run.conversation_id, &scope).await? {
                 TurnOutcome::Final => return self.finish(RunState::Finished, "no_tool_calls"),
                 TurnOutcome::ToolCalls => {}
                 TurnOutcome::Cancelled => return self.finish(RunState::Cancelled, "cancelled"),
@@ -601,7 +614,7 @@ impl LoopCtx {
     }
 
     /// Request one Turn and persist its outcome.
-    async fn next_turn(&mut self, conversation_id: &str, has_folder: bool) -> Result<TurnOutcome> {
+    async fn next_turn(&mut self, conversation_id: &str, scope: &Scope) -> Result<TurnOutcome> {
         let run = self.call(|c| db::get_run(c, &self.run_id))?;
         // Resuming resets the counters, so the next Turn's index continues
         // from the Turns already recorded rather than from `turn_count`.
@@ -611,8 +624,8 @@ impl LoopCtx {
             .max()
             .unwrap_or(0)
             .max(self.assistant_turns(&run)?);
-        let messages = self.request_messages(&run, has_folder)?;
-        let specs = ToolRegistry::describe(has_folder);
+        let messages = self.request_messages(&run, scope.is_folder())?;
+        let specs = ToolRegistry::describe(scope);
         self.emit(RunEvent::TurnStarted { turn_index });
 
         let result = self.stream(&messages, &specs, turn_index).await?;

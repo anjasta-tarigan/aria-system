@@ -4,7 +4,7 @@ use aria_core::db::{self, Db, ToolCallState};
 use aria_core::journal::Blobs;
 use aria_core::db::ApprovalClass;
 use aria_core::tools::{self, ToolContext, ToolOutcome, ToolRegistry};
-use aria_core::workspace::WorkspaceRoot;
+use aria_core::workspace::{Scope, WorkspaceRoot};
 
 struct Fx {
     _ws: tempfile::TempDir,
@@ -23,8 +23,10 @@ fn fx() -> Fx {
         .id;
     let conv = db.call(|c| db::insert_conversation(c, Some(&ws_id), "")).unwrap();
     let run = db.call(|c| db::insert_run(c, &conv.id)).unwrap();
+    let ws_root = WorkspaceRoot::new(ws.path()).unwrap();
     let ctx = ToolContext {
-        root: Some(WorkspaceRoot::new(ws.path()).unwrap()),
+        scope: Scope::Workspace(ws_root.clone()),
+        root: Some(ws_root),
         workspace_id: Some(ws_id),
         run_id: run.id,
         db: Arc::clone(&db),
@@ -54,7 +56,7 @@ async fn call(f: &Fx, tool: &str, args: serde_json::Value) -> ToolOutcome {
 
 #[test]
 fn registry_advertises_ten_tools_with_classes() {
-    let specs = ToolRegistry::describe(true);
+    let specs = ToolRegistry::describe(&Scope::Workspace(WorkspaceRoot::new(std::path::Path::new("/tmp")).unwrap()));
     assert_eq!(specs.len(), 12);
     assert_eq!(specs.len(), tools::TOOLS.len());
     assert_eq!(tools::approval_class(tools::READ_FILE), Some(ApprovalClass::Read));
@@ -365,7 +367,7 @@ fn summary_shows_exact_content_for_edits_and_commands() {
 
 #[tokio::test]
 async fn without_a_folder_only_filesystem_free_tools_are_offered() {
-    let specs = ToolRegistry::describe(false);
+    let specs = ToolRegistry::describe(&aria_core::workspace::Scope::None);
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         names,
@@ -385,6 +387,7 @@ async fn without_a_folder_only_filesystem_free_tools_are_offered() {
         blobs: Arc::new(Blobs::new(ws.path(), db)),
         shell_timeout_secs: 10,
         embed: None,
+        scope: aria_core::workspace::Scope::None,
     };
 
     let cases = [
@@ -396,7 +399,7 @@ async fn without_a_folder_only_filesystem_free_tools_are_offered() {
     for (tool, args) in cases {
         let outcome = ToolRegistry::execute(tool, args, &ctx).await;
         assert!(outcome.is_error, "{tool} should refuse");
-        assert!(outcome.text.contains("No folder"), "{tool}: {}", outcome.text);
+        assert!(outcome.text.contains("filesystem"), "{tool}: {}", outcome.text);
     }
 
     // The todo list still works, since it never touches the filesystem.
@@ -408,4 +411,44 @@ async fn without_a_folder_only_filesystem_free_tools_are_offered() {
     .await;
     assert!(!outcome.is_error, "{}", outcome.text);
     assert!(outcome.text.contains("say hi"));
+}
+
+#[tokio::test]
+async fn main_system_scope_reads_allowed_paths_and_refuses_others() {
+    let allowed = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(allowed.path().join("keep.txt"), "ok").unwrap();
+    std::fs::write(outside.path().join("secret.txt"), "no").unwrap();
+
+    let db = Arc::new(Db::open_in_memory().unwrap());
+    let conv = db.call(|c| db::insert_conversation(c, None, "main")).unwrap();
+    let run = db.call(|c| db::insert_run(c, &conv.id)).unwrap();
+    let ctx = ToolContext {
+        root: None,
+        workspace_id: None,
+        run_id: run.id,
+        db: Arc::clone(&db),
+        blobs: Arc::new(Blobs::new(allowed.path(), db)),
+        shell_timeout_secs: 10,
+        embed: None,
+        // Factory-style path: only `allowed` may be touched.
+        scope: Scope::MainSystem(vec![allowed.path().to_path_buf()]),
+    };
+
+    let ok = ToolRegistry::execute(
+        tools::READ_FILE,
+        &format!(r#"{{"path":"{}"}}"#, allowed.path().join("keep.txt").display()),
+        &ctx,
+    )
+    .await;
+    assert!(!ok.is_error, "{}", ok.text);
+    assert!(ok.text.contains("ok"));
+
+    let denied = ToolRegistry::execute(
+        tools::READ_FILE,
+        &format!(r#"{{"path":"{}"}}"#, outside.path().join("secret.txt").display()),
+        &ctx,
+    )
+    .await;
+    assert!(denied.is_error, "main system must refuse paths outside its roots");
 }

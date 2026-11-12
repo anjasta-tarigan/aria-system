@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use super::{DbError, Result};
 
 /// Maximum schema version understood by this build.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// A handle to the application database.
 ///
@@ -105,6 +105,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if current < 4 {
         migrate_v4(conn)?;
+    }
+    if current < 5 {
+        migrate_v5(conn)?;
     }
     Ok(())
 }
@@ -301,5 +304,21 @@ fn migrate_v4(conn: &Connection) -> Result<()> {
         CREATE INDEX memories_by_key ON memories(key);",
     )?;
     conn.pragma_update(None, "user_version", 4)?;
+    Ok(())
+}
+
+/// Version 5: per-conversation "main system" scope. A conversation may be
+/// flagged `main_system` (full filesystem access) with an allow-list of absolute
+/// paths it is permitted to touch.
+fn migrate_v5(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE conversations ADD COLUMN main_system INTEGER NOT NULL DEFAULT 0;
+        CREATE TABLE main_system_paths (
+            conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            path            TEXT NOT NULL,
+            PRIMARY KEY (conversation_id, path)
+        );",
+    )?;
+    conn.pragma_update(None, "user_version", 5)?;
     Ok(())
 }

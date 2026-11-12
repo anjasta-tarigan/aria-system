@@ -66,6 +66,8 @@ export interface ConversationView {
   updated_at: number;
   /// True when the owning workspace is pinned to the top of the sidebar.
   pinned?: boolean;
+  /// True when Aria may read/edit/exec outside any single folder (main session).
+  main_system: boolean;
   run: Run | null;
 }
 
@@ -184,6 +186,14 @@ export const api = {
   listMemories: (workspaceId?: string | null) =>
     invoke<Memory[]>("list_memories", { workspaceId: workspaceId ?? null }),
   deleteMemory: (id: string) => invoke<void>("delete_memory", { id }),
+  getMainSystemPaths: (conversationId: string) =>
+    invoke<string[]>("get_main_system_paths", { conversationId }),
+  setMainSystemScope: (conversationId: string, enabled: boolean, paths: string[]) =>
+    invoke<ConversationView>("set_main_system_scope", {
+      conversationId,
+      enabled,
+      paths,
+    }),
 };
 
 export interface Memory {

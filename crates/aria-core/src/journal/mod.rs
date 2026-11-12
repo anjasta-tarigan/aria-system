@@ -12,7 +12,7 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 
 use crate::db::{self, Db, DbError};
-use crate::workspace::{PathError, WorkspaceRoot};
+use crate::workspace::PathError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
@@ -85,10 +85,10 @@ impl Blobs {
 
     /// Snapshot a file that is about to change.
     ///
-    /// `rel` is the workspace-relative path. A file that does not exist yet is
+    /// `rel` is the base-relative path. A file that does not exist yet is
     /// recorded as "did not exist", so deleting a created file can be undone.
-    pub fn snapshot(&self, workspace_id: &str, root: &WorkspaceRoot, rel: &str) -> Result<()> {
-        let abs = root.root().join(rel);
+    pub fn snapshot(&self, workspace_id: &str, base: &Path, rel: &str) -> Result<()> {
+        let abs = base.join(rel);
         let (hash, existed) = if abs.exists() {
             (self.put(&std::fs::read(&abs)?)?, true)
         } else {
@@ -102,7 +102,7 @@ impl Blobs {
     }
 
     /// Restore the previous version of `rel`, one step.
-    pub fn undo(&self, workspace_id: &str, root: &WorkspaceRoot, rel: &str) -> Result<()> {
+    pub fn undo(&self, workspace_id: &str, base: &Path, rel: &str) -> Result<()> {
         let entry = self.db.call(|c| {
             Ok(db::journal_entries_for(c, workspace_id, rel)?
                 .into_iter()
@@ -110,7 +110,7 @@ impl Blobs {
         })?;
         let entry = entry.ok_or_else(|| JournalError::NothingToUndo(rel.to_string()))?;
 
-        let abs = root.root().join(rel);
+        let abs = base.join(rel);
         if entry.existed {
             let bytes = self.read(&entry.blob_hash)?;
             if let Some(parent) = abs.parent() {
@@ -168,12 +168,12 @@ impl Blobs {
     pub fn write_file(
         &self,
         workspace_id: &str,
-        root: &WorkspaceRoot,
+        base: &Path,
         rel: &str,
         content: &str,
     ) -> Result<()> {
-        self.snapshot(workspace_id, root, rel)?;
-        let abs = root.root().join(rel);
+        self.snapshot(workspace_id, base, rel)?;
+        let abs = base.join(rel);
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -182,33 +182,33 @@ impl Blobs {
     }
 
     /// Delete `rel`, snapshotting it first.
-    pub fn delete_file(&self, workspace_id: &str, root: &WorkspaceRoot, rel: &str) -> Result<()> {
-        self.snapshot(workspace_id, root, rel)?;
-        std::fs::remove_file(root.root().join(rel))?;
+    pub fn delete_file(&self, workspace_id: &str, base: &Path, rel: &str) -> Result<()> {
+        self.snapshot(workspace_id, base, rel)?;
+        std::fs::remove_file(base.join(rel))?;
         Ok(())
     }
 
-    /// Move `from` to `to` inside the workspace, snapshotting both.
+    /// Move `from` to `to` under `base`, snapshotting both.
     pub fn move_file(
         &self,
         workspace_id: &str,
-        root: &WorkspaceRoot,
+        base: &Path,
         from: &str,
         to: &str,
     ) -> Result<()> {
-        self.snapshot(workspace_id, root, from)?;
-        self.snapshot(workspace_id, root, to)?;
-        let dest = root.root().join(to);
+        self.snapshot(workspace_id, base, from)?;
+        self.snapshot(workspace_id, base, to)?;
+        let dest = base.join(to);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::rename(root.root().join(from), dest)?;
+        std::fs::rename(base.join(from), dest)?;
         Ok(())
     }
 
-    /// Read a workspace file as UTF-8, refusing binary content.
-    pub fn read_text(root: &WorkspaceRoot, rel: &str) -> Result<String> {
-        let abs = root.root().join(rel);
+    /// Read a file under `base` as UTF-8, refusing binary content.
+    pub fn read_text(base: &Path, rel: &str) -> Result<String> {
+        let abs = base.join(rel);
         let bytes = std::fs::read(&abs)?;
         String::from_utf8(bytes).map_err(|_| JournalError::NotUtf8(rel.to_string()))
     }

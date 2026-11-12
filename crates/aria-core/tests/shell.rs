@@ -4,7 +4,7 @@ use std::time::Duration;
 use aria_core::db::{self, Db};
 use aria_core::journal::Blobs;
 use aria_core::tools::{self, ToolContext, ToolRegistry};
-use aria_core::workspace::WorkspaceRoot;
+use aria_core::workspace::{Scope, WorkspaceRoot};
 use tokio::sync::mpsc;
 
 struct Fx {
@@ -24,8 +24,10 @@ fn fx() -> Fx {
     let run = db.call(|c| db::insert_run(c, &conv.id)).unwrap();
     // Leak the blob dir so it lives as long as the context.
     let blob_dir = Box::leak(Box::new(blob_dir));
+    let ws_root = WorkspaceRoot::new(ws.path()).unwrap();
     let ctx = ToolContext {
-        root: Some(WorkspaceRoot::new(ws.path()).unwrap()),
+        scope: Scope::Workspace(ws_root.clone()),
+        root: Some(ws_root),
         workspace_id: Some(ws_id),
         run_id: run.id,
         db: Arc::clone(&db),

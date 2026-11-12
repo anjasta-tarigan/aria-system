@@ -55,12 +55,15 @@ pub async fn execute(
     timeout: Duration,
     progress: Option<mpsc::UnboundedSender<String>>,
 ) -> Result<ShellOutcome> {
-    let (root, _) = ctx.folder()?;
+    let root = ctx
+        .scope
+        .root()
+        .ok_or_else(|| ToolError::Refused("no filesystem access for shell".into()))?;
     let mut command = Command::new("sh");
     command
         .arg("-c")
         .arg(cmd)
-        .current_dir(root.root())
+        .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

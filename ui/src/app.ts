@@ -117,6 +117,8 @@ interface Ui {
   /// Whether the stored-memories viewer is open.
   memoriesOpen: boolean;
   memories: Memory[];
+  /// Conversation id whose Main System access modal is open, if any.
+  systemAccessId: string | null;
 }
 
 const ui: Ui = {
@@ -136,6 +138,7 @@ const ui: Ui = {
   collapsed: new Set(),
   memoriesOpen: false,
   memories: [],
+  systemAccessId: null,
 };
 
 const root = document.querySelector<HTMLElement>("#app")!;
@@ -172,6 +175,7 @@ function render() {
     shell,
     ...(ui.settingsOpen && ui.settings ? [settingsModal(ui.settings)] : []),
     ...(ui.memoriesOpen ? [memoriesModal()] : []),
+    ...(ui.systemAccessId ? [systemAccessModal(ui.systemAccessId)] : []),
   );
   if (ui.jumpTo) {
     const el = document.getElementById(`msg-${ui.jumpTo}`);
@@ -720,10 +724,38 @@ function conversationPane(detail: ConversationDetail): HTMLElement {
         ),
       );
 
+  // Main System chats (no folder) can grant Aria filesystem-wide access.
+  const systemAccess = !hasFolder
+    ? conv.main_system
+      ? h(
+          "button",
+          {
+            class: "badge-system-access",
+            title: "Configure system-wide file access",
+            onclick: () => {
+              ui.systemAccessId = conv.id;
+              render();
+            },
+          },
+          "⚡ System File Access (active)",
+        )
+      : h(
+          "button",
+          {
+            class: "link grant-access",
+            onclick: () => {
+              ui.systemAccessId = conv.id;
+              render();
+            },
+          },
+          "Grant File Access",
+        )
+    : null;
+
   const header = h(
     "header",
     { class: "conv-header" },
-    h("div", {}, h("h2", {}, convTitle(conv)), folderSlot),
+    h("div", {}, h("h2", {}, convTitle(conv)), folderSlot, systemAccess),
     run ? h("span", { class: `badge ${run.state}` }, stateLabel[run.state]) : null,
     run?.state === "cancelled" || run?.state === "errored"
       ? h("span", { class: "error-text" }, run.error ?? run.stop_reason ?? "")
@@ -789,6 +821,83 @@ function conversationPane(detail: ConversationDetail): HTMLElement {
           ),
         )
       : null,
+  );
+}
+
+function systemAccessModal(conversationId: string): HTMLElement {
+  const current = ui.detail?.conversation.main_system ?? false;
+  const enabledCheckbox = h("input", {
+    type: "checkbox",
+    checked: current,
+  }) as HTMLInputElement;
+  const pathsArea = h("textarea", {
+    class: "sys-paths",
+    rows: "4",
+    placeholder: "e.g. /Users/me/projects\n/Users/me/notes",
+  }) as HTMLTextAreaElement;
+  // Pre-fill allowed paths; failures leave the field blank rather than block.
+  void call
+    .invoke<string[]>("get_main_system_paths", { conversationId })
+    .then((paths) => {
+      pathsArea.value = paths.join("\n");
+    })
+    .catch(() => {});
+
+  const close = () => {
+    ui.systemAccessId = null;
+    render();
+  };
+  const save = async () => {
+    const enabled = enabledCheckbox.checked;
+    const paths = pathsArea.value
+      .split("\n")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    try {
+      const updated = await call.invoke<ConversationView>("set_main_system_scope", {
+        conversationId,
+        enabled,
+        paths,
+      });
+      if (ui.detail) ui.detail.conversation = updated;
+      ui.systemAccessId = null;
+      render();
+    } catch (e) {
+      ui.notice = String(e);
+      render();
+    }
+  };
+
+  return h(
+    "div",
+    {
+      class: "modal-backdrop",
+      onclick: (e: MouseEvent) => e.target === e.currentTarget && close(),
+    },
+    h(
+      "div",
+      { class: "modal" },
+      h("h2", {}, "Main System File Access"),
+      h(
+        "p",
+        { class: "muted small" },
+        "Allows Aria to read, edit and execute commands outside of a single folder.",
+      ),
+      h(
+        "label",
+        { class: "sys-toggle" },
+        enabledCheckbox,
+        h("span", {}, "Enable system-wide file access"),
+      ),
+      h("label", { class: "small" }, "Allowed paths (one per line, leave empty for unrestricted access)"),
+      pathsArea,
+      h(
+        "div",
+        { class: "approval-actions" },
+        h("button", { class: "primary", onclick: () => void save() }, "Save"),
+        h("button", { class: "ghost", onclick: close }, "Cancel"),
+      ),
+    ),
   );
 }
 

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::db::{ApprovalClass, Db, ToolCallState};
 use crate::journal::Blobs;
 use crate::provider::{Embedder, ToolSpec};
-use crate::workspace::WorkspaceRoot;
+use crate::workspace::{Scope, WorkspaceRoot};
 
 mod files;
 mod fetch;
@@ -71,6 +71,7 @@ impl ToolOutcome {
 /// the rest refuse cleanly if the model asks for them anyway.
 #[derive(Clone)]
 pub struct ToolContext {
+    pub scope: Scope,
     pub root: Option<WorkspaceRoot>,
     pub workspace_id: Option<String>,
     pub run_id: String,
@@ -82,15 +83,7 @@ pub struct ToolContext {
     pub embed: Option<Arc<dyn Embedder>>,
 }
 
-impl ToolContext {
-    /// The folder Tools act in, or a recoverable refusal when there is none.
-    pub fn folder(&self) -> Result<(&WorkspaceRoot, &str)> {
-        match (&self.root, &self.workspace_id) {
-            (Some(root), Some(id)) => Ok((root, id)),
-            _ => Err(ToolError::Refused(NO_FOLDER.to_string())),
-        }
-    }
-}
+impl ToolContext {}
 
 /// Error text for a file Tool called in a conversation with no folder open.
 pub const NO_FOLDER: &str =
@@ -169,7 +162,7 @@ pub struct ToolRegistry;
 impl ToolRegistry {
     /// The tools to advertise. Without a folder only the filesystem-free ones
     /// are offered, so the model is never told about tools it cannot use.
-    pub fn describe(has_folder: bool) -> Vec<ToolSpec> {
+    pub fn describe(scope: &Scope) -> Vec<ToolSpec> {
         let all = vec![
             spec(
                 READ_FILE,
@@ -324,7 +317,7 @@ impl ToolRegistry {
                 }),
             ),
         ];
-        if has_folder {
+        if !matches!(scope, Scope::None) {
             return all;
         }
         let usable = [WEB_FETCH, TODOS, REMEMBER, RECALL];
@@ -430,8 +423,10 @@ pub fn context_for(
     workspace_id: &str,
     run_id: &str,
 ) -> Result<ToolContext> {
+    let root = WorkspaceRoot::new(root)?;
     Ok(ToolContext {
-        root: Some(WorkspaceRoot::new(root)?),
+        scope: Scope::Workspace(root.clone()),
+        root: Some(root),
         workspace_id: Some(workspace_id.to_string()),
         run_id: run_id.to_string(),
         db,

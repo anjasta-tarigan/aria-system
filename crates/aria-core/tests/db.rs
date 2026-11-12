@@ -82,10 +82,10 @@ fn migration_is_idempotent_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("aria.db");
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 4);
+    assert_eq!(db.schema_version().unwrap(), 5);
     drop(db);
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 4);
+    assert_eq!(db.schema_version().unwrap(), 5);
     let (_ws, conv) = seed(&db);
     db.call(|c| db::insert_message(c, &conv, None, Role::User, "persisted"))
         .unwrap();
@@ -200,7 +200,7 @@ fn migrating_v1_keeps_rows_and_allows_a_folderness_conversation() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 4);
+    assert_eq!(db.schema_version().unwrap(), 5);
     db.call(|c| {
         // Existing rows survived the rebuild, and FTS was not disturbed.
         let conv = db::get_conversation(c, "c1")?;
@@ -294,7 +294,7 @@ END;
 #[test]
 fn migration_v4_creates_memories_table() {
     let db = Db::open_in_memory().unwrap();
-    assert_eq!(db.schema_version().unwrap(), 4);
+    assert_eq!(db.schema_version().unwrap(), 5);
     db.call(|c| {
         c.execute_batch("INSERT INTO memories (id, key, content, created_at, updated_at)
                          VALUES ('m1', 'k', 'v', 1, 1)")?;
@@ -386,4 +386,54 @@ fn embedding_roundtrip_and_similarity_search() {
     assert_eq!(hits[0].0.key, "close");
     assert!((hits[0].1 - 1.0).abs() < 1e-6);
     assert!(hits[1].1 < hits[0].1);
+}
+
+// ------------------------------------------------------------ main-system scope
+
+#[test]
+fn migration_v5_adds_main_system_and_paths_tables() {
+    let db = Db::open_in_memory().unwrap();
+    assert_eq!(db.schema_version().unwrap(), 5);
+    let (ws, conv) = seed(&db);
+    db.call(|c| {
+        db::set_conversation_scope(c, &conv, true, &[])?;
+        let got = db::get_conversation(c, &conv)?;
+        assert!(got.main_system);
+        db::set_conversation_scope(c, &conv, false, &[])?;
+        assert!(db::list_main_system_paths(c, &conv)?.is_empty());
+        // workspace id still round-trips; nothing else disturbed.
+        let got = db::get_conversation(c, &conv)?;
+        assert_eq!(got.workspace_id.as_deref(), Some(ws.as_str()));
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn conversation_scope_sets_main_system_and_paths() {
+    let db = Db::open_in_memory().unwrap();
+    let (_ws, conv) = seed(&db);
+    let abs = std::env::temp_dir().join("aria_main_system_test");
+    let abs = abs.to_string_lossy().to_string();
+    db.call(|c| {
+        db::set_conversation_scope(c, &conv, true, &[abs.clone()])?;
+        let paths = db::list_main_system_paths(c, &conv)?;
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], abs);
+        assert!(db::get_conversation(c, &conv)?.main_system);
+        db::set_conversation_scope(c, &conv, true, &[])?;
+        assert!(db::list_main_system_paths(c, &conv)?.is_empty());
+        db::set_conversation_scope(c, &conv, false, &[])?;
+        assert!(!db::get_conversation(c, &conv)?.main_system);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn main_system_path_must_be_absolute() {
+    let db = Db::open_in_memory().unwrap();
+    let (_ws, conv) = seed(&db);
+    let err = db.call(|c| db::set_conversation_scope(c, &conv, true, &["relative/path".to_string()]));
+    assert!(err.is_err());
 }
