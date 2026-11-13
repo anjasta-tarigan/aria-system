@@ -14,6 +14,10 @@ const store = globalThis as {
   __ariaBoot?: number;
 };
 
+// Coalesce the duplicate update events Vite can emit for a single save so the
+// app re-renders once, not twice.
+let hotBoot: ReturnType<typeof setTimeout> | null = null;
+
 const appWindow = window as unknown as { aria: unknown };
 
 async function boot(load: () => Promise<AppModule>) {
@@ -46,6 +50,11 @@ if (import.meta.hot) {
   // changes and falls back to a normal reload, which is fine.
   import.meta.hot.accept(["./app"], (mods) => {
     const next = mods[0] as AppModule | undefined;
-    if (next) void boot(() => Promise.resolve(next));
+    if (!next) return;
+    if (hotBoot) clearTimeout(hotBoot);
+    hotBoot = setTimeout(() => {
+      hotBoot = null;
+      void boot(() => Promise.resolve(next));
+    }, 40);
   });
 }

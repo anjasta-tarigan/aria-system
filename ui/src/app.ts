@@ -1281,128 +1281,450 @@ async function openSettings() {
   render();
 }
 
+let activeSettingsTab: "models" | "web" | "system" | "limits" = "models";
+
+interface ProviderPreset {
+  name: string;
+  baseUrl: string;
+  models: string[];
+  defaultEmbed?: string;
+  note: string;
+}
+
+const PROVIDERS: ProviderPreset[] = [
+  {
+    name: "OpenAI",
+    baseUrl: "https://api.openai.com/v1",
+    models: ["gpt-4o", "gpt-4o-mini", "o1", "o3-mini"],
+    defaultEmbed: "text-embedding-3-small",
+    note: "Official OpenAI API endpoint.",
+  },
+  {
+    name: "Anthropic (Proxy)",
+    baseUrl: "https://api.anthropic.com/v1",
+    models: ["claude-3-5-sonnet", "claude-3-5-haiku", "claude-3-opus"],
+    note: "Requires OpenAI-compatible gateway or reverse proxy.",
+  },
+  {
+    name: "Ollama / Local",
+    baseUrl: "http://localhost:11434/v1",
+    models: ["llama3.2", "deepseek-r1", "qwen2.5", "mistral"],
+    defaultEmbed: "nomic-embed-text",
+    note: "Local OpenAI-compatible inference with Ollama.",
+  },
+  {
+    name: "OpenRouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+    models: ["anthropic/claude-3.5-sonnet", "openai/gpt-4o", "deepseek/deepseek-chat"],
+    note: "Unified multi-provider API router.",
+  },
+  {
+    name: "Custom OpenAI-Compatible",
+    baseUrl: "http://localhost:8000/v1",
+    models: [],
+    note: "Any self-hosted or compatible LLM endpoint.",
+  },
+];
+
 function settingsModal(view: SettingsView): HTMLElement {
   const s = view.settings;
-  const field = (label: string, value: string | number, type = "text") =>
+  const field = (label: string, value: string | number, type = "text", placeholder = "") =>
     h(
       "label",
       {},
       h("span", {}, label),
-      h("input", { type, value: String(value), dataset: { field: label } }),
+      h("input", { type, value: String(value), placeholder, dataset: { field: label } }),
     );
   const close = () => {
     ui.settingsOpen = false;
     render();
   };
+
+  const navTabs: { id: "models" | "web" | "system" | "limits"; label: string; icon: string }[] = [
+    { id: "models", label: "AI Models", icon: "🧠" },
+    { id: "web", label: "Web Access", icon: "🌐" },
+    { id: "system", label: "System Access", icon: "💻" },
+    { id: "limits", label: "Execution & Limits", icon: "⚡" },
+  ];
+
+  const navButtons = new Map<string, HTMLButtonElement>();
+  const panelElements = new Map<string, HTMLElement>();
+
+  const switchTab = (tabId: "models" | "web" | "system" | "limits") => {
+    activeSettingsTab = tabId;
+    for (const [id, btn] of navButtons.entries()) {
+      const active = id === tabId;
+      btn.classList.toggle("active", active);
+      btn.setAttribute("aria-selected", String(active));
+    }
+    for (const [id, panel] of panelElements.entries()) {
+      panel.style.display = id === tabId ? "flex" : "none";
+    }
+  };
+
+  // 1. AI Models panel
+  const baseUrlField = field("Base URL", s.base_url);
+  const modelField = field("Model", s.model);
+  const embedModelField = field("Embedding model", s.embedding_model ?? "");
+  const embedBaseUrlField = field("Embedding base URL", s.embedding_base_url ?? "");
+
+  const getBaseUrlInput = () => baseUrlField.querySelector("input") as HTMLInputElement;
+  const getModelInput = () => modelField.querySelector("input") as HTMLInputElement;
+  const getEmbedModelInput = () => embedModelField.querySelector("input") as HTMLInputElement;
+
+  const providerList = h("div", { style: "display: flex; flex-direction: column; gap: var(--sp-2);" });
+  for (const p of PROVIDERS) {
+    const isActive = s.base_url.startsWith(p.baseUrl);
+    const card = h(
+      "div",
+      {
+        class: `provider-card ${isActive ? "selected" : ""}`,
+        onclick: () => {
+          getBaseUrlInput().value = p.baseUrl;
+          if (p.models[0]) getModelInput().value = p.models[0];
+          if (p.defaultEmbed) getEmbedModelInput().value = p.defaultEmbed;
+          providerList.querySelectorAll(".provider-card").forEach((c) => c.classList.remove("selected"));
+          card.classList.add("selected");
+        },
+      },
+      h(
+        "div",
+        { class: "provider-header" },
+        h("strong", {}, p.name),
+        h(
+          "span",
+          { class: `provider-badge ${isActive ? "active" : ""}` },
+          isActive ? "Active" : p.models.length ? `${p.models.length} models` : "Custom",
+        ),
+      ),
+      h("p", { class: "muted small", style: "margin: 0 0 var(--sp-1) 0;" }, p.note),
+      p.models.length
+        ? h(
+            "div",
+            { class: "model-chips" },
+            ...p.models.map((m) =>
+              h(
+                "span",
+                {
+                  class: "model-chip",
+                  title: `Click to select ${m}`,
+                  onclick: (e: MouseEvent) => {
+                    e.stopPropagation();
+                    getBaseUrlInput().value = p.baseUrl;
+                    getModelInput().value = m;
+                    providerList.querySelectorAll(".provider-card").forEach((c) => c.classList.remove("selected"));
+                    card.classList.add("selected");
+                  },
+                },
+                m,
+              ),
+            ),
+          )
+        : null,
+    );
+    providerList.append(card);
+  }
+
+  const modelsPanel = h(
+    "div",
+    {
+      class: "settings-content",
+      style: `display: ${activeSettingsTab === "models" ? "flex" : "none"}; flex-direction: column; gap: var(--sp-3);`,
+    },
+    h(
+      "div",
+      { class: "info-callout" },
+      "Configure active AI inference providers and embeddings. Select a registered provider below or enter custom endpoint parameters.",
+    ),
+    h("h3", { class: "small muted" }, "Registered AI Providers"),
+    providerList,
+    h("hr", {}),
+    h("h3", { class: "small muted" }, "Active Model Configuration"),
+    baseUrlField,
+    modelField,
+    h(
+      "label",
+      {},
+      h("span", {}, "API key"),
+      h("input", {
+        type: "password",
+        placeholder: view.has_key ? `Stored in ${view.key_backend}` : "Not set",
+        dataset: { field: "API key" },
+      }),
+    ),
+    h("p", { class: "muted small" }, "Leave empty to keep the stored key."),
+    h("hr", {}),
+    h("h3", { class: "small muted" }, "Embeddings (Memory)"),
+    embedModelField,
+    embedBaseUrlField,
+    h(
+      "p",
+      { class: "muted small" },
+      "OpenAI-compatible embeddings endpoint. Leave blank to reuse the chat Base URL and default (text-embedding-3-small).",
+    ),
+  );
+  panelElements.set("models", modelsPanel);
+
+  // 2. Web Access panel
+  const searchProviderSelect = h(
+    "select",
+    { dataset: { field: "Search provider" } },
+    h("option", { value: "" }, "Disabled"),
+    h("option", { value: "exa" }, "Exa"),
+    h("option", { value: "firecrawl" }, "Firecrawl"),
+    h("option", { value: "searxng" }, "searXNG"),
+    h("option", { value: "duckduckgo" }, "DuckDuckGo"),
+  ) as HTMLSelectElement;
+  searchProviderSelect.value = s.search_provider ?? "";
+
+  const webCallout = h("div", { class: "info-callout" });
+  const searchBaseUrlField = field("Search base URL", s.search_base_url ?? "");
+  const searchApiKeyField = h(
+    "label",
+    {},
+    h("span", {}, "Search API key"),
+    h("input", {
+      type: "password",
+      placeholder: "Empty = unchanged",
+      dataset: { field: "Search API key" },
+    }),
+  );
+
+  const updateSearchFields = (prov: string) => {
+    switch (prov) {
+      case "exa":
+        webCallout.textContent =
+          "Exa AI Search (api.exa.ai). Neural search engine optimized for AI agents with rich webpage snippets. Requires an Exa API key.";
+        searchBaseUrlField.style.display = "none";
+        searchApiKeyField.style.display = "flex";
+        (searchApiKeyField.querySelector("input") as HTMLInputElement).placeholder = "Paste Exa API key";
+        break;
+      case "firecrawl":
+        webCallout.textContent =
+          "Firecrawl Search (api.firecrawl.dev). Web search and structured content extraction API. Requires a Firecrawl API key.";
+        searchBaseUrlField.style.display = "none";
+        searchApiKeyField.style.display = "flex";
+        (searchApiKeyField.querySelector("input") as HTMLInputElement).placeholder = "Paste Firecrawl API key (fc-...)";
+        break;
+      case "searxng":
+        webCallout.textContent =
+          "Self-hosted searXNG meta-search instance. Requires the base URL of your searXNG service with JSON format enabled (format: json in settings.yml). No API key needed.";
+        searchBaseUrlField.style.display = "flex";
+        searchApiKeyField.style.display = "none";
+        (searchBaseUrlField.querySelector("input") as HTMLInputElement).placeholder = "https://searx.example.com";
+        break;
+      case "duckduckgo":
+        webCallout.textContent =
+          "DuckDuckGo HTML Search. Works out of the box without an API key or base URL configuration.";
+        searchBaseUrlField.style.display = "none";
+        searchApiKeyField.style.display = "none";
+        break;
+      default:
+        webCallout.textContent =
+          "Web search is currently disabled. Choose a search provider above to enable web queries.";
+        searchBaseUrlField.style.display = "none";
+        searchApiKeyField.style.display = "none";
+        break;
+    }
+  };
+
+  searchProviderSelect.addEventListener("change", () => updateSearchFields(searchProviderSelect.value));
+  updateSearchFields(searchProviderSelect.value);
+
+  const webPanel = h(
+    "div",
+    {
+      class: "settings-content",
+      style: `display: ${activeSettingsTab === "web" ? "flex" : "none"}; flex-direction: column; gap: var(--sp-3);`,
+    },
+    h(
+      "label",
+      {},
+      h("span", {}, "Search Provider"),
+      searchProviderSelect,
+    ),
+    webCallout,
+    searchBaseUrlField,
+    searchApiKeyField,
+  );
+  panelElements.set("web", webPanel);
+
+  // 3. System Access panel
+  const sysAccessCheckbox = h("input", {
+    type: "checkbox",
+    class: "settings-sys-checkbox",
+    checked: ui.detail?.conversation.main_system ?? false,
+  }) as HTMLInputElement;
+
+  const sysPathsTextarea = h("textarea", {
+    class: "sys-paths settings-sys-paths",
+    rows: "5",
+    placeholder: "e.g. /home/user/projects\n/home/user/notes",
+  }) as HTMLTextAreaElement;
+
+  if (ui.detail) {
+    void call
+      .invoke<string[]>("get_main_system_paths", { conversationId: ui.detail.conversation.id })
+      .then((paths) => {
+        sysPathsTextarea.value = paths.join("\n");
+      })
+      .catch(() => {});
+  }
+
+  const systemPanel = h(
+    "div",
+    {
+      class: "settings-content",
+      style: `display: ${activeSettingsTab === "system" ? "flex" : "none"}; flex-direction: column; gap: var(--sp-3);`,
+    },
+    h(
+      "div",
+      { class: "info-callout" },
+      "Main System File Access controls whether Aria can inspect, edit, and run shell commands on filesystem paths outside a single workspace directory (Scope::MainSystem).",
+    ),
+    ui.detail
+      ? h(
+          "div",
+          { style: "display: flex; flex-direction: column; gap: var(--sp-3);" },
+          h(
+            "label",
+            { class: "sys-toggle" },
+            sysAccessCheckbox,
+            h("span", {}, "Enable system-wide file access for current chat"),
+          ),
+          h("label", { class: "small" }, "Allowed paths (one per line, leave empty for unrestricted access)"),
+          sysPathsTextarea,
+          h("p", { class: "muted small" }, "Changes will apply to the currently open conversation upon saving."),
+        )
+      : h(
+          "div",
+          { style: "display: flex; flex-direction: column; gap: var(--sp-2);" },
+          h("p", { class: "muted small" }, "No conversation is currently open."),
+          h(
+            "p",
+            { class: "muted small" },
+            "Main System scope is configured per-conversation. Open a conversation to view and manage its allowed filesystem paths.",
+          ),
+        ),
+  );
+  panelElements.set("system", systemPanel);
+
+  // 4. Execution & Limits panel
+  const limitsPanel = h(
+    "div",
+    {
+      class: "settings-content",
+      style: `display: ${activeSettingsTab === "limits" ? "flex" : "none"}; flex-direction: column; gap: var(--sp-3);`,
+    },
+    h(
+      "div",
+      { class: "info-callout" },
+      "Safety limits protect against runaway loops, excessive token burn, and hanging shell commands.",
+    ),
+    field("Max turns", s.caps.max_turns, "number"),
+    field("Max prompt tokens", s.caps.max_prompt_tokens, "number"),
+    field("Shell timeout (s)", s.shell_timeout_secs, "number"),
+    h(
+      "p",
+      { class: "muted small" },
+      "Shell commands exceeding the timeout are forcibly terminated. Token limits stop execution before budget exhaustion.",
+    ),
+  );
+  panelElements.set("limits", limitsPanel);
+
+  // Nav list creation
+  const navContainer = h("nav", { class: "settings-nav", role: "tablist", "aria-label": "Settings navigation" });
+  for (const t of navTabs) {
+    const btn = h(
+      "button",
+      {
+        class: `settings-nav-item ${activeSettingsTab === t.id ? "active" : ""}`,
+        role: "tab",
+        "aria-selected": activeSettingsTab === t.id ? "true" : "false",
+        onclick: () => switchTab(t.id),
+      },
+      h("span", {}, t.icon),
+      h("span", {}, t.label),
+    ) as HTMLButtonElement;
+    navButtons.set(t.id, btn);
+    navContainer.append(btn);
+  }
+
+  const save = async () => {
+    const val = (name: string) =>
+      (document.querySelector<HTMLInputElement>(`input[data-field="${name}"]`)?.value ?? "").trim();
+    const sel = (name: string) =>
+      (document.querySelector<HTMLSelectElement>(`select[data-field="${name}"]`)?.value ?? "").trim();
+    try {
+      ui.settings = await call.invoke<SettingsView>("set_settings", {
+        input: {
+          base_url: val("Base URL"),
+          model: val("Model"),
+          max_turns: Number(val("Max turns")) || 1,
+          max_prompt_tokens: Number(val("Max prompt tokens")) || 1,
+          shell_timeout_secs: Number(val("Shell timeout (s)")) || 1,
+          embedding_model: val("Embedding model") || null,
+          embedding_base_url: val("Embedding base URL") || null,
+          search_provider: sel("Search provider") || null,
+          search_base_url: val("Search base URL") || null,
+          search_api_key: val("Search API key") || null,
+          api_key: val("API key") || null,
+        },
+      });
+
+      // Save conversation main-system scope if present
+      if (ui.detail) {
+        const sysCheck = document.querySelector<HTMLInputElement>(".settings-sys-checkbox");
+        const sysArea = document.querySelector<HTMLTextAreaElement>(".settings-sys-paths");
+        if (sysCheck && sysArea) {
+          const enabled = sysCheck.checked;
+          const paths = sysArea.value
+            .split("\n")
+            .map((p) => p.trim())
+            .filter(Boolean);
+          const updated = await call.invoke<ConversationView>("set_main_system_scope", {
+            conversationId: ui.detail.conversation.id,
+            enabled,
+            paths,
+          });
+          ui.detail.conversation = updated;
+        }
+      }
+
+      ui.settingsOpen = false;
+      ui.notice = "Settings saved.";
+      render();
+    } catch (e) {
+      ui.notice = String(e);
+      render();
+    }
+  };
+
   return h(
     "div",
     { class: "modal-backdrop", onclick: (e: MouseEvent) => e.target === e.currentTarget && close() },
     h(
       "div",
-      { class: "modal" },
-      h("h2", {}, "Settings"),
-      field("Base URL", s.base_url),
-      field("Model", s.model),
-      field("Max turns", s.caps.max_turns, "number"),
-      field("Max prompt tokens", s.caps.max_prompt_tokens, "number"),
-      field("Shell timeout (s)", s.shell_timeout_secs, "number"),
-      h("hr", {}),
-      h("h3", { class: "small muted" }, "Embeddings (memory)"),
-      field("Embedding model", s.embedding_model ?? ""),
-      field("Embedding base URL", s.embedding_base_url ?? ""),
-      h(
-        "p",
-        { class: "muted small" },
-        "OpenAI-compatible embeddings endpoint. Leave blank to reuse the chat Base URL and model default (text-embedding-3-small).",
-      ),
-      h("hr", {}),
-      h("h3", { class: "small muted" }, "Web search"),
-      h(
-        "label",
-        {},
-        h("span", {}, "Provider"),
-        (() => {
-          const sel = h(
-            "select",
-            { dataset: { field: "Search provider" } },
-            h("option", { value: "" }, "Disabled"),
-            h("option", { value: "exa" }, "Exa"),
-            h("option", { value: "firecrawl" }, "Firecrawl"),
-            h("option", { value: "searxng" }, "searXNG"),
-            h("option", { value: "duckduckgo" }, "DuckDuckGo"),
-          );
-          sel.value = s.search_provider ?? "";
-          return sel;
-        })(),
-      ),
-      field("Search base URL", s.search_base_url ?? ""),
-      h(
-        "label",
-        {},
-        h("span", {}, "Search API key"),
-        h("input", {
-          type: "password",
-          placeholder: "Empty = unchanged",
-          dataset: { field: "Search API key" },
-        }),
-      ),
-      h(
-        "p",
-        { class: "muted small" },
-        "searXNG uses the instance URL; Exa/Firecrawl need an API key.",
-      ),
-      h(
-        "label",
-        {},
-        h("span", {}, "API key"),
-        h("input", {
-          type: "password",
-          placeholder: view.has_key ? `Stored in ${view.key_backend}` : "Not set",
-          dataset: { field: "API key" },
-        }),
-      ),
-      h("p", { class: "muted small" }, "Leave the key empty to keep the stored one."),
+      { class: "modal settings-modal" },
       h(
         "div",
-        { class: "approval-actions" },
-        h(
-          "button",
-          {
-            class: "primary",
-            onclick: async () => {
-              const val = (name: string) =>
-                (document.querySelector<HTMLInputElement>(`input[data-field="${name}"]`)?.value ??
-                  "").trim();
-              const sel = (name: string) =>
-                (document.querySelector<HTMLSelectElement>(`select[data-field="${name}"]`)?.value ??
-                  "").trim();
-              try {
-                ui.settings = await call.invoke<SettingsView>("set_settings", {
-                  input: {
-                    base_url: val("Base URL"),
-                    model: val("Model"),
-                    max_turns: Number(val("Max turns")) || 1,
-                    max_prompt_tokens: Number(val("Max prompt tokens")) || 1,
-                    shell_timeout_secs: Number(val("Shell timeout (s)")) || 1,
-                    embedding_model: val("Embedding model") || null,
-                    embedding_base_url: val("Embedding base URL") || null,
-                    search_provider: sel("Search provider") || null,
-                    search_base_url: val("Search base URL") || null,
-                    search_api_key: val("Search API key") || null,
-                    api_key: val("API key") || null,
-                  },
-                });
-                ui.settingsOpen = false;
-                ui.notice = "Settings saved.";
-                render();
-              } catch (e) {
-                ui.notice = String(e);
-                render();
-              }
-            },
-          },
-          "Save",
-        ),
+        { class: "settings-header" },
+        h("h2", {}, "Settings"),
+        h("button", { class: "ghost", style: "padding: 2px 8px;", onclick: close }, "×"),
+      ),
+      h(
+        "div",
+        { class: "settings-body" },
+        navContainer,
+        modelsPanel,
+        webPanel,
+        systemPanel,
+        limitsPanel,
+      ),
+      h(
+        "div",
+        { class: "settings-footer" },
+        h("button", { class: "primary", onclick: () => void save() }, "Save"),
         h("button", { class: "ghost", onclick: close }, "Close"),
       ),
     ),
