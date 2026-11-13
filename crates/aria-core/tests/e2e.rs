@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aria_core::agent::{Agent, ProviderSource, RunHandle};
-use aria_core::config::Caps;
+use aria_core::config::{ApprovalPolicy, Caps};
 use aria_core::db::{self, Db, Decision, RunState, ToolCallState};
 use aria_core::journal::Blobs;
 use aria_core::provider::{
@@ -240,7 +240,10 @@ mod tests {
             Arc::clone(&self.db),
             Arc::clone(&self.blobs),
             caps,
-            ProviderSource::Fixed(stub.provider()),
+            ProviderSource::Fixed {
+                provider: stub.provider(),
+                approval_policy: ApprovalPolicy::AlwaysAsk,
+            },
         )
     }
 
@@ -506,7 +509,10 @@ async fn reopening_mid_run_shows_the_same_run_and_completes() {
         Arc::clone(&repo.db),
         Arc::clone(&repo.blobs),
         Caps::default(),
-        ProviderSource::Fixed(stub.provider()),
+        ProviderSource::Fixed {
+            provider: stub.provider(),
+            approval_policy: ApprovalPolicy::AlwaysAsk,
+        },
     );
     let snapshot = reopened.snapshot(&run_id).unwrap();
     assert_eq!(snapshot.run.state, RunState::AwaitingApproval);

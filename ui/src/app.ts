@@ -1633,6 +1633,24 @@ function settingsModal(view: SettingsView): HTMLElement {
       { class: "muted small" },
       "Shell commands exceeding the timeout are forcibly terminated. Token limits stop execution before budget exhaustion.",
     ),
+    (() => {
+      const policySel = document.createElement("select");
+      policySel.dataset.field = "Approval policy";
+      policySel.className = "settings-input";
+      for (const [val, label] of [["always_ask", "Always ask (default)"], ["auto_approve_safe", "Auto-approve safe (file edits)"]] as const) {
+        const o = document.createElement("option");
+        o.value = val; o.textContent = label;
+        if ((s.approval_policy ?? "always_ask") === val) o.selected = true;
+        policySel.append(o);
+      }
+      return h(
+        "label",
+        {},
+        "Approval policy",
+        policySel,
+        h("p", { class: "muted small" }, "Auto-approve safe runs file edits, writes, moves and deletes without a prompt. Shell commands and web access always ask."),
+      );
+    })(),
   );
   panelElements.set("limits", limitsPanel);
 
@@ -1674,6 +1692,7 @@ function settingsModal(view: SettingsView): HTMLElement {
           search_api_key: val("Search API key") || null,
           vision_model: val("Vision model") || null,
           api_key: val("API key") || null,
+          approval_policy: sel("Approval policy") || "always_ask",
         },
       });
 

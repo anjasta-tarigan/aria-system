@@ -59,6 +59,7 @@ const settings: SettingsView = {
     search_provider: null,
     search_base_url: null,
     vision_model: null,
+    approval_policy: "always_ask",
   },
   has_key: true,
   key_backend: "keyring",
@@ -562,6 +563,7 @@ const handlers: Record<string, Handler> = {
       search_provider: (input.search_provider as string) ?? null,
       search_base_url: (input.search_base_url as string) ?? null,
       vision_model: (input.vision_model as string) ?? null,
+      approval_policy: (input.approval_policy as string) ?? "always_ask",
     };
     if (input.api_key) settings.has_key = true;
     return settings;

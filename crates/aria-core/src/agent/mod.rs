@@ -17,7 +17,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::config::{Caps, Config, Settings};
+use crate::config::{ApprovalPolicy, Caps, Config, Settings};
 use crate::db::{
     self, Approval, ApprovalClass, Db, DbError, Decision, Role, Run, RunState, ToolCall,
     ToolCallState,
@@ -102,14 +102,14 @@ pub enum RunEvent {
 /// How to build a [`Provider`] for a Run: an injected fake in tests, the
 /// settings-backed OpenAI client in the app.
 pub enum ProviderSource {
-    Fixed(Arc<dyn Provider>),
+    Fixed { provider: Arc<dyn Provider>, approval_policy: ApprovalPolicy },
     Settings { settings: Settings, api_key: String },
 }
 
 impl ProviderSource {
     fn build(&self) -> std::result::Result<AnyProvider, crate::provider::ProviderError> {
         match self {
-            ProviderSource::Fixed(p) => Ok(AnyProvider::Custom(Arc::clone(p))),
+            ProviderSource::Fixed { provider, .. } => Ok(AnyProvider::Custom(Arc::clone(provider))),
             ProviderSource::Settings { settings, api_key } => Ok(AnyProvider::OpenAi(
                 crate::provider::OpenAiProvider::new(settings.clone(), api_key.clone())?,
             )),
@@ -312,10 +312,11 @@ impl Agent {
             })),
         };
         let provider = self.source.build()?;
-        let search = match &self.source {
+        let (search, vision, approval_policy) = match &self.source {
             ProviderSource::Settings { settings, .. } => {
-                let provider = settings.search_provider.as_deref().and_then(SearchProvider::parse);
-                provider.map(|p| {
+                let search_provider =
+                    settings.search_provider.as_deref().and_then(SearchProvider::parse);
+                let search = search_provider.map(|p| {
                     let api_key = self
                         .config
                         .as_ref()
@@ -325,30 +326,26 @@ impl Agent {
                         api_key,
                         base_url: settings.search_base_url.clone(),
                     }
-                })
-            }
-            ProviderSource::Fixed(_) => None,
-        };
-        let vision = match &self.source {
-            ProviderSource::Settings { settings, .. } => {
-                let model = settings
+                });
+                let vision_model = settings
                     .vision_model
                     .clone()
                     .unwrap_or_else(|| settings.model.clone());
-                if model.is_empty() {
+                let vision = if vision_model.is_empty() {
                     None
                 } else {
                     Some(crate::tools::vision::VisionConfig {
-                        model,
+                        model: vision_model,
                         base_url: settings.base_url.clone(),
                         api_key: self
                             .config
                             .as_ref()
                             .and_then(|c| c.api_key().ok().flatten().map(|(k, _)| k)),
                     })
-                }
+                };
+                (search, vision, settings.approval_policy)
             }
-            ProviderSource::Fixed(_) => None,
+            ProviderSource::Fixed { approval_policy, .. } => (None, None, *approval_policy),
         };
         let ctx = LoopCtx {
             db: Arc::clone(&self.db),
@@ -361,6 +358,7 @@ impl Agent {
             soft_warned: false,
             search,
             vision,
+            approval_policy,
         };
         tokio::spawn(ctx.run_to_end());
         Ok(handle)
@@ -386,6 +384,14 @@ fn pending_approval(approval: &Approval, call: &ToolCall) -> PendingApproval {
     }
 }
 
+/// Whether a tool class needs a per-call approval under the given policy.
+fn needs_approval(class: ApprovalClass, policy: ApprovalPolicy) -> bool {
+    match policy {
+        ApprovalPolicy::AlwaysAsk => class.requires_approval(),
+        ApprovalPolicy::AutoApproveSafe => matches!(class, ApprovalClass::Exec | ApprovalClass::Network),
+    }
+}
+
 /// State owned by one Run. Nothing here outlives the process except what the
 /// loop has already written to the database.
 struct LoopCtx {
@@ -399,6 +405,7 @@ struct LoopCtx {
     soft_warned: bool,
     search: Option<SearchConfig>,
     vision: Option<crate::tools::vision::VisionConfig>,
+    approval_policy: ApprovalPolicy,
 }
 
 impl LoopCtx {
@@ -774,7 +781,7 @@ impl LoopCtx {
         request: &ToolCallRequest,
     ) -> Result<()> {
         let class = tools::approval_class(&request.function.name).unwrap_or(ApprovalClass::Read);
-        let state = if class.requires_approval() {
+        let state = if needs_approval(class, self.approval_policy) {
             ToolCallState::Pending
         } else {
             ToolCallState::Approved
@@ -791,7 +798,7 @@ impl LoopCtx {
                 state,
             )
         })?;
-        if class.requires_approval() {
+        if needs_approval(class, self.approval_policy) {
             let approval = self.call(|c| db::insert_approval(c, &call.id))?;
             self.emit(RunEvent::ApprovalRequested {
                 pending: pending_approval(&approval, &call),

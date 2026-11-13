@@ -1,4 +1,4 @@
-use aria_core::config::{Caps, Config, SecretBackend, Settings};
+use aria_core::config::{ApprovalPolicy, Caps, Config, SecretBackend, Settings};
 
 fn cfg() -> (tempfile::TempDir, Config) {
     let dir = tempfile::tempdir().unwrap();
@@ -14,6 +14,16 @@ fn defaults_when_no_config_file() {
     assert_eq!(s.caps.max_turns, 50);
     assert_eq!(s.caps.max_prompt_tokens, 200_000);
     assert_eq!(s.vision_model, None);
+}
+
+#[test]
+fn approval_policy_defaults_to_always_ask_and_parses() {
+    assert_eq!(Settings::default().approval_policy, ApprovalPolicy::AlwaysAsk);
+    let s: Settings = serde_json::from_str(
+        r#"{"base_url":"https://example.test/v1","model":"m","shell_timeout_secs":120,"approval_policy":"auto_approve_safe"}"#,
+    )
+    .unwrap();
+    assert_eq!(s.approval_policy, ApprovalPolicy::AutoApproveSafe);
 }
 
 #[test]

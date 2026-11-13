@@ -55,6 +55,18 @@ impl Caps {
     }
 }
 
+/// When the agent may run certain tool classes without a per-call approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalPolicy {
+    /// Every mutate/exec/network call waits for the user (current behavior).
+    #[default]
+    AlwaysAsk,
+    /// Read and file mutations (edit/write/delete/move) run automatically;
+    /// only shell (Exec) and network stay gated.
+    AutoApproveSafe,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -68,6 +80,8 @@ pub struct Settings {
     pub search_base_url: Option<String>,
     /// Vision (image input) model id; falls back to `model` when absent.
     pub vision_model: Option<String>,
+    #[serde(default)]
+    pub approval_policy: ApprovalPolicy,
 }
 
 impl Default for Settings {
@@ -82,6 +96,7 @@ impl Default for Settings {
             search_provider: None,
             search_base_url: None,
             vision_model: None,
+            approval_policy: ApprovalPolicy::AlwaysAsk,
         }
     }
 }

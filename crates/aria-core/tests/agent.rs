@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use aria_core::agent::{Agent, ProviderSource, RunEvent, RunHandle};
-use aria_core::config::Caps;
+use aria_core::config::{ApprovalPolicy, Caps, Settings};
 use aria_core::db::{self, Db, Decision, Role, RunState, ToolCallState};
 use aria_core::journal::Blobs;
 use aria_core::provider::{
@@ -144,7 +144,22 @@ impl Fx {
             Arc::clone(&self.db),
             Arc::new(Blobs::new(self._blob.path(), Arc::clone(&self.db))),
             caps,
-            ProviderSource::Fixed(provider),
+            ProviderSource::Fixed {
+                provider,
+                approval_policy: ApprovalPolicy::AlwaysAsk,
+            },
+        )
+    }
+
+    fn agent_with_settings(&self, caps: Caps, settings: Settings, provider: Arc<FakeProvider>) -> Agent {
+        Agent::new(
+            Arc::clone(&self.db),
+            Arc::new(Blobs::new(self._blob.path(), Arc::clone(&self.db))),
+            caps,
+            ProviderSource::Fixed {
+                provider,
+                approval_policy: settings.approval_policy,
+            },
         )
     }
 
@@ -408,7 +423,10 @@ async fn cancel_during_streaming_ends_cancelled() {
         Arc::clone(&fx.db),
         Arc::new(Blobs::new(fx._blob.path(), Arc::clone(&fx.db))),
         Caps::default(),
-        ProviderSource::Fixed(Arc::new(Endless(Mutex::new(true)))),
+        ProviderSource::Fixed {
+            provider: Arc::new(Endless(Mutex::new(true))),
+            approval_policy: ApprovalPolicy::AlwaysAsk,
+        },
     );
     let handle = agent.start(&fx.conversation_id, "talk forever").await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
@@ -460,7 +478,10 @@ async fn provider_error_ends_errored_with_a_reason() {
         Arc::clone(&fx.db),
         Arc::new(Blobs::new(fx._blob.path(), Arc::clone(&fx.db))),
         Caps::default(),
-        ProviderSource::Fixed(Arc::new(Failing)),
+        ProviderSource::Fixed {
+            provider: Arc::new(Failing),
+            approval_policy: ApprovalPolicy::AlwaysAsk,
+        },
     );
     let handle = agent.start(&fx.conversation_id, "hi").await.unwrap();
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Errored);
@@ -559,6 +580,44 @@ async fn shell_tool_results_are_fed_back_to_the_model() {
 
     let result = fx.tool_calls(&handle).remove(0).result.unwrap();
     assert!(result.contains("from-shell"), "{result}");
+}
+
+#[tokio::test]
+async fn auto_approve_safe_runs_mutate_without_parking() {
+    let fx = fixture();
+    let provider = FakeProvider::new(vec![
+        tools(vec![
+            call("e1", "edit_file", serde_json::json!({"path": "f.txt", "search": "original", "replace": "edited"})),
+        ]),
+        text("done "),
+    ]);
+    std::fs::write(fx.root().join("f.txt"), "original").unwrap();
+    let settings = Settings {
+        approval_policy: ApprovalPolicy::AutoApproveSafe,
+        model: "test-model".to_string(),
+        ..Settings::default()
+    };
+    let agent = fx.agent_with_settings(Caps::default(), settings, Arc::clone(&provider));
+    let handle = agent.start(&fx.conversation_id, "edit f.txt").await.unwrap();
+
+    // The Mutate edit must run to completion without parking on an approval.
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
+    assert_eq!(std::fs::read_to_string(fx.root().join("f.txt")).unwrap(), "edited");
+
+    // A run_shell (Exec) call must still park under AutoApproveSafe.
+    let provider2 = FakeProvider::new(vec![
+        tools(vec![call("s1", "run_shell", serde_json::json!({"cmd": "echo hi"}))]),
+        text("ran "),
+    ]);
+    let settings2 = Settings {
+        approval_policy: ApprovalPolicy::AutoApproveSafe,
+        model: "test-model".to_string(),
+        ..Settings::default()
+    };
+    let agent2 = fx.agent_with_settings(Caps::default(), settings2, Arc::clone(&provider2));
+    let handle2 = agent2.start(&fx.conversation_id, "run a command").await.unwrap();
+    wait_awaiting(&fx, &handle2).await;
+    assert!(fx.tool_calls(&handle2)[0].state == ToolCallState::Pending);
 }
 
 #[tokio::test]

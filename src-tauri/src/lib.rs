@@ -155,6 +155,8 @@ pub struct SettingsInput {
     pub search_base_url: Option<String>,
     pub search_api_key: Option<String>,
     pub vision_model: Option<String>,
+    /// Approval policy: "always_ask" (default) or "auto_approve_safe".
+    pub approval_policy: Option<String>,
 }
 
 // ------------------------------------------------------------------ assembly
@@ -701,6 +703,10 @@ fn set_settings(state: State<'_, App>, input: SettingsInput) -> CmdResult<Settin
             .vision_model
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
+        approval_policy: match input.approval_policy.as_deref().unwrap_or("always_ask") {
+            "auto_approve_safe" => aria_core::config::ApprovalPolicy::AutoApproveSafe,
+            _ => aria_core::config::ApprovalPolicy::AlwaysAsk,
+        },
     };
     if settings.model.is_empty() {
         return Err("a model name is required".into());

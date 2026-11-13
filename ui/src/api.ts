@@ -109,6 +109,7 @@ export interface Settings {
   search_provider: string | null;
   search_base_url: string | null;
   vision_model: string | null;
+  approval_policy: string;
 }
 
 export interface SettingsView {
@@ -189,6 +190,7 @@ export const api = {
     search_api_key?: string | null;
     vision_model?: string | null;
     api_key?: string | null;
+    approval_policy?: string | null;
   }) => invoke<SettingsView>("set_settings", { input }),
   listMemories: (workspaceId?: string | null) =>
     invoke<Memory[]>("list_memories", { workspaceId: workspaceId ?? null }),
