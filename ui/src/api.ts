@@ -205,6 +205,12 @@ export const api = {
       enabled,
       paths,
     }),
+  listWorkspaceDir: (workspaceId: string, rel: string) =>
+    invoke<string[]>("list_workspace_dir", { workspaceId, rel }),
+  readWorkspaceFile: (workspaceId: string, rel: string) =>
+    invoke<string>("read_workspace_file", { workspaceId, rel }),
+  writeWorkspaceFile: (workspaceId: string, rel: string, content: string) =>
+    invoke<void>("write_workspace_file", { workspaceId, rel, content }),
 };
 
 export interface Memory {

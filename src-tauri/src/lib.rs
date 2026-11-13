@@ -629,6 +629,62 @@ fn changed_files(
         .collect())
 }
 
+/// List a workspace directory (relative paths), directories marked with a
+/// trailing slash. Read-only; contained to the workspace root.
+#[tauri::command]
+async fn list_workspace_dir(state: State<'_, App>, workspace_id: String, rel: String) -> CmdResult<Vec<String>> {
+    let inner = Arc::clone(&state.inner);
+    tokio::task::spawn_blocking(move || -> CmdResult<Vec<String>> {
+        let ws = inner.db.call(|c| db::get_workspace(c, &workspace_id)).map_err(err)?;
+        let root = WorkspaceRoot::new(&ws.root_path).map_err(err)?;
+        let resolved = root.resolve_read(&rel).map_err(err)?;
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(&resolved).map_err(err)? {
+            let entry = entry.map_err(err)?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_dir = entry.file_type().map_err(err)?.is_dir();
+            out.push(if is_dir { format!("{name}/") } else { name });
+        }
+        out.sort();
+        Ok(out)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Read a workspace file as UTF-8. Contained to the workspace root; refuses
+/// binary content via the journal's read_text.
+#[tauri::command]
+async fn read_workspace_file(state: State<'_, App>, workspace_id: String, rel: String) -> CmdResult<String> {
+    let inner = Arc::clone(&state.inner);
+    tokio::task::spawn_blocking(move || -> CmdResult<String> {
+        let ws = inner.db.call(|c| db::get_workspace(c, &workspace_id)).map_err(err)?;
+        let root = WorkspaceRoot::new(&ws.root_path).map_err(err)?;
+        let resolved = root.resolve_read(&rel).map_err(err)?;
+        let rel_norm = resolved.strip_prefix(&root.root()).unwrap_or(&resolved).to_string_lossy().into_owned();
+        Ok(Blobs::read_text(&root.root(), &rel_norm).map_err(err)?)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Write a workspace file, journaling the prior version first (undoable, like
+/// edit_file). Contained to the workspace root via resolve_create.
+#[tauri::command]
+async fn write_workspace_file(state: State<'_, App>, workspace_id: String, rel: String, content: String) -> CmdResult<()> {
+    let inner = Arc::clone(&state.inner);
+    tokio::task::spawn_blocking(move || -> CmdResult<()> {
+        let ws = inner.db.call(|c| db::get_workspace(c, &workspace_id)).map_err(err)?;
+        let root = WorkspaceRoot::new(&ws.root_path).map_err(err)?;
+        let resolved = root.resolve_create(&rel).map_err(err)?;
+        let rel_norm = resolved.strip_prefix(&root.root()).unwrap_or(&resolved).to_string_lossy().into_owned();
+        inner.blobs.write_file(&workspace_id, &root.root(), &rel_norm, &content).map_err(err)?;
+        Ok(())
+    })
+    .await
+    .map_err(err)?
+}
+
 #[tauri::command]
 fn search_messages(
     state: State<'_, App>,
@@ -831,6 +887,9 @@ pub fn run() {
             get_run_state,
             undo,
             changed_files,
+            list_workspace_dir,
+            read_workspace_file,
+            write_workspace_file,
             search_messages,
             get_settings,
             set_settings,

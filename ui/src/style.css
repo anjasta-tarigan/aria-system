@@ -1107,6 +1107,39 @@ pre {
   padding: 3px 4px 3px var(--sp-3);
 }
 
+.file-tree {
+  display: flex;
+  flex-direction: column;
+  font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  font-size: var(--fs-sm);
+  max-height: 220px;
+  overflow-y: auto;
+  margin: var(--sp-1) 0;
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px var(--sp-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.file-row:hover {
+  background: var(--panel-2);
+}
+
+.editor {
+  width: 100%;
+  min-height: 160px;
+  resize: vertical;
+  font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
 .composer {
   display: flex;
   gap: var(--sp-3);

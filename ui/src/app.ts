@@ -152,6 +152,14 @@ let unsubscribe: (() => void) | null = null;
 /// Set by stop(); stale async work must not paint over the new instance.
 let disposed = false;
 
+// Files panel state — kept module-level so expansion/editing survive re-renders.
+let filesOpen = true;
+let activeFile: string | null = null;
+// Loaded file contents, keyed by rel, restored into the freshly-built editor on
+// every re-render so openFile/saveFile don't lose the text (render rebuilds it).
+const editorBuffer: Map<string, string> = new Map();
+const openDirs: Set<string> = new Set([""]);
+
 function activeRun(): Run | null {
   return ui.detail?.conversation.run ?? null;
 }
@@ -785,11 +793,14 @@ function conversationPane(detail: ConversationDetail): HTMLElement {
 
   const composer = composerNode(busy, hasFolder);
 
+  const filesPanel = hasFolder ? filesPanelNode(conv) : null;
+
   return h(
     "section",
     { class: "conversation" },
     header,
     transcript,
+    filesPanel,
     ui.changed.length
       ? h(
           "div",
@@ -830,6 +841,167 @@ function conversationPane(detail: ConversationDetail): HTMLElement {
         )
       : null,
   );
+}
+
+// Built-in editor: a workspace file tree + <textarea> read/written through the
+// same scope-contained backend commands the agent uses (no escape hatch to an
+// arbitrary path).
+function filesPanelNode(conv: ConversationView): HTMLElement {
+  const workspaceId = conv.workspace_id!;
+  const tree = h("div", { class: "file-tree" });
+  const editor = h("textarea", {
+    class: "editor",
+    rows: "12",
+    placeholder: "Select a file to edit",
+    readonly: activeFile === null,
+  }) as HTMLTextAreaElement;
+  if (activeFile) editor.value = editorBuffer.get(activeFile) ?? "";
+  const saved = h("span", { class: "muted small" });
+
+  const reload = () => void renderFileTree(tree, workspaceId, editor, saved);
+
+  const panel = h(
+    "div",
+    { class: "changed" },
+    h(
+      "div",
+      { class: "section-row" },
+      h(
+        "button",
+        {
+          class: "tree-caret",
+          title: filesOpen ? "Collapse" : "Expand",
+          onclick: () => {
+            filesOpen = !filesOpen;
+            render();
+          },
+        },
+        filesOpen ? "▾" : "▸",
+      ),
+      h("span", { class: "section-title" }, "Files"),
+    ),
+    filesOpen
+      ? h(
+          "div",
+          {},
+          tree,
+          activeFile
+            ? h(
+                "div",
+                { class: "section-row" },
+                h("span", { class: "muted small" }, activeFile),
+                h(
+                  "button",
+                  {
+                    class: "primary",
+                    onclick: () => void saveFile(workspaceId, editor, saved),
+                  },
+                  "Save",
+                ),
+                saved,
+              )
+            : null,
+          editor,
+        )
+      : null,
+  );
+
+  reload();
+  return panel;
+}
+
+async function renderFileTree(
+  container: HTMLElement,
+  workspaceId: string,
+  editor: HTMLTextAreaElement,
+  saved: HTMLElement,
+) {
+  container.replaceChildren();
+  // Render each open dir, sorted with directories before files, indented by depth.
+  const rels = [...openDirs].sort();
+  for (const rel of rels) {
+    const depth = rel === "" ? 0 : rel.split("/").length - 1;
+    let entries: string[];
+    try {
+      entries = await call.invoke<string[]>("list_workspace_dir", { workspaceId, rel });
+    } catch (e) {
+      container.append(
+        h("div", { class: "file-row muted small" }, `Could not read ${rel || "."}: ${e}`),
+      );
+      continue;
+    }
+    entries.sort((a, b) => Number(b.endsWith("/")) - Number(a.endsWith("/")) || a.localeCompare(b));
+    const childPrefix = rel === "" ? "" : rel;
+    for (const name of entries) {
+      const childRel = childPrefix + name;
+      const isDir = name.endsWith("/");
+      container.append(
+        h(
+          "div",
+          {
+            class: "file-row",
+            style: `padding-left:${depth * 14 + 4}px`,
+            onclick: () => {
+              if (isDir) {
+                if (openDirs.has(childRel)) openDirs.delete(childRel);
+                else openDirs.add(childRel);
+                renderFileTree(container, workspaceId, editor, saved);
+              } else {
+                void openFile(workspaceId, childRel, editor, saved);
+              }
+            },
+          },
+          isDir ? "▸ " : "  ", // shortcut: plain glyph tree, not recursive DOM
+          name,
+        ),
+      );
+    }
+  }
+}
+
+async function openFile(
+  workspaceId: string,
+  rel: string,
+  editor: HTMLTextAreaElement,
+  saved: HTMLElement,
+) {
+  activeFile = rel;
+  saved.textContent = "";
+  try {
+    const text = await call.invoke<string>("read_workspace_file", { workspaceId, rel });
+    editorBuffer.set(rel, text);
+    // Re-render so the Save row appears (filesPanelNode restores the editor
+    // value from editorBuffer, so the just-loaded text survives the rebuild).
+    render();
+  } catch (e) {
+    activeFile = null;
+    editorBuffer.delete(rel);
+    editor.value = "";
+    editor.readOnly = true;
+    ui.notice = `Could not open ${rel}: ${e}`;
+    return;
+  }
+}
+
+async function saveFile(
+  workspaceId: string,
+  editor: HTMLTextAreaElement,
+  saved: HTMLElement,
+) {
+  if (!activeFile) return;
+  try {
+    const text = editor.value;
+    editorBuffer.set(activeFile, text);
+    await call.invoke<void>("write_workspace_file", {
+      workspaceId,
+      rel: activeFile,
+      content: text,
+    });
+    saved.textContent = "Saved.";
+    await refreshChanged();
+  } catch (e) {
+    ui.notice = `Could not save ${activeFile}: ${e}`;
+  }
 }
 
 function systemAccessModal(conversationId: string): HTMLElement {

@@ -581,6 +581,16 @@ const handlers: Record<string, Handler> = {
     const d = conversations.get(String(a.conversationId));
     return d ? (mainPaths.get(d.conversation.id) ?? []) : [];
   },
+  list_workspace_dir: (a): string[] => {
+    const rel = String(a.rel ?? "");
+    if (rel === "") return ["src/", "README.md", "package.json"];
+    if (rel === "src/") return ["main.ts", "app.ts"];
+    return [];
+  },
+  read_workspace_file: (a): string => "// mock file: " + String(a.rel ?? ""),
+  write_workspace_file: () => {
+    // Mock backend is journaled externally; nothing to persist here.
+  },
   set_main_system_scope: (a) => {
     const d = conversations.get(String(a.conversationId));
     if (!d) throw new Error("no such conversation");
