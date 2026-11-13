@@ -17,7 +17,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::config::{Caps, Settings};
+use crate::config::{Caps, Config, Settings};
 use crate::db::{
     self, Approval, ApprovalClass, Db, DbError, Decision, Role, Run, RunState, ToolCall,
     ToolCallState,
@@ -25,6 +25,7 @@ use crate::db::{
 use crate::journal::Blobs;
 use crate::provider::{ChatMessage, Provider, ProviderEvent, ToolCallRequest};
 use crate::tools::{self, ToolContext, ToolOutcome, ToolRegistry};
+use crate::tools::search::{SearchConfig, SearchProvider};
 use crate::workspace::{Scope, WorkspaceRoot};
 
 /// How often a parked or streaming Run checks for cancellation and Approval
@@ -174,6 +175,7 @@ pub struct Agent {
     caps: Caps,
     shell_timeout_secs: u64,
     source: ProviderSource,
+    config: Option<Arc<Config>>,
 }
 
 impl Agent {
@@ -184,12 +186,19 @@ impl Agent {
             caps,
             shell_timeout_secs: 120,
             source,
+            config: None,
         }
     }
 
     /// Change the default shell timeout for this agent's Runs.
     pub fn with_shell_timeout(mut self, secs: u64) -> Self {
         self.shell_timeout_secs = secs;
+        self
+    }
+
+    /// Carry the app config so search keys can be read at drive time.
+    pub fn with_config(mut self, config: Arc<Config>) -> Self {
+        self.config = Some(config);
         self
     }
 
@@ -303,6 +312,23 @@ impl Agent {
             })),
         };
         let provider = self.source.build()?;
+        let search = match &self.source {
+            ProviderSource::Settings { settings, .. } => {
+                let provider = settings.search_provider.as_deref().and_then(SearchProvider::parse);
+                provider.map(|p| {
+                    let api_key = self
+                        .config
+                        .as_ref()
+                        .and_then(|c| c.search_api_key().ok().flatten().map(|(k, _)| k));
+                    SearchConfig {
+                        provider: p,
+                        api_key,
+                        base_url: settings.search_base_url.clone(),
+                    }
+                })
+            }
+            ProviderSource::Fixed(_) => None,
+        };
         let ctx = LoopCtx {
             db: Arc::clone(&self.db),
             blobs: Arc::clone(&self.blobs),
@@ -312,6 +338,7 @@ impl Agent {
             handle: handle.clone(),
             run_id,
             soft_warned: false,
+            search,
         };
         tokio::spawn(ctx.run_to_end());
         Ok(handle)
@@ -348,6 +375,7 @@ struct LoopCtx {
     handle: RunHandle,
     run_id: String,
     soft_warned: bool,
+    search: Option<SearchConfig>,
 }
 
 impl LoopCtx {
@@ -425,6 +453,7 @@ impl LoopCtx {
             shell_timeout_secs: self.shell_timeout_secs,
             embed: self.provider.embedder(),
             scope: scope.clone(),
+            search: self.search.clone(),
         };
 
         loop {

@@ -151,6 +151,9 @@ pub struct SettingsInput {
     pub embedding_model: Option<String>,
     /// Only present when the user replaces the key.
     pub api_key: Option<String>,
+    pub search_provider: Option<String>,
+    pub search_base_url: Option<String>,
+    pub search_api_key: Option<String>,
 }
 
 // ------------------------------------------------------------------ assembly
@@ -683,6 +686,16 @@ fn set_settings(state: State<'_, App>, input: SettingsInput) -> CmdResult<Settin
             .embedding_model
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
+        search_provider: input
+            .search_provider
+            .clone()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        search_base_url: input
+            .search_base_url
+            .clone()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
     };
     if settings.model.is_empty() {
         return Err("a model name is required".into());
@@ -694,6 +707,14 @@ fn set_settings(state: State<'_, App>, input: SettingsInput) -> CmdResult<Settin
         .filter(|k| !k.is_empty())
     {
         config.set_api_key(&key).map_err(err)?;
+    }
+    if let Some(key) = input
+        .search_api_key
+        .clone()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+    {
+        config.set_search_api_key(&key).map_err(err)?;
     }
     get_settings(state)
 }

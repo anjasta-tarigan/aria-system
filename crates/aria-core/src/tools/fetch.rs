@@ -82,7 +82,7 @@ pub async fn fetch_url(url: &str, max_bytes: usize) -> Result<FetchOutcome> {
     })
 }
 
-fn check_host_allowed(addrs: &[IpAddr]) -> Result<()> {
+pub fn check_host_allowed(addrs: &[IpAddr]) -> Result<()> {
     if addrs.is_empty() {
         return Err(ToolError::Refused("host resolved to no addresses".into()));
     }

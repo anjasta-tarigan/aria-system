@@ -33,6 +33,7 @@ fn fx() -> Fx {
         blobs: Arc::new(Blobs::new(blob_dir.path(), Arc::clone(&db))),
         shell_timeout_secs: 10,
         embed: None,
+        search: None,
     };
     Fx {
         _ws: ws,
@@ -57,7 +58,7 @@ async fn call(f: &Fx, tool: &str, args: serde_json::Value) -> ToolOutcome {
 #[test]
 fn registry_advertises_ten_tools_with_classes() {
     let specs = ToolRegistry::describe(&Scope::Workspace(WorkspaceRoot::new(std::path::Path::new("/tmp")).unwrap()));
-    assert_eq!(specs.len(), 12);
+    assert_eq!(specs.len(), 13);
     assert_eq!(specs.len(), tools::TOOLS.len());
     assert_eq!(tools::approval_class(tools::READ_FILE), Some(ApprovalClass::Read));
     assert_eq!(tools::approval_class(tools::RUN_SHELL), Some(ApprovalClass::Exec));
@@ -371,7 +372,13 @@ async fn without_a_folder_only_filesystem_free_tools_are_offered() {
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         names,
-        vec![tools::WEB_FETCH, tools::TODOS, tools::REMEMBER, tools::RECALL]
+        vec![
+            tools::WEB_FETCH,
+            tools::TODOS,
+            tools::REMEMBER,
+            tools::RECALL,
+            tools::WEB_SEARCH
+        ]
     );
 
     // The folder tools are not advertised, but asking for one is recoverable.
@@ -388,6 +395,7 @@ async fn without_a_folder_only_filesystem_free_tools_are_offered() {
         shell_timeout_secs: 10,
         embed: None,
         scope: aria_core::workspace::Scope::None,
+        search: None,
     };
 
     let cases = [
@@ -433,6 +441,7 @@ async fn main_system_scope_reads_allowed_paths_and_refuses_others() {
         embed: None,
         // Factory-style path: only `allowed` may be touched.
         scope: Scope::MainSystem(vec![allowed.path().to_path_buf()]),
+        search: None,
     };
 
     let ok = ToolRegistry::execute(

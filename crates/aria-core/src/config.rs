@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 const KEYRING_SERVICE: &str = "dev.aria.app";
 const KEYRING_USER: &str = "provider-api-key";
+const SEARCH_KEYRING_USER: &str = "search-api-key";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -63,6 +64,8 @@ pub struct Settings {
     pub shell_timeout_secs: u64,
     pub embedding_base_url: Option<String>,
     pub embedding_model: Option<String>,
+    pub search_provider: Option<String>,
+    pub search_base_url: Option<String>,
 }
 
 impl Default for Settings {
@@ -74,6 +77,8 @@ impl Default for Settings {
             shell_timeout_secs: 120,
             embedding_base_url: None,
             embedding_model: None,
+            search_provider: None,
+            search_base_url: None,
         }
     }
 }
@@ -122,6 +127,10 @@ impl Config {
         self.dir.join("api-key")
     }
 
+    fn search_key_path(&self) -> PathBuf {
+        self.dir.join("search-api-key")
+    }
+
     pub fn load(&self) -> Result<Settings> {
         match std::fs::read_to_string(self.settings_path()) {
             Ok(text) => Ok(serde_json::from_str(&text)?),
@@ -140,6 +149,10 @@ impl Config {
 
     fn keyring(&self) -> Option<keyring::Entry> {
         keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).ok()
+    }
+
+    fn search_keyring(&self) -> Option<keyring::Entry> {
+        keyring::Entry::new(KEYRING_SERVICE, SEARCH_KEYRING_USER).ok()
     }
 
     /// Store the key. Prefers the OS secret service.
@@ -196,6 +209,48 @@ impl Config {
             let _ = entry.delete_credential();
         }
         match std::fs::remove_file(self.key_path()) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Store the search key, preferring the OS secret service.
+    pub fn set_search_api_key(&self, key: &str) -> Result<SecretBackend> {
+        if let Some(entry) = self.search_keyring()
+            && entry.set_password(key).is_ok()
+        {
+            let _ = std::fs::remove_file(self.search_key_path());
+            return Ok(SecretBackend::Keyring);
+        }
+        std::fs::create_dir_all(&self.dir)?;
+        std::fs::write(self.search_key_path(), key)?;
+        restrict_permissions(&self.search_key_path())?;
+        Ok(SecretBackend::FileFallback)
+    }
+
+    pub fn search_api_key(&self) -> Result<Option<(String, SecretBackend)>> {
+        if let Some(entry) = self.search_keyring()
+            && let Ok(key) = entry.get_password()
+            && !key.is_empty()
+        {
+            return Ok(Some((key, SecretBackend::Keyring)));
+        }
+        match std::fs::read_to_string(self.search_key_path()) {
+            Ok(key) if !key.trim().is_empty() => {
+                Ok(Some((key.trim().to_string(), SecretBackend::FileFallback)))
+            }
+            Ok(_) => Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn clear_search_api_key(&self) -> Result<()> {
+        if let Some(entry) = self.search_keyring() {
+            let _ = entry.delete_credential();
+        }
+        match std::fs::remove_file(self.search_key_path()) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.into()),

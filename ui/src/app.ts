@@ -1315,6 +1315,42 @@ function settingsModal(view: SettingsView): HTMLElement {
         { class: "muted small" },
         "OpenAI-compatible embeddings endpoint. Leave blank to reuse the chat Base URL and model default (text-embedding-3-small).",
       ),
+      h("hr", {}),
+      h("h3", { class: "small muted" }, "Web search"),
+      h(
+        "label",
+        {},
+        h("span", {}, "Provider"),
+        (() => {
+          const sel = h(
+            "select",
+            { dataset: { field: "Search provider" } },
+            h("option", { value: "" }, "Disabled"),
+            h("option", { value: "exa" }, "Exa"),
+            h("option", { value: "firecrawl" }, "Firecrawl"),
+            h("option", { value: "searxng" }, "searXNG"),
+            h("option", { value: "duckduckgo" }, "DuckDuckGo"),
+          );
+          sel.value = s.search_provider ?? "";
+          return sel;
+        })(),
+      ),
+      field("Search base URL", s.search_base_url ?? ""),
+      h(
+        "label",
+        {},
+        h("span", {}, "Search API key"),
+        h("input", {
+          type: "password",
+          placeholder: "Empty = unchanged",
+          dataset: { field: "Search API key" },
+        }),
+      ),
+      h(
+        "p",
+        { class: "muted small" },
+        "searXNG uses the instance URL; Exa/Firecrawl need an API key.",
+      ),
       h(
         "label",
         {},
@@ -1337,6 +1373,9 @@ function settingsModal(view: SettingsView): HTMLElement {
               const val = (name: string) =>
                 (document.querySelector<HTMLInputElement>(`input[data-field="${name}"]`)?.value ??
                   "").trim();
+              const sel = (name: string) =>
+                (document.querySelector<HTMLSelectElement>(`select[data-field="${name}"]`)?.value ??
+                  "").trim();
               try {
                 ui.settings = await call.invoke<SettingsView>("set_settings", {
                   input: {
@@ -1347,6 +1386,9 @@ function settingsModal(view: SettingsView): HTMLElement {
                     shell_timeout_secs: Number(val("Shell timeout (s)")) || 1,
                     embedding_model: val("Embedding model") || null,
                     embedding_base_url: val("Embedding base URL") || null,
+                    search_provider: sel("Search provider") || null,
+                    search_base_url: val("Search base URL") || null,
+                    search_api_key: val("Search API key") || null,
                     api_key: val("API key") || null,
                   },
                 });

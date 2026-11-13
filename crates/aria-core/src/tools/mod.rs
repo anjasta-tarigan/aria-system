@@ -18,8 +18,10 @@ mod files;
 mod fetch;
 mod shell;
 mod memories;
+pub mod search;
 
 pub use fetch::{FetchOutcome, classify_ip, fetch_url};
+pub use search::{SearchConfig, SearchProvider, SearchHit, web_search};
 pub use shell::{ShellArgs, ShellOutcome, run_shell};
 
 #[derive(Debug, thiserror::Error)]
@@ -81,6 +83,9 @@ pub struct ToolContext {
     /// Embedding capability, when the provider supports it. Enables similarity
     /// recall; absent for test fakes, which then fall back to recency.
     pub embed: Option<Arc<dyn Embedder>>,
+    /// Web search configuration, when a provider is configured. Absent when
+    /// search is disabled; `web_search` then refuses.
+    pub search: Option<crate::tools::search::SearchConfig>,
 }
 
 impl ToolContext {}
@@ -102,9 +107,10 @@ pub const WEB_FETCH: &str = "web_fetch";
 pub const TODOS: &str = "todos";
 pub const REMEMBER: &str = "remember";
 pub const RECALL: &str = "recall";
+pub const WEB_SEARCH: &str = "web_search";
 
 /// The tool set with its approval classes.
-pub const TOOLS: [(&str, ApprovalClass); 12] = [
+pub const TOOLS: [(&str, ApprovalClass); 13] = [
     (READ_FILE, ApprovalClass::Read),
     (LIST_DIR, ApprovalClass::Read),
     (SEARCH_FILES, ApprovalClass::Read),
@@ -114,6 +120,7 @@ pub const TOOLS: [(&str, ApprovalClass); 12] = [
     (MOVE_FILE, ApprovalClass::Mutate),
     (RUN_SHELL, ApprovalClass::Exec),
     (WEB_FETCH, ApprovalClass::Network),
+    (WEB_SEARCH, ApprovalClass::Network),
     (TODOS, ApprovalClass::Read),
     (REMEMBER, ApprovalClass::Read),
     (RECALL, ApprovalClass::Read),
@@ -316,11 +323,23 @@ impl ToolRegistry {
                     }
                 }),
             ),
+            spec(
+                WEB_SEARCH,
+                "Search the web for a query and return ranked results (title, url, snippet). Results are fetched over https only.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string" },
+                        "max_results": { "type": "integer", "minimum": 1, "default": 5 }
+                    },
+                    "required": ["query"]
+                }),
+            ),
         ];
         if !matches!(scope, Scope::None) {
             return all;
         }
-        let usable = [WEB_FETCH, TODOS, REMEMBER, RECALL];
+        let usable = [WEB_FETCH, WEB_SEARCH, TODOS, REMEMBER, RECALL];
         all.into_iter()
             .filter(|s| usable.contains(&s.name.as_str()))
             .collect()
@@ -348,6 +367,7 @@ impl ToolRegistry {
             MOVE_FILE => files::move_file(ctx, parse_args(args)?).map(outcome),
             RUN_SHELL => shell::run_shell(ctx, parse_args(args)?, None).await.map(outcome),
             WEB_FETCH => fetch::web_fetch(parse_args(args)?).await.map(outcome),
+            WEB_SEARCH => search::web_search(ctx, parse_args(args)?).await.map(outcome),
             TODOS => files::todos(ctx, parse_args(args)?).map(outcome),
             REMEMBER => memories::remember(ctx, parse_args(args)?).await.map(outcome),
             RECALL => memories::recall(ctx, parse_args(args)?).await.map(outcome),
@@ -397,6 +417,7 @@ pub fn summarize(tool: &str, args: &str) -> ApprovalSummary {
         ),
         RUN_SHELL => ("Run shell command".to_string(), get("cmd")),
         WEB_FETCH => (format!("Fetch {}", get("url")), String::new()),
+        WEB_SEARCH => (format!("Search the web for {}", get("query")), String::new()),
         other => (format!("Run {other}"), args.to_string()),
     };
     ApprovalSummary { title, body }
@@ -433,6 +454,7 @@ pub fn context_for(
         blobs,
         shell_timeout_secs: 120,
         embed: None,
+        search: None,
     })
 }
 
