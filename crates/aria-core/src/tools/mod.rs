@@ -164,7 +164,11 @@ A folder is open in this conversation. Its tools act on that folder.
 - All paths are relative to the folder root. Never try to leave it.
 - Prefer search_files and read_file before editing.
 - edit_file replaces an exact substring that must occur exactly once; include
-  enough context to make it unique. Use write_file only for new files.";
+  enough context to make it unique. Use write_file only for new files.
+- Long or unattended work (builds, servers, training) should use
+  `run_background` instead of `run_shell`, then `poll_task` to read its
+  status and output. Chain by feeding a task's output into the next tool:
+  start it, do other work, then `poll_task` and act on the result.";
 
 /// Appended when no folder is open, so the model does not promise file work it
 /// cannot do.
