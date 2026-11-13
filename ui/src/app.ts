@@ -927,13 +927,43 @@ function filesPanelNode(conv: ConversationView): HTMLElement {
 // Background tasks for a workspace conversation: list + poll-to-terminal + kill.
 function backgroundTasksNode(conv: ConversationView): HTMLElement {
   const conversationId = conv.id;
+  const list = h("div", {});
 
+  const renderList = () => {
+    list.replaceChildren(
+      ...ui.bgTasks.map((t) =>
+        h(
+          "div",
+          { class: "section-row" },
+          h("code", {}, t.cmd),
+          h("span", { class: "muted small" }, t.status),
+          t.status === "running"
+            ? h(
+                "button",
+                {
+                  class: "link",
+                  onclick: async () => {
+                    await call.invoke("kill_background", { id: t.id });
+                    await load();
+                  },
+                },
+                "Kill",
+              )
+            : null,
+        ),
+      ),
+    );
+  };
+
+  // `load` refreshes only this panel's list, never `render()`: calling `render()`
+  // here would rebuild the pane and re-trigger `load`, an infinite re-render
+  // storm that starves the Files panel's own async tree population.
   const load = async () => {
     if (disposed) return;
     ui.bgTasks = await call.invoke<BackgroundTask[]>("list_background", {
       conversationId,
     });
-    render();
+    renderList();
     if (ui.bgTasks.some((t) => t.status === "running")) {
       bgPoll = setTimeout(load, 2000);
     }
@@ -943,27 +973,7 @@ function backgroundTasksNode(conv: ConversationView): HTMLElement {
     "div",
     { class: "changed" },
     h("span", { class: "section-title" }, "Background tasks"),
-    ...ui.bgTasks.map((t) =>
-      h(
-        "div",
-        { class: "section-row" },
-        h("code", {}, t.cmd),
-        h("span", { class: "muted small" }, t.status),
-        t.status === "running"
-          ? h(
-              "button",
-              {
-                class: "link",
-                onclick: async () => {
-                  await call.invoke("kill_background", { id: t.id });
-                  await load();
-                },
-              },
-              "Kill",
-            )
-          : null,
-      ),
-    ),
+    list,
   );
 
   void load();
@@ -2218,10 +2228,17 @@ export const testHooks = {
     await refreshConversations();
     await selectConversation(conv.id);
   },
-  startBackground: (cmd: string) =>
-    call.invoke<BackgroundTask>("start_background", {
+  startBackground: async (cmd: string) => {
+    const task = await call.invoke<BackgroundTask>("start_background", {
       cmd,
       conversationId: ui.detail!.conversation.id,
-    }),
-  killBackground: (id: string) => call.invoke<BackgroundTask>("kill_background", { id }),
+    });
+    render();
+    return task;
+  },
+  killBackground: async (id: string) => {
+    const task = await call.invoke<BackgroundTask>("kill_background", { id });
+    render();
+    return task;
+  },
 };
