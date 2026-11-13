@@ -11,7 +11,9 @@ use aria_core::agent::{Agent, PendingApproval, ProviderSource, RunEvent, RunHand
 use aria_core::config::{Config, SecretBackend, Settings};
 use aria_core::db::{self, Db, MessageHit, Role, Run, Todo, ToolCall};
 use aria_core::journal::Blobs;
-use aria_core::workspace::WorkspaceRoot;
+use aria_core::db::BackgroundTask;
+use aria_core::tools::BackgroundTasks;
+use aria_core::workspace::{Scope, WorkspaceRoot};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -142,6 +144,14 @@ pub struct SettingsView {
 pub struct CloudFolder {
     pub name: String,
     pub path: String,
+}
+
+/// Returned by `poll_background`: the task row plus the latest log tail (tuples
+/// don't serialize cleanly to JS).
+#[derive(Debug, Clone, Serialize)]
+pub struct BackgroundPoll {
+    pub task: BackgroundTask,
+    pub tail: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -752,6 +762,80 @@ fn list_cloud_folders() -> CmdResult<Vec<CloudFolder>> {
         .collect())
 }
 
+/// Build a cheap [`BackgroundTasks`] for a conversation's workspace root, reusing
+/// the shared `db`/`blobs`. Returns `Err` when the conversation has no folder.
+fn background_tasks(
+    db: &Arc<Db>,
+    blobs: &Arc<Blobs>,
+    conversation_id: &str,
+) -> CmdResult<BackgroundTasks> {
+    let conv = db
+        .call(|c| db::get_conversation(c, conversation_id))
+        .map_err(err)?;
+    let Some(ws_id) = conv.workspace_id else {
+        return Err("No folder open in this conversation".into());
+    };
+    let ws = db
+        .call(|c| db::get_workspace(c, &ws_id))
+        .map_err(err)?;
+    let root = WorkspaceRoot::new(&ws.root_path).map_err(err)?;
+    let root_path = root.root().to_path_buf();
+    Ok(BackgroundTasks {
+        db: Arc::clone(db),
+        blobs: Arc::clone(blobs),
+        root: root_path,
+        scope: Scope::Workspace(root),
+        shell_timeout_secs: 120,
+    })
+}
+
+/// `poll`/`kill` key their log temp files under `blobs.dir()` and take only an
+/// id, so no workspace resolution is needed — build from the blobs dir.
+fn background_tasks_for_id(db: &Arc<Db>, blobs: &Arc<Blobs>) -> BackgroundTasks {
+    BackgroundTasks {
+        db: Arc::clone(db),
+        blobs: Arc::clone(blobs),
+        root: blobs.dir().to_path_buf(),
+        scope: Scope::None,
+        shell_timeout_secs: 120,
+    }
+}
+
+#[tauri::command]
+async fn start_background(
+    state: State<'_, App>,
+    cmd: String,
+    conversation_id: String,
+) -> CmdResult<BackgroundTask> {
+    let bt = background_tasks(&state.inner.db, &state.inner.blobs, &conversation_id)?;
+    bt.start(&conversation_id, &cmd).map_err(err)
+}
+
+#[tauri::command]
+async fn poll_background(state: State<'_, App>, id: String) -> CmdResult<BackgroundPoll> {
+    let (task, tail) = background_tasks_for_id(&state.inner.db, &state.inner.blobs)
+        .poll(&id)
+        .map_err(err)?;
+    Ok(BackgroundPoll { task, tail })
+}
+
+#[tauri::command]
+async fn list_background(
+    state: State<'_, App>,
+    conversation_id: String,
+) -> CmdResult<Vec<BackgroundTask>> {
+    let bt = background_tasks(&state.inner.db, &state.inner.blobs, &conversation_id)?;
+    bt.list(&conversation_id).map_err(err)
+}
+
+#[tauri::command]
+async fn kill_background(state: State<'_, App>, id: String) -> CmdResult<BackgroundTask> {
+    background_tasks_for_id(&state.inner.db, &state.inner.blobs)
+        .kill(&id)
+        .await
+        .map_err(err)
+}
+
 #[tauri::command]
 fn set_settings(state: State<'_, App>, input: SettingsInput) -> CmdResult<SettingsView> {
     let config = &state.inner.config;
@@ -896,6 +980,10 @@ pub fn run() {
             list_memories,
             delete_memory,
             list_cloud_folders,
+            start_background,
+            poll_background,
+            list_background,
+            kill_background,
         ])
         .run(tauri::generate_context!())
         .expect("error while running aria");

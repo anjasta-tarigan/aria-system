@@ -36,6 +36,7 @@ fn fx() -> Fx {
         embed: None,
         search: None,
         vision: None,
+        background: None,
     };
     Fx { _ws: ws, ctx }
 }

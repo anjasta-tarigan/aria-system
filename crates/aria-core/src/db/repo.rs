@@ -1030,6 +1030,90 @@ fn memory_from_row(r: &Row<'_>) -> rusqlite::Result<Memory> {
     })
 }
 
+// ------------------------------------------------------- background tasks
+
+/// Insert a freshly started background task (status `running`).
+pub fn insert_background_task(
+    conn: &Connection,
+    task: &BackgroundTask,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO background_task
+           (id, cmd, conversation_id, started_at, ended_at, exit_code, status, log_blob)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            task.id,
+            task.cmd,
+            task.conversation_id,
+            task.started_at,
+            task.ended_at,
+            task.exit_code,
+            task.status.as_str(),
+            task.log_blob,
+        ],
+    )?;
+    Ok(())
+}
+
+fn background_task_from_row(r: &Row<'_>) -> rusqlite::Result<BackgroundTask> {
+    let status: String = r.get(6)?;
+    Ok(BackgroundTask {
+        id: r.get(0)?,
+        cmd: r.get(1)?,
+        conversation_id: r.get(2)?,
+        started_at: r.get(3)?,
+        ended_at: r.get(4)?,
+        exit_code: r.get(5)?,
+        status: BackgroundStatus::from_str(&status).map_err(to_sql_err)?,
+        log_blob: r.get(7)?,
+    })
+}
+
+const BACKGROUND_TASK_COLS: &str =
+    "id, cmd, conversation_id, started_at, ended_at, exit_code, status, log_blob";
+
+pub fn get_background_task(conn: &Connection, id: &str) -> Result<BackgroundTask> {
+    conn.query_row(
+        &format!("SELECT {BACKGROUND_TASK_COLS} FROM background_task WHERE id = ?1"),
+        [id],
+        background_task_from_row,
+    )
+    .optional()?
+    .ok_or(DbError::NotFound("background task"))
+}
+
+pub fn list_background_tasks(
+    conn: &Connection,
+    conversation_id: &str,
+) -> Result<Vec<BackgroundTask>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {BACKGROUND_TASK_COLS} FROM background_task
+         WHERE conversation_id = ?1 ORDER BY started_at DESC, id DESC"
+    ))?;
+    let rows = stmt.query_map([conversation_id], background_task_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Persist the outcome of a finished background task.
+pub fn update_background_task(
+    conn: &Connection,
+    id: &str,
+    ended_at: i64,
+    exit_code: Option<i32>,
+    status: BackgroundStatus,
+    log_blob: &str,
+) -> Result<()> {
+    let n = conn.execute(
+        "UPDATE background_task SET ended_at = ?2, exit_code = ?3, status = ?4, log_blob = ?5
+         WHERE id = ?1",
+        params![id, ended_at, exit_code, status.as_str(), log_blob],
+    )?;
+    if n == 0 {
+        return Err(DbError::NotFound("background task"));
+    }
+    Ok(())
+}
+
 /// Serialize `f32`s as little-endian bytes so embeddings round-trip losslessly.
 pub fn floats_to_bytes(floats: &[f32]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(floats.len() * 4);

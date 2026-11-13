@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use super::{DbError, Result};
 
 /// Maximum schema version understood by this build.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// A handle to the application database.
 ///
@@ -108,6 +108,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if current < 5 {
         migrate_v5(conn)?;
+    }
+    if current < 6 {
+        migrate_v6(conn)?;
     }
     Ok(())
 }
@@ -320,5 +323,25 @@ fn migrate_v5(conn: &Connection) -> Result<()> {
         );",
     )?;
     conn.pragma_update(None, "user_version", 5)?;
+    Ok(())
+}
+
+/// Version 6: long-running background tasks. Each task streams its combined
+/// stdout+stderr to a blob; `log_blob` is the sha256 of that completed log.
+fn migrate_v6(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE background_task (
+            id           TEXT PRIMARY KEY,
+            cmd          TEXT NOT NULL,
+            conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            started_at   INTEGER NOT NULL,
+            ended_at     INTEGER,
+            exit_code    INTEGER,
+            status       TEXT NOT NULL,
+            log_blob     TEXT NOT NULL
+        );
+        CREATE INDEX background_task_by_conversation ON background_task(conversation_id, started_at DESC);",
+    )?;
+    conn.pragma_update(None, "user_version", 6)?;
     Ok(())
 }

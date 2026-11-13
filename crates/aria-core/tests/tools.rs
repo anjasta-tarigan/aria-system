@@ -35,6 +35,7 @@ fn fx() -> Fx {
         embed: None,
         search: None,
         vision: None,
+        background: None,
     };
     Fx {
         _ws: ws,
@@ -57,9 +58,9 @@ async fn call(f: &Fx, tool: &str, args: serde_json::Value) -> ToolOutcome {
 }
 
 #[test]
-fn registry_advertises_ten_tools_with_classes() {
+fn registry_advertises_all_tools_with_classes() {
     let specs = ToolRegistry::describe(&Scope::Workspace(WorkspaceRoot::new(std::path::Path::new("/tmp")).unwrap()));
-    assert_eq!(specs.len(), 14);
+    assert_eq!(specs.len(), 16);
     assert_eq!(specs.len(), tools::TOOLS.len());
     assert_eq!(tools::approval_class(tools::READ_FILE), Some(ApprovalClass::Read));
     assert_eq!(tools::approval_class(tools::VIEW_IMAGE), Some(ApprovalClass::Read));
@@ -410,6 +411,7 @@ async fn without_a_folder_only_filesystem_free_tools_are_offered() {
         scope: aria_core::workspace::Scope::None,
         search: None,
         vision: None,
+        background: None,
     };
 
     let cases = [
@@ -457,6 +459,7 @@ async fn main_system_scope_reads_allowed_paths_and_refuses_others() {
         scope: Scope::MainSystem(vec![allowed.path().to_path_buf()]),
         search: None,
         vision: None,
+        background: None,
     };
 
     let ok = ToolRegistry::execute(

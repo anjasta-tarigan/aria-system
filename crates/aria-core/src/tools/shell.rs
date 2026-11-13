@@ -40,7 +40,7 @@ pub async fn run_shell(
     progress: Option<mpsc::UnboundedSender<String>>,
 ) -> Result<String> {
     let timeout = Duration::from_secs(args.timeout_secs.unwrap_or(ctx.shell_timeout_secs).max(1));
-    let outcome = execute(ctx, &args.cmd, timeout, progress).await?;
+    let outcome = execute(ctx, &args.cmd, timeout, progress, None).await?;
     Ok(format_outcome(&args.cmd, &outcome))
 }
 
@@ -54,6 +54,7 @@ pub async fn execute(
     cmd: &str,
     timeout: Duration,
     progress: Option<mpsc::UnboundedSender<String>>,
+    pgid_tx: Option<mpsc::UnboundedSender<u32>>,
 ) -> Result<ShellOutcome> {
     let root = ctx
         .scope
@@ -75,6 +76,11 @@ pub async fn execute(
         .spawn()
         .map_err(|e| ToolError::Refused(format!("cannot start shell: {e}")))?;
     let pid = child.id().unwrap_or_default();
+    // The whole group shares the leader's pid; publishing it lets a detached
+    // owner (background task) kill grandchildren via `kill_group(-pid)`.
+    if let Some(tx) = pgid_tx {
+        let _ = tx.send(pid);
+    }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Line>();
     let mut readers = 0;
@@ -167,7 +173,7 @@ fn emit(line: &Line, progress: &Option<mpsc::UnboundedSender<String>>) {
     }
 }
 
-async fn kill_group(pid: u32) {
+pub(crate) async fn kill_group(pid: u32) {
     if pid == 0 {
         return;
     }

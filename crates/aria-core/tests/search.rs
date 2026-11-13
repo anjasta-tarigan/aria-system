@@ -24,6 +24,7 @@ fn ctx_with(search: Option<SearchConfig>) -> ToolContext {
         embed: None,
         search,
         vision: None,
+        background: None,
     }
 }
 

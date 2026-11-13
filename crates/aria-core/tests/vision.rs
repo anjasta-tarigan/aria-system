@@ -42,6 +42,7 @@ fn fx(vision: Option<VisionConfig>) -> Fx {
         embed: None,
         search: None,
         vision,
+        background: None,
     };
     Fx {
         ws_path: ws.path().to_path_buf(),

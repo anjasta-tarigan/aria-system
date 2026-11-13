@@ -20,7 +20,10 @@ mod shell;
 mod memories;
 pub mod search;
 pub mod vision;
+pub mod background;
 
+pub use background::BackgroundTasks;
+pub use crate::db::{BackgroundStatus, BackgroundTask};
 pub use fetch::{FetchOutcome, classify_ip, fetch_url};
 pub use search::{SearchConfig, SearchProvider, SearchHit, web_search};
 pub use shell::{ShellArgs, ShellOutcome, run_shell};
@@ -90,6 +93,10 @@ pub struct ToolContext {
     /// Vision model configuration for `view_image`. Absent when unconfigured;
     /// the tool then refuses.
     pub vision: Option<crate::tools::vision::VisionConfig>,
+    /// Background task runner, set by the agent loop only when a workspace is
+    /// open. `None` in the main session, so background tasks cannot be started
+    /// without a folder (and without this capability).
+    pub background: Option<Arc<BackgroundTasks>>,
 }
 
 impl ToolContext {}
@@ -113,9 +120,11 @@ pub const TODOS: &str = "todos";
 pub const REMEMBER: &str = "remember";
 pub const RECALL: &str = "recall";
 pub const WEB_SEARCH: &str = "web_search";
+pub const RUN_BACKGROUND: &str = "run_background";
+pub const POLL_TASK: &str = "poll_task";
 
 /// The tool set with its approval classes.
-pub const TOOLS: [(&str, ApprovalClass); 14] = [
+pub const TOOLS: [(&str, ApprovalClass); 16] = [
     (READ_FILE, ApprovalClass::Read),
     (VIEW_IMAGE, ApprovalClass::Read),
     (LIST_DIR, ApprovalClass::Read),
@@ -130,6 +139,8 @@ pub const TOOLS: [(&str, ApprovalClass); 14] = [
     (TODOS, ApprovalClass::Read),
     (REMEMBER, ApprovalClass::Read),
     (RECALL, ApprovalClass::Read),
+    (RUN_BACKGROUND, ApprovalClass::Exec),
+    (POLL_TASK, ApprovalClass::Read),
 ];
 
 pub const SYSTEM_PROMPT: &str = "\
@@ -353,6 +364,28 @@ impl ToolRegistry {
                     "required": ["query"]
                 }),
             ),
+            spec(
+                RUN_BACKGROUND,
+                "Start a shell command that runs in the background beyond this turn. Returns a task id to poll with `poll_task`.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "cmd": { "type": "string", "description": "Shell command to run with `sh -c`" }
+                    },
+                    "required": ["cmd"]
+                }),
+            ),
+            spec(
+                POLL_TASK,
+                "Check a background task's status and recent output. Returns status (running|succeeded|failed|killed) and a tail of its log.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Background task id from `run_background`" }
+                    },
+                    "required": ["id"]
+                }),
+            ),
         ];
         if !matches!(scope, Scope::None) {
             return all;
@@ -390,6 +423,8 @@ impl ToolRegistry {
             TODOS => files::todos(ctx, parse_args(args)?).map(outcome),
             REMEMBER => memories::remember(ctx, parse_args(args)?).await.map(outcome),
             RECALL => memories::recall(ctx, parse_args(args)?).await.map(outcome),
+            RUN_BACKGROUND => run_background(ctx, parse_args(args)?).map(outcome),
+            POLL_TASK => poll_task(ctx, parse_args(args)?).map(outcome),
             other => Err(ToolError::Args(format!("unknown tool {other}"))),
         }
     }
@@ -397,6 +432,47 @@ impl ToolRegistry {
 
 fn outcome(text: String) -> ToolOutcome {
     ToolOutcome::ok(text)
+}
+
+/// `run_background`: detach a shell command. Returns the task id immediately;
+/// the real work runs in the task's own tokio process, independent of this Run.
+fn run_background(ctx: &ToolContext, args: RunBackgroundArgs) -> Result<String> {
+    let bg = ctx
+        .background
+        .as_ref()
+        .ok_or_else(|| ToolError::Refused("no background runner for this session".into()))?;
+    // The task is filed under its Run's conversation; resolved from run_id so
+    // the context need not carry a separate conversation_id field.
+    let conversation_id = ctx
+        .db
+        .call(|c| crate::db::get_run(c, &ctx.run_id))?
+        .conversation_id;
+    let task = bg.start(&conversation_id, &args.cmd)?;
+    Ok(format!("background task {} started", task.id))
+}
+
+fn poll_task(ctx: &ToolContext, args: PollTaskArgs) -> Result<String> {
+    let bg = ctx
+        .background
+        .as_ref()
+        .ok_or_else(|| ToolError::Refused("no background runner for this session".into()))?;
+    let (task, tail) = bg.poll(&args.id)?;
+    Ok(format!(
+        "status: {}\nexit_code: {}\n{}",
+        task.status.as_str(),
+        task.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "-".into()),
+        tail,
+    ))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RunBackgroundArgs {
+    cmd: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PollTaskArgs {
+    id: String,
 }
 
 fn spec(name: &str, description: &str, parameters: serde_json::Value) -> ToolSpec {
@@ -479,6 +555,7 @@ pub fn context_for(
         embed: None,
         search: None,
         vision: None,
+        background: None,
     })
 }
 

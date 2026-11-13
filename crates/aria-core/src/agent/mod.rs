@@ -24,7 +24,7 @@ use crate::db::{
 };
 use crate::journal::Blobs;
 use crate::provider::{ChatMessage, Provider, ProviderEvent, ToolCallRequest};
-use crate::tools::{self, ToolContext, ToolOutcome, ToolRegistry};
+use crate::tools::{self, BackgroundTasks, ToolContext, ToolOutcome, ToolRegistry};
 use crate::tools::search::{SearchConfig, SearchProvider};
 use crate::workspace::{Scope, WorkspaceRoot};
 
@@ -485,6 +485,17 @@ impl LoopCtx {
             scope: scope.clone(),
             search: self.search.clone(),
             vision: self.vision.clone(),
+            // Background runner is only available when a workspace is open: its
+            // root is the run's root, so no folder means no background tasks.
+            background: workspace.as_ref().map(|ws| {
+                Arc::new(BackgroundTasks {
+                    db: Arc::clone(&self.db),
+                    blobs: Arc::clone(&self.blobs),
+                    root: WorkspaceRoot::new(&ws.root_path).map(|r| r.root().to_path_buf()).unwrap_or_default(),
+                    scope: scope.clone(),
+                    shell_timeout_secs: self.shell_timeout_secs,
+                })
+            }),
         };
 
         loop {

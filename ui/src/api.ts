@@ -140,6 +140,19 @@ export interface RunEventEnvelope {
   event: RunEvent;
 }
 
+export type BackgroundStatus = "running" | "succeeded" | "failed" | "killed";
+
+export interface BackgroundTask {
+  id: string;
+  cmd: string;
+  conversationId: string;
+  startedAt: number;
+  endedAt?: number;
+  exitCode?: number;
+  status: BackgroundStatus;
+  logBlob: string;
+}
+
 export const api = {
   openWorkspace: (rootPath: string) =>
     invoke<ConversationView>("open_workspace", { rootPath }),
@@ -211,6 +224,14 @@ export const api = {
     invoke<string>("read_workspace_file", { workspaceId, rel }),
   writeWorkspaceFile: (workspaceId: string, rel: string, content: string) =>
     invoke<void>("write_workspace_file", { workspaceId, rel, content }),
+  startBackground: (cmd: string, conversationId: string) =>
+    invoke<BackgroundTask>("start_background", { cmd, conversationId }),
+  pollBackground: (id: string) =>
+    invoke<{ task: BackgroundTask; tail: string }>("poll_background", { id }),
+  listBackground: (conversationId: string) =>
+    invoke<BackgroundTask[]>("list_background", { conversationId }),
+  killBackground: (id: string) =>
+    invoke<BackgroundTask>("kill_background", { id }),
 };
 
 export interface Memory {

@@ -341,3 +341,64 @@ pub struct Memory {
     pub created_at: i64,
     pub updated_at: i64,
 }
+
+/// Lifecycle of a background [`BackgroundTask`](crate::tools::BackgroundTask).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundStatus {
+    Running,
+    Succeeded,
+    Failed,
+    Killed,
+}
+
+impl BackgroundStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BackgroundStatus::Running => "running",
+            BackgroundStatus::Succeeded => "succeeded",
+            BackgroundStatus::Failed => "failed",
+            BackgroundStatus::Killed => "killed",
+        }
+    }
+
+    /// Whether the task has ended and will not change again.
+    pub fn is_terminal(self) -> bool {
+        !matches!(self, BackgroundStatus::Running)
+    }
+}
+
+impl fmt::Display for BackgroundStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for BackgroundStatus {
+    type Err = DbError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "running" => Ok(BackgroundStatus::Running),
+            "succeeded" => Ok(BackgroundStatus::Succeeded),
+            "failed" => Ok(BackgroundStatus::Failed),
+            "killed" => Ok(BackgroundStatus::Killed),
+            other => Err(DbError::InvalidValue {
+                field: "background status",
+                value: other.to_string(),
+            }),
+        }
+    }
+}
+
+/// A long-running shell command started via the `run_background` tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundTask {
+    pub id: String,
+    pub cmd: String,
+    pub conversation_id: String,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+    pub exit_code: Option<i32>,
+    pub status: BackgroundStatus,
+    pub log_blob: String,
+}

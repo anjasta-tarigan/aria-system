@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   type ApprovalClass,
+  type BackgroundTask,
   type ChangedFile,
   type ConversationDetail,
   type ConversationView,
@@ -118,6 +119,8 @@ interface Ui {
   renamingId: string | null;
   /// Workspace ids whose session list is collapsed in the sidebar tree.
   collapsed: Set<string>;
+  /// Background tasks for the current workspace conversation (cached between polls).
+  bgTasks: BackgroundTask[];
   /// Whether the stored-memories viewer is open.
   memoriesOpen: boolean;
   memories: Memory[];
@@ -140,6 +143,7 @@ const ui: Ui = {
   expanded: new Set(),
   renamingId: null,
   collapsed: new Set(),
+  bgTasks: [],
   memoriesOpen: false,
   memories: [],
   systemAccessId: null,
@@ -160,6 +164,10 @@ let activeFile: string | null = null;
 const editorBuffer: Map<string, string> = new Map();
 const openDirs: Set<string> = new Set([""]);
 
+// Auto-poll timer for background tasks; cleared on re-render so only one loop
+// runs for the visible conversation.
+let bgPoll: ReturnType<typeof setTimeout> | null = null;
+
 function activeRun(): Run | null {
   return ui.detail?.conversation.run ?? null;
 }
@@ -172,6 +180,10 @@ function isBusy(run: Run | null): boolean {
 
 function render() {
   if (disposed) return;
+  if (bgPoll) {
+    clearTimeout(bgPoll);
+    bgPoll = null;
+  }
   const detail = ui.detail;
   const previous = document.querySelector<HTMLElement>(".transcript");
   const previousTop = previous?.scrollTop ?? 0;
@@ -794,6 +806,7 @@ function conversationPane(detail: ConversationDetail): HTMLElement {
   const composer = composerNode(busy, hasFolder);
 
   const filesPanel = hasFolder ? filesPanelNode(conv) : null;
+  const bgPanel = hasFolder ? backgroundTasksNode(conv) : null;
 
   return h(
     "section",
@@ -801,6 +814,7 @@ function conversationPane(detail: ConversationDetail): HTMLElement {
     header,
     transcript,
     filesPanel,
+    bgPanel,
     ui.changed.length
       ? h(
           "div",
@@ -907,6 +921,52 @@ function filesPanelNode(conv: ConversationView): HTMLElement {
   );
 
   reload();
+  return panel;
+}
+
+// Background tasks for a workspace conversation: list + poll-to-terminal + kill.
+function backgroundTasksNode(conv: ConversationView): HTMLElement {
+  const conversationId = conv.id;
+
+  const load = async () => {
+    if (disposed) return;
+    ui.bgTasks = await call.invoke<BackgroundTask[]>("list_background", {
+      conversationId,
+    });
+    render();
+    if (ui.bgTasks.some((t) => t.status === "running")) {
+      bgPoll = setTimeout(load, 2000);
+    }
+  };
+
+  const panel = h(
+    "div",
+    { class: "changed" },
+    h("span", { class: "section-title" }, "Background tasks"),
+    ...ui.bgTasks.map((t) =>
+      h(
+        "div",
+        { class: "section-row" },
+        h("code", {}, t.cmd),
+        h("span", { class: "muted small" }, t.status),
+        t.status === "running"
+          ? h(
+              "button",
+              {
+                class: "link",
+                onclick: async () => {
+                  await call.invoke("kill_background", { id: t.id });
+                  await load();
+                },
+              },
+              "Kill",
+            )
+          : null,
+      ),
+    ),
+  );
+
+  void load();
   return panel;
 }
 
@@ -2158,4 +2218,10 @@ export const testHooks = {
     await refreshConversations();
     await selectConversation(conv.id);
   },
+  startBackground: (cmd: string) =>
+    call.invoke<BackgroundTask>("start_background", {
+      cmd,
+      conversationId: ui.detail!.conversation.id,
+    }),
+  killBackground: (id: string) => call.invoke<BackgroundTask>("kill_background", { id }),
 };

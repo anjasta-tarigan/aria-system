@@ -6,6 +6,7 @@
 // main.ts.
 
 import type {
+  BackgroundTask,
   ChangedFile,
   ConversationDetail,
   ConversationView,
@@ -26,6 +27,10 @@ type Handler = (args: Record<string, unknown>) => unknown;
 let seq = 0;
 const id = (p: string) => `${p}-${++seq}`;
 const now = () => Date.now();
+
+// In-memory background tasks, keyed by id; survives across the Run that may
+// have started them, so the UI can poll to a terminal state.
+const backgroundTasks = new Map<string, BackgroundTask>();
 
 const conversations = new Map<string, ConversationDetail>();
 // One stable workspace id per folder path, so every session in a folder shares
@@ -590,6 +595,53 @@ const handlers: Record<string, Handler> = {
   read_workspace_file: (a): string => "// mock file: " + String(a.rel ?? ""),
   write_workspace_file: () => {
     // Mock backend is journaled externally; nothing to persist here.
+  },
+  start_background: (a): BackgroundTask => {
+    const task: BackgroundTask = {
+      id: id("bg"),
+      cmd: String(a.cmd),
+      conversationId: String(a.conversationId),
+      startedAt: now(),
+      status: "running",
+      logBlob: "",
+    };
+    backgroundTasks.set(task.id, task);
+    return task;
+  },
+  poll_background: (a): { task: BackgroundTask; tail: string } => {
+    const task = backgroundTasks.get(String(a.id));
+    if (!task) throw new Error("no such background task");
+    // Flip a running task to its terminal state on the first poll so E2E can
+    // observe the transition without a real child process.
+    if (task.status === "running") {
+      task.status = "succeeded";
+      task.exitCode = 0;
+      task.endedAt = now();
+      task.logBlob = "mock-bg-log";
+    }
+    return { task, tail: "// mock background output\ndone" };
+  },
+  list_background: (a): BackgroundTask[] => {
+    // Simulate completion: a task that has been running since the last list is
+    // now done, so the UI's poll-to-terminal loop observes a transition.
+    for (const t of backgroundTasks.values()) {
+      if (t.status === "running") {
+        t.status = "succeeded";
+        t.exitCode = 0;
+        t.endedAt = now();
+        t.logBlob = "mock-bg-log";
+      }
+    }
+    return [...backgroundTasks.values()].filter(
+      (t) => t.conversationId === String(a.conversationId),
+    );
+  },
+  kill_background: (a): BackgroundTask => {
+    const task = backgroundTasks.get(String(a.id));
+    if (!task) throw new Error("no such background task");
+    task.status = "killed";
+    task.endedAt = now();
+    return task;
   },
   set_main_system_scope: (a) => {
     const d = conversations.get(String(a.conversationId));
