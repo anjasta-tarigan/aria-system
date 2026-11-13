@@ -13,6 +13,7 @@ fn defaults_when_no_config_file() {
     assert_eq!(s, Settings::default());
     assert_eq!(s.caps.max_turns, 50);
     assert_eq!(s.caps.max_prompt_tokens, 200_000);
+    assert_eq!(s.vision_model, None);
 }
 
 #[test]
@@ -21,6 +22,7 @@ fn settings_roundtrip() {
     let mut s = Settings {
         base_url: "https://example.test/v1".into(),
         model: "some-model".into(),
+        vision_model: Some("qwen-vl-plus".into()),
         ..Settings::default()
     };
     s.caps.max_turns = 7;

@@ -35,6 +35,7 @@ fn fx() -> Fx {
         shell_timeout_secs: 10,
         embed: None,
         search: None,
+        vision: None,
     };
     Fx { _ws: ws, ctx }
 }

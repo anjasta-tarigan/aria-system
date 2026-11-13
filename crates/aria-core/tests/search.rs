@@ -23,6 +23,7 @@ fn ctx_with(search: Option<SearchConfig>) -> ToolContext {
         shell_timeout_secs: 10,
         embed: None,
         search,
+        vision: None,
     }
 }
 

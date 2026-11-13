@@ -19,6 +19,7 @@ mod fetch;
 mod shell;
 mod memories;
 pub mod search;
+pub mod vision;
 
 pub use fetch::{FetchOutcome, classify_ip, fetch_url};
 pub use search::{SearchConfig, SearchProvider, SearchHit, web_search};
@@ -86,6 +87,9 @@ pub struct ToolContext {
     /// Web search configuration, when a provider is configured. Absent when
     /// search is disabled; `web_search` then refuses.
     pub search: Option<crate::tools::search::SearchConfig>,
+    /// Vision model configuration for `view_image`. Absent when unconfigured;
+    /// the tool then refuses.
+    pub vision: Option<crate::tools::vision::VisionConfig>,
 }
 
 impl ToolContext {}
@@ -96,6 +100,7 @@ pub const NO_FOLDER: &str =
      without file access.";
 
 pub const READ_FILE: &str = "read_file";
+pub const VIEW_IMAGE: &str = "view_image";
 pub const LIST_DIR: &str = "list_dir";
 pub const SEARCH_FILES: &str = "search_files";
 pub const EDIT_FILE: &str = "edit_file";
@@ -110,8 +115,9 @@ pub const RECALL: &str = "recall";
 pub const WEB_SEARCH: &str = "web_search";
 
 /// The tool set with its approval classes.
-pub const TOOLS: [(&str, ApprovalClass); 13] = [
+pub const TOOLS: [(&str, ApprovalClass); 14] = [
     (READ_FILE, ApprovalClass::Read),
+    (VIEW_IMAGE, ApprovalClass::Read),
     (LIST_DIR, ApprovalClass::Read),
     (SEARCH_FILES, ApprovalClass::Read),
     (EDIT_FILE, ApprovalClass::Mutate),
@@ -179,6 +185,18 @@ impl ToolRegistry {
                     "properties": {
                         "path": { "type": "string", "description": "Workspace-relative path" },
                         "max_bytes": { "type": "integer", "minimum": 1, "default": 200000 }
+                    },
+                    "required": ["path"]
+                }),
+            ),
+            spec(
+                VIEW_IMAGE,
+                "Inspect and describe an image file using the vision model. Accepts workspace paths and an optional question.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Workspace-relative path" },
+                        "question": { "type": "string", "description": "What to look for; defaults to a general description" }
                     },
                     "required": ["path"]
                 }),
@@ -359,6 +377,7 @@ impl ToolRegistry {
         // they are not advertised in that case, but the model may still ask.
         match tool {
             READ_FILE => files::read_file(ctx, parse_args(args)?).map(outcome),
+            VIEW_IMAGE => vision::view_image(ctx, parse_args(args)?).await.map(outcome),
             LIST_DIR => files::list_dir(ctx, parse_args(args)?).map(outcome),
             SEARCH_FILES => files::search_files(ctx, parse_args(args)?).map(outcome),
             EDIT_FILE => files::edit_file(ctx, parse_args(args)?).map(outcome),
@@ -405,6 +424,10 @@ pub fn summarize(tool: &str, args: &str) -> ApprovalSummary {
             .to_string()
     };
     let (title, body) = match tool {
+        VIEW_IMAGE => (
+            format!("View image {}", get("path")),
+            get("question"),
+        ),
         EDIT_FILE => (
             format!("Edit {}", get("path")),
             format!("--- search ---\n{}\n--- replace ---\n{}", get("search"), get("replace")),
@@ -455,6 +478,7 @@ pub fn context_for(
         shell_timeout_secs: 120,
         embed: None,
         search: None,
+        vision: None,
     })
 }
 

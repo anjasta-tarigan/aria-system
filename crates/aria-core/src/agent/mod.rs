@@ -329,6 +329,27 @@ impl Agent {
             }
             ProviderSource::Fixed(_) => None,
         };
+        let vision = match &self.source {
+            ProviderSource::Settings { settings, .. } => {
+                let model = settings
+                    .vision_model
+                    .clone()
+                    .unwrap_or_else(|| settings.model.clone());
+                if model.is_empty() {
+                    None
+                } else {
+                    Some(crate::tools::vision::VisionConfig {
+                        model,
+                        base_url: settings.base_url.clone(),
+                        api_key: self
+                            .config
+                            .as_ref()
+                            .and_then(|c| c.api_key().ok().flatten().map(|(k, _)| k)),
+                    })
+                }
+            }
+            ProviderSource::Fixed(_) => None,
+        };
         let ctx = LoopCtx {
             db: Arc::clone(&self.db),
             blobs: Arc::clone(&self.blobs),
@@ -339,6 +360,7 @@ impl Agent {
             run_id,
             soft_warned: false,
             search,
+            vision,
         };
         tokio::spawn(ctx.run_to_end());
         Ok(handle)
@@ -376,6 +398,7 @@ struct LoopCtx {
     run_id: String,
     soft_warned: bool,
     search: Option<SearchConfig>,
+    vision: Option<crate::tools::vision::VisionConfig>,
 }
 
 impl LoopCtx {
@@ -454,6 +477,7 @@ impl LoopCtx {
             embed: self.provider.embedder(),
             scope: scope.clone(),
             search: self.search.clone(),
+            vision: self.vision.clone(),
         };
 
         loop {

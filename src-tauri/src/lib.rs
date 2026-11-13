@@ -154,6 +154,7 @@ pub struct SettingsInput {
     pub search_provider: Option<String>,
     pub search_base_url: Option<String>,
     pub search_api_key: Option<String>,
+    pub vision_model: Option<String>,
 }
 
 // ------------------------------------------------------------------ assembly
@@ -694,6 +695,10 @@ fn set_settings(state: State<'_, App>, input: SettingsInput) -> CmdResult<Settin
         search_base_url: input
             .search_base_url
             .clone()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        vision_model: input
+            .vision_model
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
     };

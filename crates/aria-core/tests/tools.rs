@@ -34,6 +34,7 @@ fn fx() -> Fx {
         shell_timeout_secs: 10,
         embed: None,
         search: None,
+        vision: None,
     };
     Fx {
         _ws: ws,
@@ -58,9 +59,10 @@ async fn call(f: &Fx, tool: &str, args: serde_json::Value) -> ToolOutcome {
 #[test]
 fn registry_advertises_ten_tools_with_classes() {
     let specs = ToolRegistry::describe(&Scope::Workspace(WorkspaceRoot::new(std::path::Path::new("/tmp")).unwrap()));
-    assert_eq!(specs.len(), 13);
+    assert_eq!(specs.len(), 14);
     assert_eq!(specs.len(), tools::TOOLS.len());
     assert_eq!(tools::approval_class(tools::READ_FILE), Some(ApprovalClass::Read));
+    assert_eq!(tools::approval_class(tools::VIEW_IMAGE), Some(ApprovalClass::Read));
     assert_eq!(tools::approval_class(tools::RUN_SHELL), Some(ApprovalClass::Exec));
     assert_eq!(tools::approval_class(tools::WEB_FETCH), Some(ApprovalClass::Network));
     assert_eq!(tools::approval_class(tools::EDIT_FILE), Some(ApprovalClass::Mutate));
@@ -97,6 +99,11 @@ async fn read_file_success_and_errors() {
     let binary = call(&f, "read_file", serde_json::json!({"path": "bin.dat"})).await;
     assert!(binary.is_error);
     assert!(binary.text.contains("UTF-8"));
+
+    std::fs::write(f.ctx.root.as_ref().unwrap().root().join("photo.png"), [0xff, 0xd8, 0xff]).unwrap();
+    let img = call(&f, "read_file", serde_json::json!({"path": "photo.png"})).await;
+    assert!(img.is_error);
+    assert!(img.text.contains("is a binary image file. Use the 'view_image' tool"));
 }
 
 #[tokio::test]
@@ -364,6 +371,12 @@ fn summary_shows_exact_content_for_edits_and_commands() {
     assert!(s.body.contains("old code") && s.body.contains("new code"));
     let s = tools::summarize("run_shell", &serde_json::json!({"cmd": "rm -rf build"}).to_string());
     assert_eq!(s.body, "rm -rf build");
+    let s = tools::summarize(
+        "view_image",
+        &serde_json::json!({"path": "ui.png", "question": "what color is the button?"}).to_string(),
+    );
+    assert!(s.title.contains("ui.png"));
+    assert_eq!(s.body, "what color is the button?");
 }
 
 #[tokio::test]
@@ -396,6 +409,7 @@ async fn without_a_folder_only_filesystem_free_tools_are_offered() {
         embed: None,
         scope: aria_core::workspace::Scope::None,
         search: None,
+        vision: None,
     };
 
     let cases = [
@@ -442,6 +456,7 @@ async fn main_system_scope_reads_allowed_paths_and_refuses_others() {
         // Factory-style path: only `allowed` may be touched.
         scope: Scope::MainSystem(vec![allowed.path().to_path_buf()]),
         search: None,
+        vision: None,
     };
 
     let ok = ToolRegistry::execute(
@@ -460,4 +475,27 @@ async fn main_system_scope_reads_allowed_paths_and_refuses_others() {
     )
     .await;
     assert!(denied.is_error, "main system must refuse paths outside its roots");
+}
+
+#[tokio::test]
+async fn view_image_validation_and_refusal() {
+    let mut f = fx();
+    // 1. Without vision config, view_image refuses cleanly.
+    let out = call(&f, "view_image", serde_json::json!({"path": "photo.png"})).await;
+    assert!(out.is_error);
+    assert!(out.text.contains("vision is not configured"));
+
+    // 2. With vision config, non-existent file returns error.
+    f.ctx.vision = Some(aria_core::tools::vision::VisionConfig {
+        model: "gpt-4o".into(),
+        base_url: "http://127.0.0.1:9999".into(),
+        api_key: None,
+    });
+    let missing = call(&f, "view_image", serde_json::json!({"path": "nope.png"})).await;
+    assert!(missing.is_error);
+
+    // 3. Directory returns error.
+    let dir = call(&f, "view_image", serde_json::json!({"path": "."})).await;
+    assert!(dir.is_error);
+    assert!(dir.text.contains("directory"));
 }

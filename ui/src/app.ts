@@ -943,6 +943,8 @@ function toolSummary(call: ToolCall): string {
       return `move_file  ${s("from")} → ${s("to")}`;
     case "run_shell":
       return `run_shell  ${s("cmd")}`;
+    case "view_image":
+      return `Inspect ${s("path") || "image"}`;
     default:
       return call.tool;
   }
@@ -1365,6 +1367,7 @@ function settingsModal(view: SettingsView): HTMLElement {
   // 1. AI Models panel
   const baseUrlField = field("Base URL", s.base_url);
   const modelField = field("Model", s.model);
+  const visionModelField = field("Vision model", s.vision_model ?? "", "text", "Optional, defaults to primary model");
   const embedModelField = field("Embedding model", s.embedding_model ?? "");
   const embedBaseUrlField = field("Embedding base URL", s.embedding_base_url ?? "");
 
@@ -1442,6 +1445,7 @@ function settingsModal(view: SettingsView): HTMLElement {
     h("h3", { class: "small muted" }, "Active Model Configuration"),
     baseUrlField,
     modelField,
+    visionModelField,
     h(
       "label",
       {},
@@ -1668,6 +1672,7 @@ function settingsModal(view: SettingsView): HTMLElement {
           search_provider: sel("Search provider") || null,
           search_base_url: val("Search base URL") || null,
           search_api_key: val("Search API key") || null,
+          vision_model: val("Vision model") || null,
           api_key: val("API key") || null,
         },
       });

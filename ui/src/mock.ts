@@ -58,6 +58,7 @@ const settings: SettingsView = {
     embedding_model: null,
     search_provider: null,
     search_base_url: null,
+    vision_model: null,
   },
   has_key: true,
   key_backend: "keyring",
@@ -560,6 +561,7 @@ const handlers: Record<string, Handler> = {
       embedding_model: (input.embedding_model as string) ?? null,
       search_provider: (input.search_provider as string) ?? null,
       search_base_url: (input.search_base_url as string) ?? null,
+      vision_model: (input.vision_model as string) ?? null,
     };
     if (input.api_key) settings.has_key = true;
     return settings;

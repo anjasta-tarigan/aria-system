@@ -66,6 +66,8 @@ pub struct Settings {
     pub embedding_model: Option<String>,
     pub search_provider: Option<String>,
     pub search_base_url: Option<String>,
+    /// Vision (image input) model id; falls back to `model` when absent.
+    pub vision_model: Option<String>,
 }
 
 impl Default for Settings {
@@ -79,6 +81,7 @@ impl Default for Settings {
             embedding_model: None,
             search_provider: None,
             search_base_url: None,
+            vision_model: None,
         }
     }
 }

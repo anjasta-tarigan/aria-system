@@ -26,8 +26,20 @@ pub fn read_file(ctx: &ToolContext, args: ReadFileArgs) -> Result<String> {
     }
     let bytes = std::fs::read(&resolved)?;
     let max = default_limit(args.max_bytes, 200_000);
-    let text = String::from_utf8(bytes)
-        .map_err(|_| ToolError::Args(format!("{} is not valid UTF-8", args.path)))?;
+    let text = String::from_utf8(bytes).map_err(|_| {
+        let lower = args.path.to_ascii_lowercase();
+        let is_image = ["png", "jpg", "jpeg", "webp", "gif", "bmp"]
+            .iter()
+            .any(|e| lower.ends_with(&format!(".{e}")));
+        if is_image {
+            ToolError::Args(format!(
+                "'{}' is a binary image file. Use the 'view_image' tool to inspect and analyze it.",
+                args.path
+            ))
+        } else {
+            ToolError::Args(format!("{} is not valid UTF-8", args.path))
+        }
+    })?;
     Ok(truncate(text, max))
 }
 

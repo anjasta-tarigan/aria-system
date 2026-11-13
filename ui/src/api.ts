@@ -108,6 +108,7 @@ export interface Settings {
   embedding_model: string | null;
   search_provider: string | null;
   search_base_url: string | null;
+  vision_model: string | null;
 }
 
 export interface SettingsView {
@@ -186,6 +187,7 @@ export const api = {
     search_provider?: string | null;
     search_base_url?: string | null;
     search_api_key?: string | null;
+    vision_model?: string | null;
     api_key?: string | null;
   }) => invoke<SettingsView>("set_settings", { input }),
   listMemories: (workspaceId?: string | null) =>
