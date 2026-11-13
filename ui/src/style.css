@@ -361,25 +361,55 @@ button.icon:hover {
   padding: var(--sp-1) var(--sp-2);
 }
 
-/* ----------------------------------------------------------- sidebar foot */
+/* The conversation area occupies the top half and scrolls; the menu list is a
+   fixed bottom rail, splitting the sidebar into two sections. */
+.sidebar-main {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding-bottom: var(--sp-3);
+}
 
-.sidebar-foot {
+/* ----------------------------------------------------------- sidebar menu */
+
+.sidebar-menu {
   margin-top: auto;
   display: flex;
-  align-items: center;
-  gap: var(--sp-2);
+  flex-direction: column;
+  gap: var(--sp-1);
   padding-top: var(--sp-3);
   border-top: 1px solid var(--line);
 }
 
-/* Keep the bottom-left gear aligned to the content edge, matching the brand
-   row at the top (both anchor the sidebar's left rail). */
-.sidebar-foot > button.icon {
-  padding-left: 0;
+.sidebar-menu .menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--fg);
+  background: none;
 }
 
-.foot-label {
-  color: var(--muted);
+.sidebar-menu .menu-item:hover {
+  background: var(--panel-2);
+  border-color: var(--line);
+}
+
+.sidebar-menu .menu-icon {
+  font-size: 16px;
+  line-height: 1;
+  width: 1.25em;
+  text-align: center;
+}
+
+.sidebar-menu .menu-label {
   font-size: var(--fs-sm);
 }
 

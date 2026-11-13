@@ -327,45 +327,48 @@ function sidebar(): HTMLElement {
         ]),
   );
 
-  const footer = h(
-    "div",
-    { class: "sidebar-foot" },
+  // Bottom menu list: a fixed set of icon rows (Extension is a placeholder for
+  // future plugins; Settings opens the settings panel). Memory lives elsewhere,
+  // not in this menu.
+  const menu = h(
+    "nav",
+    { class: "sidebar-menu" },
     h(
       "button",
-      { class: "icon", title: "Settings", onclick: () => void openSettings() },
-      "⚙",
+      { class: "menu-item", title: "Extensions", onclick: () => {} },
+      h("span", { class: "menu-icon" }, "🧩"),
+      h("span", { class: "menu-label" }, "Extensions"),
     ),
-    h("span", { class: "foot-label" }, "Settings"),
     h(
       "button",
-      {
-        class: "icon",
-        title: "Memories",
-        onclick: () => void openMemories(ui.detail?.conversation.workspace_id ?? null),
-      },
-      "🧠",
+      { class: "menu-item", title: "Settings", onclick: () => void openSettings() },
+      h("span", { class: "menu-icon" }, "⚙"),
+      h("span", { class: "menu-label" }, "Settings"),
     ),
-    h("span", { class: "foot-label" }, "Memories"),
   );
 
   return h(
     "aside",
     { class: "sidebar" },
-    h("div", { class: "brand" }, h("span", { class: "logo" }, "Aria")),
     h(
-      "input",
-      {
-        class: "search",
-        type: "search",
-        placeholder: "Search messages…",
-        oninput: (e: Event) => void runSearch((e.target as HTMLInputElement).value),
-      },
+      "div",
+      { class: "sidebar-main" },
+      h("div", { class: "brand" }, h("span", { class: "logo" }, "Aria")),
+      h(
+        "input",
+        {
+          class: "search",
+          type: "search",
+          placeholder: "Search messages…",
+          oninput: (e: Event) => void runSearch((e.target as HTMLInputElement).value),
+        },
+      ),
+      searchResults,
+      emptySearch,
+      systemGroup,
+      workspaceGroup,
     ),
-    searchResults,
-    emptySearch,
-    systemGroup,
-    workspaceGroup,
-    footer,
+    menu,
   );
 }
 
