@@ -930,6 +930,32 @@ fn resume_unfinished(app: &AppHandle, inner: &Arc<Inner>) {
     }
 }
 
+/// Any task still `running` when the app starts is an orphan: its process died
+/// with the previous instance. Mark it `killed`, preserve its partial log as a
+/// blob, and drop the stale temp files.
+fn reap_orphan_background_tasks(inner: &Arc<Inner>) {
+    let ids = inner
+        .db
+        .call(db::running_background_task_ids)
+        .unwrap_or_default();
+    for id in ids {
+        let log = inner.blobs.dir().join(format!("bg-{id}.log"));
+        let blob = std::fs::read(&log).ok().and_then(|b| inner.blobs.put(&b).ok());
+        let _ = inner.db.call(|c| {
+            db::update_background_task(
+                c,
+                &id,
+                db::now_ms(),
+                None,
+                db::BackgroundStatus::Killed,
+                blob.as_deref().unwrap_or(""),
+            )
+        });
+        let _ = std::fs::remove_file(&log);
+        let _ = std::fs::remove_file(inner.blobs.dir().join(format!("bg-{id}.pid")));
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -948,6 +974,7 @@ pub fn run() {
                 }),
             };
             resume_unfinished(app.handle(), &state.inner);
+            reap_orphan_background_tasks(&state.inner);
             app.manage(state);
             Ok(())
         })

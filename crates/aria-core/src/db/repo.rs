@@ -1094,6 +1094,14 @@ pub fn list_background_tasks(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// Ids of every still-`running` task. On startup the previous app instance is
+/// gone, so a `running` row is always an orphan whose OS process died with it.
+pub fn running_background_task_ids(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT id FROM background_task WHERE status = 'running'")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 /// Persist the outcome of a finished background task.
 pub fn update_background_task(
     conn: &Connection,
