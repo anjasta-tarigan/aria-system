@@ -138,6 +138,12 @@ pub struct SettingsView {
     pub key_backend: SecretBackend,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CloudFolder {
+    pub name: String,
+    pub path: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SettingsInput {
     pub base_url: String,
@@ -670,6 +676,26 @@ fn get_settings(state: State<'_, App>) -> CmdResult<SettingsView> {
     })
 }
 
+/// Local sync folders a desktop client keeps on disk (Dropbox, Google Drive,
+/// OneDrive, Nextcloud, Cloud, Sync) — purely local discovery, no network.
+#[tauri::command]
+fn list_cloud_folders() -> CmdResult<Vec<CloudFolder>> {
+    let Some(home) = dirs::home_dir() else {
+        return Ok(Vec::new());
+    };
+    let folders = aria_core::workspace::cloud_sync_folders(&home);
+    Ok(folders
+        .into_iter()
+        .map(|p| CloudFolder {
+            name: p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            path: p.to_string_lossy().into_owned(),
+        })
+        .collect())
+}
+
 #[tauri::command]
 fn set_settings(state: State<'_, App>, input: SettingsInput) -> CmdResult<SettingsView> {
     let config = &state.inner.config;
@@ -810,6 +836,7 @@ pub fn run() {
             set_settings,
             list_memories,
             delete_memory,
+            list_cloud_folders,
         ])
         .run(tauri::generate_context!())
         .expect("error while running aria");

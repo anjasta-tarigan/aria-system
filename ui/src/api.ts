@@ -143,6 +143,8 @@ export interface RunEventEnvelope {
 export const api = {
   openWorkspace: (rootPath: string) =>
     invoke<ConversationView>("open_workspace", { rootPath }),
+  listCloudFolders: () =>
+    invoke<{ name: string; path: string }[]>("list_cloud_folders"),
   newConversation: () => invoke<ConversationView>("new_conversation"),
   attachWorkspace: (conversationId: string, rootPath: string) =>
     invoke<ConversationView>("attach_workspace", { conversationId, rootPath }),

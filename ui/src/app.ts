@@ -25,17 +25,21 @@ import { renderMarkdown } from "./format";
 export interface Ipc {
   invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
   listen: (cb: (e: { payload: RunEventEnvelope }) => void) => Promise<() => void>;
+  listCloudFolders: () => Promise<{ name: string; path: string }[]>;
 }
 
 // The real app talks to the Rust commands.
 export const call: Ipc = {
   invoke: (cmd, args) => invoke(cmd, args) as Promise<never>,
   listen: (cb) => listen<RunEventEnvelope>("run-event", (e) => cb({ payload: e.payload })),
+  listCloudFolders: () =>
+    invoke<{ name: string; path: string }[]>("list_cloud_folders"),
 };
 
 export function useMock() {
   call.invoke = mockInvoke;
   call.listen = mockListen;
+  call.listCloudFolders = () => mockInvoke("list_cloud_folders");
   seed();
 }
 
@@ -284,7 +288,11 @@ function sidebar(): HTMLElement {
       h("span", { class: "section-title" }, "Workspaces"),
       h(
         "button",
-        { class: "icon", title: "Open a folder", onclick: () => void chooseFolder() },
+        {
+          class: "icon",
+          title: "Open a folder",
+          onclick: (e: MouseEvent) => void openCloudOrBrowse(e.currentTarget as HTMLElement),
+        },
         "+",
       ),
     ),
@@ -1175,6 +1183,31 @@ async function refreshChanged() {
   ui.changed = await call.invoke<ChangedFile[]>("changed_files", {
     workspaceId: detail.conversation.workspace_id,
   });
+}
+
+async function openCloudOrBrowse(anchor: HTMLElement) {
+  let folders: { name: string; path: string }[] = [];
+  try {
+    folders = await call.listCloudFolders();
+  } catch {
+    folders = [];
+  }
+  const items: MenuItem[] = folders.map((f) => ({
+    label: f.name,
+    onClick: () => void openWorkspacePath(f.path),
+  }));
+  items.push({ label: "Browse…", onClick: () => void chooseFolder() });
+  if (items.length === 1) {
+    await chooseFolder();
+    return;
+  }
+  openMenuAt(anchor, items);
+}
+
+async function openWorkspacePath(rootPath: string) {
+  const conv = await call.invoke<ConversationView>("open_workspace", { rootPath });
+  await refreshConversations();
+  await selectConversation(conv.id);
 }
 
 async function chooseFolder() {

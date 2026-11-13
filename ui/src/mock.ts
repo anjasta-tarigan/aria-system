@@ -375,6 +375,10 @@ const handlers: Record<string, Handler> = {
     }
     return d.conversation;
   },
+  list_cloud_folders: () => [
+    { name: "Dropbox", path: "/home/user/Dropbox" },
+    { name: "Google Drive", path: "/home/user/Google Drive" },
+  ],
   open_workspace: (a) => {
     const root = String(a.rootPath);
     const ws = findOrInsertWorkspace(root);

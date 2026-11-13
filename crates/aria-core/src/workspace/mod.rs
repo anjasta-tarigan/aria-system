@@ -400,3 +400,33 @@ impl Scope {
         }
     }
 }
+
+/// Local sync folders a desktop client keeps on disk, if they exist.
+///
+/// Purely local discovery — no network, no cloud API. Returns absolute paths
+/// that exist and are directories, newest-first by mtime when known.
+pub fn cloud_sync_folders(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let candidates = [
+        "Dropbox",
+        "Google Drive",
+        "OneDrive",
+        "Nextcloud",
+        "Cloud",
+        "Sync",
+    ];
+    let mut found: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
+    for name in candidates {
+        let p = home.join(name);
+        if let Ok(meta) = std::fs::symlink_metadata(&p) {
+            if meta.is_dir() {
+                let mtime = std::fs::metadata(&p)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                found.push((p, mtime));
+            }
+        }
+    }
+    found.sort_by(|a, b| b.1.cmp(&a.1));
+    found.into_iter().map(|(p, _)| p).collect()
+}
