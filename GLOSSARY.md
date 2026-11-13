@@ -71,3 +71,15 @@ _Avoid_: budget, limit, quota.
 The external OpenAI-compatible endpoint that serves the model: a base URL, an API key and a model name.
 
 _Avoid_: backend, LLM service, model (the model is one of the Provider's settings).
+
+## Background Task
+
+A shell command started with `run_background` that runs detached, beyond a single Run and past the normal shell timeout, then is watched with `poll_task` and can be killed. It streams output to a temp log (finalized as a blob on completion) and is confined to the Workspace root like any other shell Tool. On startup, any task still `running` is reaped as `killed` because its process died with the previous app instance.
+
+_Avoid_: job, daemon, service, long-running shell.
+
+## Editor
+
+The in-app file panel (Files section) that lets a user browse a Workspace's tree and read or write files in a plain textarea, through the same scope-contained, journaled commands the agent uses. It is not a separate editor program.
+
+_Avoid_: IDE, text editor, code editor.
