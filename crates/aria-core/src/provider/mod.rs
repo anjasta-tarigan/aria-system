@@ -16,6 +16,8 @@ use crate::config::{Config, Settings};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
+    #[error("provider unreachable: {0}")]
+    Unreachable(String),
     #[error("no API key configured")]
     MissingKey,
     #[error("no model configured")]
@@ -270,6 +272,30 @@ impl OpenAiProvider {
             body["tools"] = serde_json::Value::Array(tools);
         }
         body
+    }
+
+    /// Probe the provider's reachability. Any HTTP response (even an error status)
+    /// means the host is up; only a transport failure (DNS, refused, timeout)
+    /// means the endpoint is unreachable. The request is scoped to the base URL
+    /// with a short timeout so the health check stays cheap and real-time.
+    pub async fn health_check(&self) -> Result<()> {
+        let base = self.settings.base_url.trim_end_matches('/');
+        let resp = self
+            .client
+            .get(base)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await;
+        match resp {
+            // A response arrived: host reachable (status may still be 401/404).
+            Ok(_) => Ok(()),
+            // Transport failure only: unreachable.
+            Err(e) if e.is_timeout() || e.is_connect() || e.is_request() => Err(
+                ProviderError::Unreachable(base.to_string()),
+            ),
+            // Other reqwest errors still mean we talked to something; surface it.
+            Err(e) => Err(ProviderError::Unreachable(e.to_string())),
+        }
     }
 
     /// Embeddings endpoint: per-`embedding_base_url` override or the chat base URL.

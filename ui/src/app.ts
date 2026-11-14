@@ -7,6 +7,7 @@ import {
   type ChangedFile,
   type ConversationDetail,
   type ConversationView,
+  type HealthView,
   type MessageHit,
   type Memory,
   type RunEventEnvelope,
@@ -126,6 +127,8 @@ interface Ui {
   memories: Memory[];
   /// Conversation id whose Main System access modal is open, if any.
   systemAccessId: string | null;
+  /// Latest system health snapshot for the footer (polled in the background).
+  health: HealthView | null;
 }
 
 const ui: Ui = {
@@ -147,6 +150,8 @@ const ui: Ui = {
   memoriesOpen: false,
   memories: [],
   systemAccessId: null,
+  /// Latest system health snapshot for the footer (polled in the background).
+  health: null as HealthView | null,
 };
 
 const root = document.querySelector<HTMLElement>("#app")!;
@@ -168,6 +173,24 @@ const openDirs: Set<string> = new Set([""]);
 // runs for the visible conversation.
 let bgPoll: ReturnType<typeof setTimeout> | null = null;
 
+// Single real-time health poll loop for the footer.
+let healthPoll: ReturnType<typeof setInterval> | null = null;
+
+async function pollHealth() {
+  try {
+    ui.health = await call.invoke<HealthView>("health");
+  } catch {
+    ui.health = null;
+  }
+  if (ui.health) renderFooterOnly();
+}
+
+function startHealthPoll() {
+  if (healthPoll) return;
+  void pollHealth();
+  healthPoll = setInterval(() => void pollHealth(), 5000);
+}
+
 function activeRun(): Run | null {
   return ui.detail?.conversation.run ?? null;
 }
@@ -188,13 +211,14 @@ function render() {
   const previous = document.querySelector<HTMLElement>(".transcript");
   const previousTop = previous?.scrollTop ?? 0;
   const follow = !previous || previous.scrollHeight - previousTop - previous.clientHeight < 120;
-  const shell = h(
+  const body = h(
     "div",
-    { class: "app" },
+    { class: "app-body" },
     sidebar(),
     h("main", { class: "pane" }, detail ? conversationPane(detail) : emptyPane()),
     detail && isBusy(detail.conversation.run) ? todoPanel(detail) : null,
   );
+  const shell = h("div", { class: "app" }, body, footer());
   root.replaceChildren(
     shell,
     ...(ui.settingsOpen && ui.settings ? [settingsModal(ui.settings)] : []),
@@ -370,6 +394,51 @@ function sidebar(): HTMLElement {
     ),
     menu,
   );
+}
+
+/// Full-width footer: left = live system-health indicator, center = app version,
+/// right = reserved. Updated in place by `renderFooterOnly` on each poll so the
+/// 5s health refresh never rebuilds the whole app.
+function footer(): HTMLElement {
+  const el = h(
+    "footer",
+    { class: "app-foot" },
+    h("div", { class: "foot-foot", id: "foot-health" }, healthContent()),
+    h("div", { class: "foot-center", id: "foot-version" }, versionContent()),
+    h("div", { class: "foot-right" }),
+  );
+  return el;
+}
+
+function healthContent(): HTMLElement {
+  const h0 = ui.health;
+  const status = h0?.status ?? "error";
+  const label =
+    status === "ok"
+      ? "Healthy"
+      : status === "degraded"
+        ? "Provider unreachable"
+        : h0?.providerReachable
+          ? "Not configured"
+          : "Unhealthy";
+  return h(
+    "div",
+    { class: `health health-${status}`, title: h0?.detail ?? "" },
+    h("span", { class: "health-dot" }),
+    h("span", { class: "health-label" }, label),
+  );
+}
+
+function versionContent(): HTMLElement {
+  const v = ui.health?.version ?? "dev";
+  return h("span", { class: "foot-version-text" }, `Aria v${v}`);
+}
+
+function renderFooterOnly() {
+  const health = document.getElementById("foot-health");
+  if (health) health.replaceChildren(healthContent());
+  const ver = document.getElementById("foot-version");
+  if (ver) ver.replaceChildren(versionContent());
 }
 
 function groupWorkspaces(convs: ConversationView[]): WsGroup[] {
@@ -2186,6 +2255,7 @@ export async function start(initialId?: string) {
     return;
   }
   unsubscribe = unsub;
+  startHealthPoll();
   await refreshConversations();
   // The default main session is the conversation with no folder. Create one on
   // first launch so the user can talk immediately; afterwards reuse the one we

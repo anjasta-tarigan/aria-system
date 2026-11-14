@@ -10,6 +10,7 @@ import type {
   ChangedFile,
   ConversationDetail,
   ConversationView,
+  HealthView,
   Memory,
   MessageHit,
   PendingApproval,
@@ -643,6 +644,15 @@ const handlers: Record<string, Handler> = {
     task.endedAt = now();
     return task;
   },
+  health: (): HealthView => ({
+    status: "ok",
+    detail: null,
+    providerReachable: true,
+    apiKeyPresent: true,
+    model: "mock-model",
+    schemaVersion: 6,
+    version: "0.0.0-mock",
+  }),
   set_main_system_scope: (a) => {
     const d = conversations.get(String(a.conversationId));
     if (!d) throw new Error("no such conversation");

@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use aria_core::agent::{Agent, PendingApproval, ProviderSource, RunEvent, RunHandle};
+use aria_core::provider::OpenAiProvider;
 use aria_core::config::{Config, SecretBackend, Settings};
 use aria_core::db::{self, Db, MessageHit, Role, Run, Todo, ToolCall};
 use aria_core::journal::Blobs;
@@ -152,6 +153,22 @@ pub struct CloudFolder {
 pub struct BackgroundPoll {
     pub task: BackgroundTask,
     pub tail: String,
+}
+
+/// Real-time system health: whether the model provider is reachable and the app
+/// is configured to use it, plus static build/version facts for the footer.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthView {
+    /// `ok` (reachable + configured), `degraded` (configured but unreachable), or
+    /// `error` (not configured or the probe failed outright).
+    pub status: String,
+    pub detail: Option<String>,
+    pub provider_reachable: bool,
+    pub api_key_present: bool,
+    pub model: String,
+    pub schema_version: i64,
+    pub version: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -836,6 +853,44 @@ async fn kill_background(state: State<'_, App>, id: String) -> CmdResult<Backgro
         .map_err(err)
 }
 
+/// Real-time system health for the footer: is the model provider reachable now,
+/// and is the app configured to use it? The probe is a live network request, so
+/// the result reflects the current state, not a cached guess.
+#[tauri::command]
+async fn health(state: State<'_, App>) -> CmdResult<HealthView> {
+    let config = &state.inner.config;
+    let settings = config.load().map_err(err)?;
+    let api_key_present = config.secret_status().map_err(err)?.present;
+    let model = settings.model.clone();
+    let schema_version = state.inner.db.schema_version().map_err(err)?;
+
+    let provider = OpenAiProvider::from_config(&config);
+    let (reachable, detail) = match provider {
+        Ok(p) => match p.health_check().await {
+            Ok(()) => (true, None),
+            Err(e) => (false, Some(e.to_string())),
+        },
+        // No key or model configured: nothing to probe.
+        Err(_) => (false, None),
+    };
+
+    let status = match (api_key_present && !model.trim().is_empty(), reachable) {
+        (false, _) => "error",
+        (true, true) => "ok",
+        (true, false) => "degraded",
+    };
+
+    Ok(HealthView {
+        status: status.to_string(),
+        detail,
+        provider_reachable: reachable,
+        api_key_present,
+        model,
+        schema_version,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })
+}
+
 #[tauri::command]
 fn set_settings(state: State<'_, App>, input: SettingsInput) -> CmdResult<SettingsView> {
     let config = &state.inner.config;
@@ -1011,6 +1066,7 @@ pub fn run() {
             poll_background,
             list_background,
             kill_background,
+            health,
         ])
         .run(tauri::generate_context!())
         .expect("error while running aria");

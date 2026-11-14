@@ -121,9 +121,81 @@ pre {
 }
 
 .app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.app-body {
+  flex: 1;
+  min-height: 0;
   display: grid;
   grid-template-columns: 264px 1fr auto;
-  height: 100%;
+}
+
+/* ---------------------------------------------------------------- footer */
+
+.app-foot {
+  flex: none;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  height: 30px;
+  padding: 0 var(--sp-4);
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.foot-foot {
+  justify-self: start;
+}
+
+.foot-center {
+  justify-self: center;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.foot-right {
+  justify-self: end;
+}
+
+.health {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--muted);
+}
+
+.health-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 18%, transparent);
+}
+
+.health-ok {
+  color: var(--ok);
+}
+.health-ok .health-dot {
+  background: var(--ok);
+}
+
+.health-degraded {
+  color: var(--warn);
+}
+.health-degraded .health-dot {
+  background: var(--warn);
+}
+
+.health-error {
+  color: var(--bad);
+}
+.health-error .health-dot {
+  background: var(--bad);
 }
 
 /* ------------------------------------------------------------- sidebar */

@@ -232,7 +232,20 @@ export const api = {
     invoke<BackgroundTask[]>("list_background", { conversationId }),
   killBackground: (id: string) =>
     invoke<BackgroundTask>("kill_background", { id }),
+  health: () => invoke<HealthView>("health"),
 };
+
+export type HealthStatus = "ok" | "degraded" | "error";
+
+export interface HealthView {
+  status: HealthStatus;
+  detail: string | null;
+  providerReachable: boolean;
+  apiKeyPresent: boolean;
+  model: string;
+  schemaVersion: number;
+  version: string;
+}
 
 export interface Memory {
   id: string;
