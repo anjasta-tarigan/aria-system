@@ -2278,6 +2278,12 @@ export function stop() {
   disposed = true;
   unsubscribe?.();
   unsubscribe = null;
+  // A leaked interval would double-poll after a hot reload; the guard in
+  // startHealthPoll() lets the next boot recreate it cleanly.
+  if (healthPoll) {
+    clearInterval(healthPoll);
+    healthPoll = null;
+  }
 }
 
 export type { ApprovalClass, PendingApproval };
