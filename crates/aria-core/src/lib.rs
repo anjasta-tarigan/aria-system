@@ -7,5 +7,6 @@ pub mod config;
 pub mod db;
 pub mod journal;
 pub mod provider;
+pub mod settings;
 pub mod tools;
 pub mod workspace;

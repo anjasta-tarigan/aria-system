@@ -19,7 +19,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::config::{ApprovalPolicy, Caps, Config, Settings};
 use crate::db::{
-    self, Approval, ApprovalClass, Db, DbError, Decision, Role, Run, RunState, ToolCall,
+    self, Approval, ApprovalClass, Db, DbError, Decision, Mode, Role, Run, RunState, ToolCall,
     ToolCallState,
 };
 use crate::journal::Blobs;
@@ -36,6 +36,8 @@ const POLL: Duration = Duration::from_millis(20);
 pub enum AgentError {
     #[error("db: {0}")]
     Db(#[from] DbError),
+    #[error("config: {0}")]
+    Config(#[from] crate::config::ConfigError),
     #[error("workspace: {0}")]
     Workspace(#[from] crate::workspace::PathError),
     #[error("provider: {0}")]
@@ -101,6 +103,7 @@ pub enum RunEvent {
 
 /// How to build a [`Provider`] for a Run: an injected fake in tests, the
 /// settings-backed OpenAI client in the app.
+#[derive(Clone)]
 pub enum ProviderSource {
     Fixed { provider: Arc<dyn Provider>, approval_policy: ApprovalPolicy },
     Settings { settings: Settings, api_key: String },
@@ -129,8 +132,8 @@ impl AnyProvider {
     /// recall to rank by similarity; `None` for test fakes.
     fn embedder(&self) -> Option<Arc<dyn crate::provider::Embedder>> {
         match self {
-            AnyProvider::OpenAi(p) => Some(Arc::new(p.clone())),
-            AnyProvider::Custom(_) => None,
+            AnyProvider::OpenAi(p) if p.embedding_enabled() => Some(Arc::new(p.clone())),
+            _ => None,
         }
     }
 }
@@ -175,7 +178,8 @@ pub struct Agent {
     caps: Caps,
     shell_timeout_secs: u64,
     source: ProviderSource,
-    config: Option<Arc<Config>>,
+    config: Option<Config>,
+    disabled_tools: Vec<String>,
 }
 
 impl Agent {
@@ -187,6 +191,7 @@ impl Agent {
             shell_timeout_secs: 120,
             source,
             config: None,
+            disabled_tools: Vec::new(),
         }
     }
 
@@ -196,8 +201,17 @@ impl Agent {
         self
     }
 
+    /// Set disabled tools for this agent's Runs.
+    pub fn with_disabled_tools(
+        mut self,
+        disabled: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.disabled_tools = disabled.into_iter().map(Into::into).collect();
+        self
+    }
+
     /// Carry the app config so search keys can be read at drive time.
-    pub fn with_config(mut self, config: Arc<Config>) -> Self {
+    pub fn with_config(mut self, config: Config) -> Self {
         self.config = Some(config);
         self
     }
@@ -312,7 +326,7 @@ impl Agent {
             })),
         };
         let provider = self.source.build()?;
-        let (search, vision, approval_policy) = match &self.source {
+        let (search, vision, approval_policy, mut disabled_tools) = match &self.source {
             ProviderSource::Settings { settings, .. } => {
                 let search_provider =
                     settings.search_provider.as_deref().and_then(SearchProvider::parse);
@@ -343,10 +357,15 @@ impl Agent {
                             .and_then(|c| c.api_key().ok().flatten().map(|(k, _)| k)),
                     })
                 };
-                (search, vision, settings.approval_policy)
+                (search, vision, settings.approval_policy, settings.disabled_tools.clone())
             }
-            ProviderSource::Fixed { approval_policy, .. } => (None, None, *approval_policy),
+            ProviderSource::Fixed { approval_policy, .. } => {
+                (None, None, *approval_policy, Vec::new())
+            }
         };
+        if !self.disabled_tools.is_empty() {
+            disabled_tools.extend(self.disabled_tools.clone());
+        }
         let ctx = LoopCtx {
             db: Arc::clone(&self.db),
             blobs: Arc::clone(&self.blobs),
@@ -359,6 +378,10 @@ impl Agent {
             search,
             vision,
             approval_policy,
+            disabled_tools,
+            config: self.config.clone(),
+            agent_disabled_tools: self.disabled_tools.clone(),
+            source: self.source.clone(),
         };
         tokio::spawn(ctx.run_to_end());
         Ok(handle)
@@ -384,11 +407,27 @@ fn pending_approval(approval: &Approval, call: &ToolCall) -> PendingApproval {
     }
 }
 
-/// Whether a tool class needs a per-call approval under the given policy.
-fn needs_approval(class: ApprovalClass, policy: ApprovalPolicy) -> bool {
+/// Whether a tool call needs a per-call approval under the given policy.
+fn needs_approval(
+    class: ApprovalClass,
+    policy: ApprovalPolicy,
+    scope: &Scope,
+    tool: &str,
+    args_json: &str,
+) -> bool {
     match policy {
         ApprovalPolicy::AlwaysAsk => class.requires_approval(),
-        ApprovalPolicy::AutoApproveSafe => matches!(class, ApprovalClass::Exec | ApprovalClass::Network),
+        // AutoApproveSafe: read, mutate (writing/editing) and network (web
+        // search/fetch) run without asking. A Main System shell command runs
+        // too when it is a single read-only command; destructive or composed
+        // commands ask. Workspace shell always asks: shell is not sandboxed, so
+        // even a read could reach outside the folder.
+        ApprovalPolicy::AutoApproveSafe => match class {
+            ApprovalClass::Exec => {
+                !matches!(scope, Scope::MainSystem(_)) || !tools::exec_is_safe(tool, args_json)
+            }
+            _ => false,
+        },
     }
 }
 
@@ -406,12 +445,99 @@ struct LoopCtx {
     search: Option<SearchConfig>,
     vision: Option<crate::tools::vision::VisionConfig>,
     approval_policy: ApprovalPolicy,
+    disabled_tools: Vec<String>,
+    /// App config, re-read each loop iteration for live hot reload.
+    config: Option<Config>,
+    /// Tool ids disabled via `Agent::with_disabled_tools`; re-merged on every
+    /// refresh so they survive settings reloads.
+    agent_disabled_tools: Vec<String>,
+    /// How to rebuild the provider from freshly loaded settings.
+    source: ProviderSource,
 }
 
 impl LoopCtx {
     fn emit(&self, event: RunEvent) {
         let inner = self.handle.inner.lock().unwrap_or_else(|p| p.into_inner());
         let _ = inner.events.send(event);
+    }
+
+    /// Re-read settings from disk each loop iteration so changes to the
+    /// provider/model, Caps, shell timeout, search/vision config, approval
+    /// policy and disabled tools take effect without restarting the Run (live
+    /// hot reload).
+    fn refresh_settings(&mut self) -> Result<()> {
+        if let Some(config) = &self.config {
+            let settings = match config.load() {
+                Ok(s) => s,
+                Err(e) => return Err(e.into()),
+            };
+            self.caps = settings.caps.clone();
+            self.shell_timeout_secs = settings.shell_timeout_secs;
+            self.approval_policy = settings.approval_policy;
+            self.disabled_tools = settings.disabled_tools.clone();
+            if !self.agent_disabled_tools.is_empty() {
+                let additions: Vec<String> = self
+                    .agent_disabled_tools
+                    .iter()
+                    .filter(|t| !self.disabled_tools.contains(*t))
+                    .cloned()
+                    .collect();
+                self.disabled_tools.extend(additions);
+            }
+            // Re-resolve search config each time: provider, base_url and key can
+            // all change from the settings page.
+            let search_provider = settings
+                .search_provider
+                .as_deref()
+                .and_then(SearchProvider::parse);
+            self.search = search_provider.map(|p| {
+                let api_key = config
+                    .search_api_key()
+                    .ok()
+                    .flatten()
+                    .map(|(k, _)| k);
+                SearchConfig {
+                    provider: p,
+                    api_key,
+                    base_url: settings.search_base_url.clone(),
+                }
+            });
+            let vision_model = settings
+                .vision_model
+                .clone()
+                .unwrap_or_else(|| settings.model.clone());
+            self.vision = if vision_model.is_empty() {
+                None
+            } else {
+                Some(crate::tools::vision::VisionConfig {
+                    model: vision_model,
+                    base_url: settings.base_url.clone(),
+                    api_key: config
+                        .api_key()
+                        .ok()
+                        .flatten()
+                        .map(|(k, _)| k),
+                })
+            };
+            // Rebuild the live provider so a model/provider/API-key switch
+            // applies to the next Turn of this Run. A malformed or keyless
+            // edit keeps the previous provider instead of aborting the Run.
+            if matches!(&self.source, ProviderSource::Settings { .. })
+                && let Ok(Some((api_key, _))) = config.api_key()
+            {
+                let unchanged = matches!(
+                    &self.provider,
+                    AnyProvider::OpenAi(p) if p.same_config(&settings, &api_key)
+                );
+                if !unchanged
+                    && let Ok(provider) =
+                        crate::provider::OpenAiProvider::new(settings.clone(), api_key)
+                {
+                    self.provider = AnyProvider::OpenAi(provider);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn call<T>(&self, f: impl FnOnce(&Connection) -> db::Result<T>) -> Result<T> {
@@ -459,46 +585,51 @@ impl LoopCtx {
             Some(id) => Some(self.call(|c| db::get_workspace(c, id))?),
             None => None,
         };
-        let scope = if let Some(ws) = &workspace {
-            Scope::Workspace(WorkspaceRoot::new(&ws.root_path)?)
-        } else if conversation.main_system {
-            let paths = self
-                .call(|c| db::list_main_system_paths(c, &conversation.id))?
-                .into_iter()
-                .map(PathBuf::from)
-                .collect::<Vec<_>>();
-            Scope::MainSystem(paths)
-        } else {
-            Scope::None
-        };
-        let ctx = ToolContext {
-            root: workspace
-                .as_ref()
-                .map(|ws| WorkspaceRoot::new(&ws.root_path))
-                .transpose()?,
-            workspace_id: workspace.as_ref().map(|ws| ws.id.clone()),
-            run_id: self.run_id.clone(),
-            db: Arc::clone(&self.db),
-            blobs: Arc::clone(&self.blobs),
-            shell_timeout_secs: self.shell_timeout_secs,
-            embed: self.provider.embedder(),
-            scope: scope.clone(),
-            search: self.search.clone(),
-            vision: self.vision.clone(),
-            // Background runner is only available when a workspace is open: its
-            // root is the run's root, so no folder means no background tasks.
-            background: workspace.as_ref().map(|ws| {
-                Arc::new(BackgroundTasks {
-                    db: Arc::clone(&self.db),
-                    blobs: Arc::clone(&self.blobs),
-                    root: WorkspaceRoot::new(&ws.root_path).map(|r| r.root().to_path_buf()).unwrap_or_default(),
-                    scope: scope.clone(),
-                    shell_timeout_secs: self.shell_timeout_secs,
-                })
-            }),
-        };
-
         loop {
+            // Live hot reload: re-read settings from disk each iteration so
+            // provider, Caps, timeouts, policy, tools, search and vision take
+            // effect without restarting the Run.
+            self.refresh_settings()?;
+            // Rebuild the scope too: the Main System allow-list can change
+            // while a long Run is parked or between Turns.
+            let scope = if let Some(ws) = &workspace {
+                Scope::Workspace(WorkspaceRoot::new(&ws.root_path)?)
+            } else if conversation.main_system {
+                let paths = self
+                    .call(|c| db::list_main_system_paths(c, &conversation.id))?
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .collect::<Vec<_>>();
+                Scope::MainSystem(paths)
+            } else {
+                Scope::None
+            };
+            let ctx = ToolContext {
+                root: workspace
+                    .as_ref()
+                    .map(|ws| WorkspaceRoot::new(&ws.root_path))
+                    .transpose()?,
+                workspace_id: workspace.as_ref().map(|ws| ws.id.clone()),
+                run_id: self.run_id.clone(),
+                db: Arc::clone(&self.db),
+                blobs: Arc::clone(&self.blobs),
+                shell_timeout_secs: self.shell_timeout_secs,
+                embed: self.provider.embedder(),
+                scope: scope.clone(),
+                search: self.search.clone(),
+                vision: self.vision.clone(),
+                background: workspace.as_ref().map(|ws| {
+                    Arc::new(BackgroundTasks {
+                        db: Arc::clone(&self.db),
+                        blobs: Arc::clone(&self.blobs),
+                        root: WorkspaceRoot::new(&ws.root_path).map(|r| r.root().to_path_buf()).unwrap_or_default(),
+                        scope: scope.clone(),
+                        shell_timeout_secs: self.shell_timeout_secs,
+                    })
+                }),
+                disabled_tools: self.disabled_tools.clone(),
+            };
+
             if self.handle.is_cancelled() {
                 return self.finish(RunState::Cancelled, "cancelled");
             }
@@ -636,8 +767,26 @@ impl LoopCtx {
     }
 
     async fn run_one(&self, ctx: &ToolContext, call: &ToolCall) -> Result<()> {
+        // An approved call that names a path outside the restricted Main System
+        // roots may reach that exact path; the approval row is what unlocks it.
+        let mut call_ctx = ctx.clone();
+        if tools::outside_scope(&ctx.scope, &call.tool, &call.args_json)
+            && self
+                .call(|c| db::approval_for_tool_call(c, &call.id))
+                .ok()
+                .flatten()
+                .is_some_and(|a| a.decision == Some(Decision::Approve))
+        {
+            call_ctx.scope = Scope::MainSystem(Vec::new());
+        }
+        let ctx = &call_ctx;
+
         let outcome = if call.tool == tools::RUN_SHELL {
-            self.run_shell(ctx, call).await
+            if ctx.disabled_tools.iter().any(|t| t == tools::RUN_SHELL) {
+                ToolOutcome::error(format!("tool `{}` is disabled in Settings", tools::RUN_SHELL))
+            } else {
+                self.run_shell(ctx, call).await
+            }
         } else {
             ToolRegistry::execute(&call.tool, &call.args_json, ctx).await
         };
@@ -658,6 +807,9 @@ impl LoopCtx {
 
     /// `run_shell` alone streams output to the UI as it is produced.
     async fn run_shell(&self, ctx: &ToolContext, call: &ToolCall) -> ToolOutcome {
+        if ctx.disabled_tools.iter().any(|t| t == tools::RUN_SHELL) {
+            return ToolOutcome::error(format!("tool `{}` is disabled in Settings", tools::RUN_SHELL));
+        }
         let args = match serde_json::from_str::<tools::ShellArgs>(&call.args_json) {
             Ok(args) => args,
             Err(e) => return ToolOutcome::error(format!("invalid arguments: {e}")),
@@ -695,8 +847,8 @@ impl LoopCtx {
             .max()
             .unwrap_or(0)
             .max(self.assistant_turns(&run)?);
-        let messages = self.request_messages(&run, scope.is_folder())?;
-        let specs = ToolRegistry::describe(scope);
+        let messages = self.request_messages(&run, scope)?;
+        let specs = ToolRegistry::describe(scope, &self.disabled_tools);
         self.emit(RunEvent::TurnStarted { turn_index });
 
         let result = self.stream(&messages, &specs, turn_index).await?;
@@ -726,7 +878,7 @@ impl LoopCtx {
             return Ok(TurnOutcome::Final);
         }
         for (index, request) in result.tool_calls.iter().enumerate() {
-            self.persist_tool_call(turn_index, index as i64, request)?;
+            self.persist_tool_call(turn_index, index as i64, request, scope)?;
         }
         Ok(TurnOutcome::ToolCalls)
     }
@@ -790,9 +942,19 @@ impl LoopCtx {
         turn_index: i64,
         call_index: i64,
         request: &ToolCallRequest,
+        scope: &Scope,
     ) -> Result<()> {
         let class = tools::approval_class(&request.function.name).unwrap_or(ApprovalClass::Read);
-        let state = if needs_approval(class, self.approval_policy) {
+        // A path outside a restricted Main System asks too, even when its class
+        // would otherwise run automatically.
+        let ask = needs_approval(
+            class,
+            self.approval_policy,
+            scope,
+            &request.function.name,
+            &request.function.arguments,
+        ) || tools::outside_scope(scope, &request.function.name, &request.function.arguments);
+        let state = if ask {
             ToolCallState::Pending
         } else {
             ToolCallState::Approved
@@ -809,7 +971,7 @@ impl LoopCtx {
                 state,
             )
         })?;
-        if needs_approval(class, self.approval_policy) {
+        if ask {
             let approval = self.call(|c| db::insert_approval(c, &call.id))?;
             self.emit(RunEvent::ApprovalRequested {
                 pending: pending_approval(&approval, &call),
@@ -837,18 +999,26 @@ impl LoopCtx {
 
     /// System prompt plus the conversation so far, with each Turn's Tool Calls
     /// (as the assistant asked them) and Tool Results (as the tools returned).
-    fn request_messages(&self, run: &Run, has_folder: bool) -> Result<Vec<ChatMessage>> {
+    fn request_messages(&self, run: &Run, scope: &Scope) -> Result<Vec<ChatMessage>> {
         let conversation = self.call(|c| db::get_conversation(c, &run.conversation_id))?;
         let memory_block = self.memory_block(conversation.workspace_id.as_deref())?;
 
         let prompt = format!(
-            "{}\n\n{}{}",
+            "{}\n\n{}{}{}{}",
             tools::SYSTEM_PROMPT,
-            if has_folder {
-                tools::FOLDER_PROMPT
-            } else {
-                tools::NO_FOLDER_PROMPT
+            match scope {
+                Scope::Workspace(_) => tools::FOLDER_PROMPT,
+                Scope::MainSystem(_) => tools::MAIN_SYSTEM_PROMPT,
+                Scope::None => tools::NO_FOLDER_PROMPT,
             },
+            match conversation.mode {
+                Mode::Creative => tools::CREATIVE_PROMPT,
+                Mode::Normal => "",
+            },
+            self.config
+                .as_ref()
+                .map(|c| tools::house_prompt(c.dir()))
+                .unwrap_or_default(),
             memory_block,
         );
         let mut messages = vec![ChatMessage::system(prompt)];

@@ -241,6 +241,24 @@ impl OpenAiProvider {
         })
     }
 
+    /// Whether freshly loaded settings would build the same client. Used by the
+    /// Run loop to hot-reload only on a real endpoint/model/key change, keeping
+    /// the connection pool across Turns.
+    pub fn same_config(&self, settings: &Settings, api_key: &str) -> bool {
+        self.settings.base_url == settings.base_url
+            && self.settings.model == settings.model
+            && self.settings.embedding_base_url == settings.embedding_base_url
+            && self.settings.embedding_model == settings.embedding_model
+            && self.settings.embedding_config.enabled == settings.embedding_config.enabled
+            && self.api_key == api_key
+    }
+
+    /// Whether memory should use embeddings. Off keeps recall on FTS5 alone and
+    /// avoids a doomed embeddings request on every `remember`.
+    pub fn embedding_enabled(&self) -> bool {
+        self.settings.embedding_config.enabled
+    }
+
     fn endpoint(&self) -> String {
         format!(
             "{}/chat/completions",

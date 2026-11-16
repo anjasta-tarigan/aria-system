@@ -62,9 +62,88 @@ pub enum ApprovalPolicy {
     /// Every mutate/exec/network call waits for the user (current behavior).
     #[default]
     AlwaysAsk,
-    /// Read and file mutations (edit/write/delete/move) run automatically;
-    /// only shell (Exec) and network stay gated.
+    /// Read, file mutations (edit/write/delete/move) and network (web
+    /// search/fetch) run automatically; only shell (Exec) stays gated.
     AutoApproveSafe,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AIProvider {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type", default = "openai_type")]
+    pub provider_type: String,
+    pub endpoint_url: String,
+    pub model_ids: Vec<String>,
+    pub default_model_id: String,
+    #[serde(default)]
+    pub is_default: bool,
+    #[serde(default)]
+    pub status: ProviderStatus,
+    pub last_tested_at: Option<i64>,
+}
+
+fn openai_type() -> String {
+    "openai-compatible".to_string()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderStatus {
+    #[default]
+    Untested,
+    Active,
+    Error,
+}
+
+/// Embedding (vector search) configuration. Not a provider list: Aria runs one
+/// embedding model against a chosen provider (or the default AI provider).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EmbeddingConfig {
+    /// Whether semantic memory search is on. Off means recall uses the FTS5
+    /// keyword index only and `remember` stores no vector.
+    pub enabled: bool,
+    pub provider_id: String,
+    pub model: String,
+    pub dimensions: Option<u32>,
+    pub batch_size: u32,
+    pub timeout_seconds: u32,
+}
+
+impl Default for EmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider_id: "default".to_string(),
+            model: "text-embedding-3-small".to_string(),
+            dimensions: None,
+            batch_size: 64,
+            timeout_seconds: 30,
+        }
+    }
+}
+
+/// The one connected web-search provider. The key itself lives in the secret
+/// store; only its mask and metadata are persisted here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchConfig {
+    pub provider_key: String,
+    pub api_key_masked: String,
+    #[serde(default)]
+    pub status: WebSearchStatus,
+    pub last_verified_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchStatus {
+    #[default]
+    Disconnected,
+    Connected,
+    Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +161,20 @@ pub struct Settings {
     pub vision_model: Option<String>,
     #[serde(default)]
     pub approval_policy: ApprovalPolicy,
+    /// Configured OpenAI-compatible chat providers. The default one also drives
+    /// the runtime `base_url`/`model` (kept in sync by the settings commands).
+    #[serde(default)]
+    pub ai_providers: Vec<AIProvider>,
+    #[serde(default)]
+    pub default_ai_provider_id: Option<String>,
+    #[serde(default)]
+    pub embedding_config: EmbeddingConfig,
+    #[serde(default)]
+    pub web_search_config: Option<WebSearchConfig>,
+    /// Ids of built-in tools the user has turned off. Absent = all enabled, so
+    /// the tool registry stays the source of truth for the tool list.
+    #[serde(default)]
+    pub disabled_tools: Vec<String>,
 }
 
 impl Default for Settings {
@@ -97,7 +190,43 @@ impl Default for Settings {
             search_base_url: None,
             vision_model: None,
             approval_policy: ApprovalPolicy::AlwaysAsk,
+            ai_providers: Vec::new(),
+            default_ai_provider_id: None,
+            embedding_config: EmbeddingConfig::default(),
+            web_search_config: None,
+            disabled_tools: Vec::new(),
         }
+    }
+}
+
+impl Settings {
+    /// The provider that supplies the runtime endpoint, if one is configured.
+    pub fn active_provider(&self) -> Option<&AIProvider> {
+        self.ai_providers
+            .iter()
+            .find(|p| Some(&p.id) == self.default_ai_provider_id.as_ref())
+            .or_else(|| self.ai_providers.iter().find(|p| p.is_default))
+    }
+
+    /// Keep the flat runtime endpoint in sync with the default provider, so the
+    /// agent keeps working unchanged. A no-op when no provider is configured.
+    pub fn sync_runtime_endpoint(&mut self) {
+        let Some(p) = self.active_provider() else {
+            return;
+        };
+        let base_url = p.endpoint_url.clone();
+        let model = if p.default_model_id.is_empty() {
+            p.model_ids.first().cloned().unwrap_or_default()
+        } else {
+            p.default_model_id.clone()
+        };
+        self.base_url = base_url;
+        self.model = model;
+    }
+
+    /// Whether a built-in tool is enabled (absent from the disabled list).
+    pub fn tool_enabled(&self, id: &str) -> bool {
+        !self.disabled_tools.iter().any(|t| t == id)
     }
 }
 
@@ -124,6 +253,7 @@ pub struct SecretStatus {
     pub backend: SecretBackend,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     dir: PathBuf,
 }
@@ -189,6 +319,17 @@ impl Config {
     }
 
     pub fn api_key(&self) -> Result<Option<(String, SecretBackend)>> {
+        if let Ok(settings) = self.load() {
+            let default_id = settings
+                .default_ai_provider_id
+                .as_deref()
+                .or_else(|| settings.active_provider().map(|p| p.id.as_str()));
+            if let Some(id) = default_id
+                && let Some(pair) = self.provider_api_key_with_backend(id)?
+            {
+                return Ok(Some(pair));
+            }
+        }
         if let Some(entry) = self.keyring()
             && let Ok(key) = entry.get_password()
             && !key.is_empty()
@@ -269,6 +410,67 @@ impl Config {
             let _ = entry.delete_credential();
         }
         match std::fs::remove_file(self.search_key_path()) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    // ---------------------------------------------- per-provider API keys
+    // Keys are stored under `provider:{id}`, never in settings.json.
+
+    fn provider_keyring(&self, provider_id: &str) -> Option<keyring::Entry> {
+        keyring::Entry::new(KEYRING_SERVICE, &format!("provider:{provider_id}")).ok()
+    }
+
+    fn provider_key_path(&self, provider_id: &str) -> PathBuf {
+        // Provider ids are UUID v7, so they are filesystem-safe as-is.
+        self.dir.join(format!("provider-{provider_id}.key"))
+    }
+
+    pub fn set_provider_api_key(&self, provider_id: &str, key: &str) -> Result<SecretBackend> {
+        if let Some(entry) = self.provider_keyring(provider_id)
+            && entry.set_password(key).is_ok()
+        {
+            let _ = std::fs::remove_file(self.provider_key_path(provider_id));
+            return Ok(SecretBackend::Keyring);
+        }
+        std::fs::create_dir_all(&self.dir)?;
+        let path = self.provider_key_path(provider_id);
+        std::fs::write(&path, key)?;
+        restrict_permissions(&path)?;
+        Ok(SecretBackend::FileFallback)
+    }
+
+    pub fn provider_api_key_with_backend(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<(String, SecretBackend)>> {
+        if let Some(entry) = self.provider_keyring(provider_id)
+            && let Ok(key) = entry.get_password()
+            && !key.is_empty()
+        {
+            return Ok(Some((key, SecretBackend::Keyring)));
+        }
+        match std::fs::read_to_string(self.provider_key_path(provider_id)) {
+            Ok(key) if !key.trim().is_empty() => {
+                Ok(Some((key.trim().to_string(), SecretBackend::FileFallback)))
+            }
+            Ok(_) => Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn provider_api_key(&self, provider_id: &str) -> Result<Option<String>> {
+        Ok(self.provider_api_key_with_backend(provider_id)?.map(|(k, _)| k))
+    }
+
+    pub fn clear_provider_api_key(&self, provider_id: &str) -> Result<()> {
+        if let Some(entry) = self.provider_keyring(provider_id) {
+            let _ = entry.delete_credential();
+        }
+        match std::fs::remove_file(self.provider_key_path(provider_id)) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.into()),

@@ -14,6 +14,68 @@ use tokio::sync::mpsc;
 
 use super::{Result, ToolContext, ToolError};
 
+/// Programs that only read. Under `auto_approve_safe` a call whose command is
+/// one of these — a single simple command, no chaining or redirection — runs
+/// without asking. Everything else still asks.
+const READ_ONLY: &[&str] = &[
+    "cat", "date", "df", "du", "echo", "file", "grep", "head", "id", "ls", "pwd", "rg", "stat",
+    "tail", "tree", "uname", "wc", "whoami",
+];
+
+/// Shell syntax that can chain, redirect, or substitute another command, so the
+/// first word is no longer the whole story.
+const SHELL_SYNTAX: &[char] = &[
+    '|', '&', ';', '<', '>', '$', '`', '\\', '(', ')', '{', '}', '\n', '\r',
+];
+
+/// Options that turn a read-only program into one that writes or executes
+/// something else (`find -delete`, `git --ext-diff`, `rg --pre`, ...).
+fn has_option(argv: &[&str], options: &[&str]) -> bool {
+    argv.iter().any(|arg| {
+        options.iter().any(|opt| {
+            *arg == *opt
+                || (opt.starts_with("--") && arg.strip_prefix(opt).is_some_and(|r| r.starts_with('=')))
+        })
+    })
+}
+
+fn is_read_only_command(program: &str, argv: &[&str]) -> bool {
+    match program {
+        "find" => !has_option(
+            argv,
+            &["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fls", "-fprintf"],
+        ),
+        "git" => {
+            matches!(
+                argv.get(1).copied(),
+                Some("status" | "diff" | "log" | "show" | "rev-parse" | "ls-files")
+            ) && !has_option(
+                argv,
+                &["-c", "--ext-diff", "--textconv", "--exec", "--output", "--upload-pack"],
+            )
+        }
+        "rg" => !has_option(argv, &["--pre", "--pre-glob"]),
+        "date" => !has_option(argv, &["-s", "--set"]),
+        other => READ_ONLY.contains(&other),
+    }
+}
+
+/// Whether `cmd` is a single read-only command that `auto_approve_safe` may run
+/// without an Approval. Conservative by design: quoting, variables, globs with
+/// shell syntax, pipes, redirects and unknown programs all ask.
+pub fn is_safe_command(cmd: &str) -> bool {
+    let cmd = cmd.trim();
+    if cmd.is_empty() || cmd.chars().any(|c| SHELL_SYNTAX.contains(&c)) {
+        return false;
+    }
+    let argv: Vec<&str> = cmd.split_whitespace().collect();
+    let Some(program) = argv.first() else {
+        return false;
+    };
+    let program = program.rsplit('/').next().unwrap_or(program);
+    is_read_only_command(program, &argv)
+}
+
 /// Cap on bytes fed back to the model, split between the head and tail.
 const MODEL_BYTES: usize = 32_000;
 
@@ -248,4 +310,57 @@ fn head_tail(text: &str) -> String {
         text.len() - start - (text.len() - end),
         &text[end..]
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_command;
+
+    #[test]
+    fn read_only_commands_are_safe() {
+        for cmd in [
+            "ls -la",
+            "cat notes.txt",
+            "grep -rn needle .",
+            "rg TODO src",
+            "git status",
+            "git diff --stat",
+            "git log --oneline -5",
+            "find . -name '*.rs'",
+            "echo hello",
+            "/bin/ls /tmp",
+            "  wc -l file.txt  ",
+        ] {
+            assert!(is_safe_command(cmd), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn writes_chains_and_execution_are_not_safe() {
+        for cmd in [
+            "",
+            "rm -rf /",
+            "git commit -m change",
+            "git branch -D main",
+            "git -c core.pager=sh status",
+            "git diff --ext-diff",
+            "git log --output=/tmp/x",
+            "ls; rm -rf /",
+            "ls && rm -rf /",
+            "ls | sh",
+            "echo x > file",
+            "cat $(rm -rf /)",
+            "cat `rm -rf /`",
+            "ls\nrm -rf /",
+            "echo $HOME",
+            "find . -delete",
+            "find . -exec rm {} +",
+            "rg --pre=./scan .",
+            "date -s tomorrow",
+            "sudo ls",
+            "sh -c 'echo hi'",
+        ] {
+            assert!(!is_safe_command(cmd), "{cmd}");
+        }
+    }
 }

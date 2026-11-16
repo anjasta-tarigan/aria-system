@@ -43,6 +43,7 @@ fn fx(vision: Option<VisionConfig>) -> Fx {
         search: None,
         vision,
         background: None,
+        disabled_tools: Vec::new(),
     };
     Fx {
         ws_path: ws.path().to_path_buf(),

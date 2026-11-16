@@ -25,6 +25,7 @@ fn ctx_with(search: Option<SearchConfig>) -> ToolContext {
         search,
         vision: None,
         background: None,
+        disabled_tools: Vec::new(),
     }
 }
 
@@ -81,4 +82,23 @@ async fn web_search_resolves_config() {
             || msg.contains("sending request"),
         "expected a network failure error, got: {msg}"
     );
+}
+
+#[tokio::test]
+async fn web_search_searxng_blocks_metadata() {
+    let ctx = ctx_with(Some(SearchConfig {
+        provider: SearchProvider::Searxng,
+        api_key: None,
+        base_url: Some("http://169.254.169.254/".into()),
+    }));
+    let err = web_search(
+        &ctx,
+        aria_core::tools::search::SearchArgs {
+            query: "rust".into(),
+            max_results: Some(3),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("link-local/metadata"));
 }

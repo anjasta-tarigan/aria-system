@@ -265,6 +265,14 @@ mod tests {
         let abs = std::fs::canonicalize("/").unwrap();
         assert!(!scope.contains(&abs));
     }
+
+    #[test]
+    fn scope_main_system_unrestricted_roots_at_cwd_and_journals_absolute_paths() {
+        let scope = Scope::MainSystem(vec![]);
+        assert_eq!(scope.root().unwrap(), std::env::current_dir().unwrap());
+        let outside = Path::new("/etc/passwd");
+        assert_eq!(scope.relativise(outside).unwrap(), "/etc/passwd");
+    }
 }
 
 /// What part of the filesystem a conversation's Tools may touch.
@@ -280,13 +288,18 @@ pub enum Scope {
 }
 
 impl Scope {
-    /// The base directory for recursive searches, or `None` if filesystem access
-    /// is disabled. For the main system this is the first allowed root, or the
-    /// working dir when unrestricted.
-    pub fn root(&self) -> Option<&Path> {
+    /// The base directory for recursive searches, shell cwd and journal keys, or
+    /// `None` if filesystem access is disabled. For the main system this is the
+    /// first allowed root, or the working dir when unrestricted.
+    pub fn root(&self) -> Option<PathBuf> {
         match self {
-            Scope::Workspace(w) => Some(w.root()),
-            Scope::MainSystem(paths) => paths.first().map(|p| p.as_path()),
+            Scope::Workspace(w) => Some(w.root().to_path_buf()),
+            Scope::MainSystem(paths) => Some(
+                paths
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+            ),
             Scope::None => None,
         }
     }
@@ -379,9 +392,11 @@ impl Scope {
         }
     }
 
-    /// Convert an absolute resolved path back to a stable relative key for the
-    /// edit journal. For the workspace it is folder-relative; for the main system
-    /// it is relative to the first allowed root (or the working dir when unrestricted).
+    /// Convert an absolute resolved path back to a stable key for the edit
+    /// journal. For the workspace it is folder-relative; for the main system it
+    /// is relative to the first allowed root (or the working dir when
+    /// unrestricted). A path outside that base falls back to the absolute path,
+    /// which `Path::join` accepts and keeps unambiguous.
     pub fn relativise(&self, absolute: &Path) -> Result<String> {
         match self {
             Scope::Workspace(w) => w.relativise(absolute),
@@ -391,9 +406,7 @@ impl Scope {
                 } else {
                     paths[0].clone()
                 };
-                let rel = absolute
-                    .strip_prefix(&base)
-                    .map_err(|_| PathError::Escapes(absolute.display().to_string()))?;
+                let rel = absolute.strip_prefix(&base).unwrap_or(absolute);
                 Ok(rel.to_string_lossy().replace('\\', "/"))
             }
             Scope::None => Err(PathError::Escapes(absolute.display().to_string())),

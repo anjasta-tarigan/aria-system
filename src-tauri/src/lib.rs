@@ -8,9 +8,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use aria_core::agent::{Agent, PendingApproval, ProviderSource, RunEvent, RunHandle};
+use aria_core::config::{
+    AIProvider, EmbeddingConfig, ProviderStatus, Settings, WebSearchConfig,
+};
 use aria_core::provider::OpenAiProvider;
-use aria_core::config::{Config, SecretBackend, Settings};
-use aria_core::db::{self, Db, MessageHit, Role, Run, Todo, ToolCall};
+use aria_core::config::{Config, SecretBackend};
+use aria_core::db::{self, Db, MessageHit, Mode, Role, Run, Todo, ToolCall};
 use aria_core::journal::Blobs;
 use aria_core::db::BackgroundTask;
 use aria_core::tools::BackgroundTasks;
@@ -56,17 +59,19 @@ impl App {
             Arc::clone(&self.inner.blobs),
             settings,
             api_key,
+            self.inner.config.clone(),
         ))
     }
 }
 
-fn build_agent(db: Arc<Db>, blobs: Arc<Blobs>, settings: Settings, api_key: String) -> Agent {
+fn build_agent(db: Arc<Db>, blobs: Arc<Blobs>, settings: Settings, api_key: String, config: Config) -> Agent {
     Agent::new(
         db,
         blobs,
         settings.caps.clone(),
         ProviderSource::Settings { settings, api_key },
     )
+    .with_config(config)
 }
 
 // ---------------------------------------------------------------- app layout
@@ -111,6 +116,8 @@ pub struct ConversationView {
     pub pinned: bool,
     /// True when this conversation has full main-system (filesystem) access.
     pub main_system: bool,
+    /// Normal for everyday work, Creative for changing Aria itself.
+    pub mode: Mode,
     pub run: Option<Run>,
 }
 
@@ -171,6 +178,110 @@ pub struct HealthView {
     pub version: String,
 }
 
+// ------------------------------------------------ settings-domain view types
+// Camel-cased to match the TypeScript contract in ui/src/api.ts.
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AIProviderView {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub provider_type: String,
+    pub endpoint_url: String,
+    pub api_key_masked: String,
+    pub model_ids: Vec<String>,
+    pub default_model_id: String,
+    pub is_default: bool,
+    pub status: ProviderStatus,
+    pub last_tested_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderTestResult {
+    pub ok: bool,
+    pub latency_ms: Option<u64>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchModelsResult {
+    pub models: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingTestResult {
+    pub ok: bool,
+    pub vector_length: Option<usize>,
+    pub latency_ms: Option<u64>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchVerifyResult {
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchTestResult {
+    pub ok: bool,
+    pub titles: Vec<SearchTitle>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchTitle {
+    pub title: String,
+    pub domain: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltInToolView {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub requires_setup: bool,
+    pub setup_complete: bool,
+    pub permission: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingIndexInfo {
+    pub total: i64,
+    pub embedded: i64,
+}
+
+fn provider_view(config: &Config, p: &AIProvider) -> AIProviderView {
+    let masked = config
+        .provider_api_key(&p.id)
+        .ok()
+        .flatten()
+        .map(|k| aria_core::settings::mask_key(&k))
+        .unwrap_or_default();
+    AIProviderView {
+        id: p.id.clone(),
+        name: p.name.clone(),
+        provider_type: p.provider_type.clone(),
+        endpoint_url: p.endpoint_url.clone(),
+        api_key_masked: masked,
+        model_ids: p.model_ids.clone(),
+        default_model_id: p.default_model_id.clone(),
+        is_default: p.is_default,
+        status: p.status,
+        last_tested_at: p.last_tested_at,
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SettingsInput {
     pub base_url: String,
@@ -212,6 +323,7 @@ fn conversation_view(db: &Db, c: db::Conversation) -> CmdResult<ConversationView
         updated_at: c.updated_at,
         pinned,
         main_system: c.main_system,
+        mode: c.mode,
         run,
     })
 }
@@ -369,7 +481,13 @@ async fn open_workspace(
 fn new_conversation(state: State<'_, App>) -> CmdResult<ConversationView> {
     let db = &state.inner.db;
     let conv = db
-        .call(|conn| db::insert_conversation(conn, None, "Main System"))
+        .call(|conn| {
+            let conv = db::insert_conversation(conn, None, "Main System")?;
+            // Full access by default: the no-folder chat spans the device.
+            // The header toggle can still switch it off or restrict paths.
+            db::set_conversation_scope(conn, &conv.id, true, &[])?;
+            db::get_conversation(conn, &conv.id)
+        })
         .map_err(err)?;
     conversation_view(db, conv)
 }
@@ -526,6 +644,22 @@ async fn set_main_system_scope(
     .await
     .map_err(err)?
     .and_then(|c| conversation_view(&state.inner.db, c))
+}
+
+/// Switch a conversation between Normal and Creative mode.
+#[tauri::command]
+fn set_conversation_mode(
+    state: State<'_, App>,
+    conversation_id: String,
+    mode: Mode,
+) -> CmdResult<ConversationView> {
+    let db = &state.inner.db;
+    db.call(|conn| {
+        db::set_conversation_mode(conn, &conversation_id, mode)?;
+        db::get_conversation(conn, &conversation_id)
+    })
+    .map_err(err)
+    .and_then(|c| conversation_view(db, c))
 }
 
 fn find_or_insert_workspace(conn: &aria_core::db::Connection, root_path: &str) -> db::Result<String> {
@@ -894,40 +1028,49 @@ async fn health(state: State<'_, App>) -> CmdResult<HealthView> {
 #[tauri::command]
 fn set_settings(state: State<'_, App>, input: SettingsInput) -> CmdResult<SettingsView> {
     let config = &state.inner.config;
-    let settings = Settings {
-        base_url: input.base_url.trim().to_string(),
-        model: input.model.trim().to_string(),
-        caps: aria_core::config::Caps {
-            max_turns: input.max_turns.max(1),
-            max_prompt_tokens: input.max_prompt_tokens.max(1),
-        },
-        shell_timeout_secs: input.shell_timeout_secs.max(1),
-        embedding_base_url: input
-            .embedding_base_url
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
-        embedding_model: input
-            .embedding_model
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
-        search_provider: input
-            .search_provider
-            .clone()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
-        search_base_url: input
-            .search_base_url
-            .clone()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
-        vision_model: input
-            .vision_model
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
-        approval_policy: match input.approval_policy.as_deref().unwrap_or("always_ask") {
-            "auto_approve_safe" => aria_core::config::ApprovalPolicy::AutoApproveSafe,
-            _ => aria_core::config::ApprovalPolicy::AlwaysAsk,
-        },
+    // Load first so the new settings-domain fields (providers, embedding,
+    // web search, disabled tools) are preserved rather than reset.
+    let mut settings = config.load().map_err(err)?;
+    settings.base_url = input.base_url.trim().to_string();
+    settings.model = input.model.trim().to_string();
+    settings.caps = aria_core::config::Caps {
+        max_turns: input.max_turns.max(1),
+        max_prompt_tokens: input.max_prompt_tokens.max(1),
+    };
+    settings.shell_timeout_secs = input.shell_timeout_secs.max(1);
+    // A General save does not carry embedding fields; keep the last
+    // embedding setup instead of clearing the model and endpoint.
+    if let Some(url) = input
+        .embedding_base_url
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        settings.embedding_base_url = Some(url);
+    }
+    if let Some(model) = input
+        .embedding_model
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        settings.embedding_model = Some(model);
+    }
+    settings.search_provider = input
+        .search_provider
+        .clone()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    settings.search_base_url = input
+        .search_base_url
+        .clone()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    settings.vision_model = input
+        .vision_model
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    settings.approval_policy = match input.approval_policy.as_deref().unwrap_or("always_ask") {
+        "auto_approve_safe" => aria_core::config::ApprovalPolicy::AutoApproveSafe,
+        _ => aria_core::config::ApprovalPolicy::AlwaysAsk,
     };
     if settings.model.is_empty() {
         return Err("a model name is required".into());
@@ -949,6 +1092,626 @@ fn set_settings(state: State<'_, App>, input: SettingsInput) -> CmdResult<Settin
         config.set_search_api_key(&key).map_err(err)?;
     }
     get_settings(state)
+}
+
+// ------------------------------------------------------ settings: AI providers
+
+#[tauri::command]
+fn list_ai_providers(state: State<'_, App>) -> CmdResult<Vec<AIProviderView>> {
+    let config = &state.inner.config;
+    let settings = config.load().map_err(err)?;
+    Ok(settings
+        .ai_providers
+        .iter()
+        .map(|p| provider_view(config, p))
+        .collect())
+}
+
+#[tauri::command]
+fn get_ai_provider(state: State<'_, App>, id: String) -> CmdResult<AIProviderView> {
+    let config = &state.inner.config;
+    let settings = config.load().map_err(err)?;
+    let provider = settings
+        .ai_providers
+        .iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| format!("provider {id} not found"))?;
+    Ok(provider_view(config, provider))
+}
+
+#[tauri::command]
+fn create_ai_provider(
+    state: State<'_, App>,
+    name: String,
+    endpoint_url: String,
+    api_key: String,
+    model_ids: Vec<String>,
+    default_model_id: String,
+) -> CmdResult<AIProviderView> {
+    use aria_core::settings::{self, SettingsError};
+    let config = &state.inner.config;
+    let mut s = config.load().map_err(err)?;
+
+    let model_ids = settings::dedupe_models(&model_ids);
+    let default_model_id = if default_model_id.trim().is_empty() {
+        model_ids.first().cloned().unwrap_or_default()
+    } else {
+        default_model_id.trim().to_string()
+    };
+    settings::validate_provider(&s, None, &name, &endpoint_url, &model_ids, &default_model_id, &api_key)
+        .map_err(|e: SettingsError| e.to_string())?;
+
+    let id = aria_core::db::uuid_v7();
+    let endpoint_url = settings::normalize_endpoint(&endpoint_url).map_err(err)?;
+    config
+        .set_provider_api_key(&id, api_key.trim())
+        .map_err(err)?;
+
+    let provider = AIProvider {
+        id: id.clone(),
+        name: name.trim().to_string(),
+        provider_type: "openai-compatible".to_string(),
+        endpoint_url,
+        model_ids,
+        default_model_id,
+        // The first provider becomes the default automatically.
+        is_default: s.ai_providers.is_empty(),
+        status: ProviderStatus::Untested,
+        last_tested_at: None,
+    };
+    if provider.is_default {
+        s.default_ai_provider_id = Some(id.clone());
+    }
+    s.ai_providers.push(provider.clone());
+    s.sync_runtime_endpoint();
+    config.save(&s).map_err(err)?;
+    Ok(provider_view(config, &provider))
+}
+
+#[tauri::command]
+fn update_ai_provider(
+    state: State<'_, App>,
+    id: String,
+    name: Option<String>,
+    endpoint_url: Option<String>,
+    api_key: Option<String>,
+    model_ids: Option<Vec<String>>,
+    default_model_id: Option<String>,
+) -> CmdResult<AIProviderView> {
+    use aria_core::settings::{self, SettingsError};
+    let config = &state.inner.config;
+    let mut s = config.load().map_err(err)?;
+
+    let idx = s
+        .ai_providers
+        .iter()
+        .position(|p| p.id == id)
+        .ok_or_else(|| format!("provider {id} not found"))?;
+
+    // Compute the post-update values, then validate the whole form once.
+    let name = name.map(|n| n.trim().to_string()).unwrap_or_else(|| s.ai_providers[idx].name.clone());
+    let endpoint_url = endpoint_url
+        .map(|e| e.trim().to_string())
+        .unwrap_or_else(|| s.ai_providers[idx].endpoint_url.clone());
+    let model_ids = model_ids
+        .map(|m| settings::dedupe_models(&m))
+        .unwrap_or_else(|| s.ai_providers[idx].model_ids.clone());
+    let default_model_id = default_model_id
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| s.ai_providers[idx].default_model_id.clone());
+    let new_key = api_key.unwrap_or_default();
+
+    settings::validate_provider(
+        &s,
+        Some(&id),
+        &name,
+        &endpoint_url,
+        &model_ids,
+        &default_model_id,
+        // Only require a key when none is stored yet.
+        if config.provider_api_key(&id).ok().flatten().is_some() {
+            "present"
+        } else {
+            &new_key
+        },
+    )
+    .map_err(|e: SettingsError| e.to_string())?;
+
+    let endpoint_url = settings::normalize_endpoint(&endpoint_url).map_err(err)?;
+    if !new_key.trim().is_empty() {
+        config.set_provider_api_key(&id, new_key.trim()).map_err(err)?;
+    }
+
+    let p = &mut s.ai_providers[idx];
+    p.name = name;
+    p.endpoint_url = endpoint_url;
+    p.model_ids = model_ids;
+    p.default_model_id = default_model_id;
+    let view = provider_view(config, p);
+    s.sync_runtime_endpoint();
+    config.save(&s).map_err(err)?;
+    Ok(view)
+}
+
+#[tauri::command]
+fn delete_ai_provider(state: State<'_, App>, id: String) -> CmdResult<()> {
+    let config = &state.inner.config;
+    let mut s = config.load().map_err(err)?;
+    s.ai_providers.retain(|p| p.id != id);
+    config.clear_provider_api_key(&id).map_err(err)?;
+
+    // Promote the next provider to default so one always remains when any exist.
+    if s.default_ai_provider_id.as_deref() == Some(id.as_str()) {
+        s.default_ai_provider_id = None;
+        for p in &mut s.ai_providers {
+            p.is_default = false;
+        }
+        if let Some(next) = s.ai_providers.first_mut() {
+            next.is_default = true;
+            s.default_ai_provider_id = Some(next.id.clone());
+        }
+    }
+    s.sync_runtime_endpoint();
+    config.save(&s).map_err(err)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_default_ai_provider(state: State<'_, App>, id: String) -> CmdResult<()> {
+    let config = &state.inner.config;
+    let mut s = config.load().map_err(err)?;
+    if !s.ai_providers.iter().any(|p| p.id == id) {
+        return Err(format!("provider {id} not found"));
+    }
+    for p in &mut s.ai_providers {
+        p.is_default = p.id == id;
+    }
+    s.default_ai_provider_id = Some(id);
+    s.sync_runtime_endpoint();
+    config.save(&s).map_err(err)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn test_ai_provider(
+    state: State<'_, App>,
+    id: Option<String>,
+    endpoint_url: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+) -> CmdResult<ProviderTestResult> {
+    let config = &state.inner.config;
+    let mut s = config.load().map_err(err)?;
+
+    let id = id.filter(|s| !s.trim().is_empty());
+    let idx = if let Some(ref id) = id {
+        Some(
+            s.ai_providers
+                .iter()
+                .position(|p| p.id == *id)
+                .ok_or_else(|| format!("provider {id} not found"))?,
+        )
+    } else {
+        None
+    };
+
+    let endpoint = match endpoint_url {
+        Some(url) => aria_core::settings::normalize_endpoint(&url).map_err(err)?,
+        None => {
+            let i = idx.ok_or("endpointUrl is required")?;
+            s.ai_providers[i].endpoint_url.clone()
+        }
+    };
+
+    let key = match api_key.filter(|k| !k.trim().is_empty()) {
+        Some(k) => k,
+        None => match id.as_deref() {
+            Some(id) => config
+                .provider_api_key(id)
+                .map_err(err)?
+                .ok_or("No API key stored for this provider")?,
+            None => return Err("Enter the provider's API key.".into()),
+        },
+    };
+
+    let outcome = aria_core::settings::probe_provider(
+        &endpoint,
+        &key,
+        model.as_deref(),
+        std::time::Duration::from_secs(8),
+    )
+    .await;
+    // Only a saved provider has a status row to update.
+    if let Some(idx) = idx {
+        aria_core::settings::apply_probe_status(&mut s.ai_providers[idx], outcome.ok);
+        config.save(&s).map_err(err)?;
+    }
+    Ok(ProviderTestResult {
+        ok: outcome.ok,
+        latency_ms: Some(outcome.latency_ms),
+        error: outcome.error,
+    })
+}
+
+#[tauri::command]
+async fn fetch_ai_provider_models(
+    state: State<'_, App>,
+    id: String,
+) -> CmdResult<FetchModelsResult> {
+    let config = &state.inner.config;
+    let s = config.load().map_err(err)?;
+    let endpoint = s
+        .ai_providers
+        .iter()
+        .find(|p| p.id == id)
+        .map(|p| p.endpoint_url.clone())
+        .ok_or_else(|| format!("provider {id} not found"))?;
+    let key = config
+        .provider_api_key(&id)
+        .map_err(err)?
+        .ok_or("No API key stored for this provider")?;
+    let models = aria_core::settings::fetch_models(
+        &endpoint,
+        &key,
+        std::time::Duration::from_secs(10),
+    )
+    .await
+    .map_err(err)?;
+    Ok(FetchModelsResult { models })
+}
+
+// --------------------------------------------------------- settings: embedding
+
+#[tauri::command]
+fn get_embedding_config(state: State<'_, App>) -> CmdResult<EmbeddingConfig> {
+    Ok(state.inner.config.load().map_err(err)?.embedding_config)
+}
+
+#[tauri::command]
+fn set_embedding_config(state: State<'_, App>, config: EmbeddingConfig) -> CmdResult<EmbeddingConfig> {
+    aria_core::settings::validate_embedding(
+        &config.model,
+        config.dimensions,
+        config.batch_size,
+        config.timeout_seconds,
+    )
+    .map_err(err)?;
+    let cfg = &state.inner.config;
+    let mut s = cfg.load().map_err(err)?;
+    s.embedding_config = config.clone();
+    // Mirror into the flat runtime fields the provider already reads.
+    s.embedding_model = Some(config.model.clone());
+    s.embedding_base_url = if config.provider_id == "default" {
+        None
+    } else {
+        s.ai_providers
+            .iter()
+            .find(|p| p.id == config.provider_id)
+            .map(|p| p.endpoint_url.clone())
+    };
+    cfg.save(&s).map_err(err)?;
+    Ok(config)
+}
+
+#[tauri::command]
+async fn test_embedding(
+    state: State<'_, App>,
+    model: Option<String>,
+    provider_id: Option<String>,
+) -> CmdResult<EmbeddingTestResult> {
+    let config = &state.inner.config;
+    let mut s = config.load().map_err(err)?;
+    // Test the values on screen, not the last saved ones: a model change is
+    // exactly what the user wants to verify before saving.
+    if let Some(m) = model.filter(|m| !m.trim().is_empty()) {
+        s.embedding_config.model = m.trim().to_string();
+        s.embedding_model = Some(s.embedding_config.model.clone());
+    }
+    if let Some(id) = provider_id.filter(|id| !id.trim().is_empty()) {
+        s.embedding_config.provider_id = id;
+        s.embedding_base_url = if s.embedding_config.provider_id == "default" {
+            None
+        } else {
+            s.ai_providers
+                .iter()
+                .find(|p| p.id == s.embedding_config.provider_id)
+                .map(|p| p.endpoint_url.clone())
+        };
+    }
+    // The embedding source may be a non-default provider; read its key directly.
+    let key = match config
+        .provider_api_key(&s.embedding_config.provider_id)
+        .map_err(err)?
+    {
+        Some(k) => k,
+        None => match config.api_key().map_err(err)? {
+            Some((k, _)) => k,
+            None => {
+                return Ok(EmbeddingTestResult {
+                    ok: false,
+                    vector_length: None,
+                    latency_ms: None,
+                    error: Some("No API key configured for this provider.".into()),
+                });
+            }
+        },
+    };
+    let provider = match OpenAiProvider::new(s.clone(), key) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(EmbeddingTestResult {
+                ok: false,
+                vector_length: None,
+                latency_ms: None,
+                error: Some(e.to_string()),
+            });
+        }
+    };
+    let timeout = std::time::Duration::from_secs(s.embedding_config.timeout_seconds.max(5) as u64);
+    let outcome =
+        aria_core::settings::probe_embedding(&provider, &s.embedding_config.model, timeout).await;
+    Ok(EmbeddingTestResult {
+        ok: outcome.ok,
+        vector_length: outcome.vector_length,
+        latency_ms: Some(outcome.latency_ms),
+        error: outcome.error,
+    })
+}
+
+/// How much of the memory index is embedded, so Settings can warn before a
+/// model change and report progress after a re-index.
+#[tauri::command]
+fn get_embedding_index_info(state: State<'_, App>) -> CmdResult<EmbeddingIndexInfo> {
+    let (total, embedded) = state
+        .inner
+        .db
+        .call(aria_core::db::memory_embedding_counts)
+        .map_err(err)?;
+    Ok(EmbeddingIndexInfo { total, embedded })
+}
+
+/// Re-embed every stored memory with the current embedding config.
+#[tauri::command]
+async fn reindex_memories(state: State<'_, App>) -> CmdResult<usize> {
+    let provider = OpenAiProvider::from_config(&state.inner.config).map_err(err)?;
+    aria_core::settings::reindex_memories(&state.inner.db, &provider)
+        .await
+        .map_err(err)
+}
+
+// -------------------------------------------------------- settings: web search
+
+#[tauri::command]
+fn get_web_search_config(state: State<'_, App>) -> CmdResult<Option<WebSearchConfig>> {
+    Ok(state.inner.config.load().map_err(err)?.web_search_config)
+}
+
+#[tauri::command]
+fn set_web_search_config(
+    state: State<'_, App>,
+    provider_key: String,
+    api_key: Option<String>,
+    base_url: Option<String>,
+) -> CmdResult<WebSearchConfig> {
+    let config = &state.inner.config;
+    let mut s = config.load().map_err(err)?;
+    let key = api_key.unwrap_or_default();
+    let cfg = aria_core::settings::web_search_config(&provider_key, &key).map_err(err)?;
+    if !key.trim().is_empty() {
+        config.set_search_api_key(key.trim()).map_err(err)?;
+    }
+    // Mirror into the flat fields the agent already reads.
+    s.search_provider = Some(cfg.provider_key.clone());
+    s.search_base_url = base_url
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty());
+    s.web_search_config = Some(cfg.clone());
+    config.save(&s).map_err(err)?;
+    Ok(cfg)
+}
+
+#[tauri::command]
+async fn verify_web_search(
+    state: State<'_, App>,
+    provider_key: String,
+    api_key: Option<String>,
+    base_url: Option<String>,
+) -> CmdResult<WebSearchVerifyResult> {
+    // Prove the key by running the smallest real query the agent would run, so
+    // a green result means search actually works rather than "key looks fine".
+    let config = &state.inner.config;
+    let key = match api_key.filter(|k| !k.trim().is_empty()) {
+        Some(k) => Some(k),
+        None => config.search_api_key().map_err(err)?.map(|(k, _)| k),
+    };
+    if matches!(provider_key.as_str(), "exa" | "firecrawl") && key.is_none() {
+        return Ok(WebSearchVerifyResult {
+            ok: false,
+            error: Some("Paste your API key first.".into()),
+        });
+    }
+    let provider = match aria_core::tools::SearchProvider::parse(&provider_key) {
+        Some(p) => p,
+        None => {
+            return Ok(WebSearchVerifyResult {
+                ok: false,
+                error: Some("Unknown search provider.".into()),
+            });
+        }
+    };
+    let ctx = aria_core::tools::context_for(
+        std::path::Path::new("/tmp"),
+        Arc::clone(&state.inner.db),
+        Arc::clone(&state.inner.blobs),
+        "",
+        "web-search-verify",
+    )
+    .map_err(err)?;
+    let mut ctx = ctx;
+    ctx.search = Some(aria_core::tools::SearchConfig {
+        provider,
+        api_key: key,
+        base_url: base_url.filter(|u| !u.trim().is_empty()),
+    });
+    let out = aria_core::tools::web_search(
+        &ctx,
+        aria_core::tools::search::SearchArgs {
+            query: "aria".into(),
+            max_results: Some(1),
+        },
+    )
+    .await;
+    Ok(match out {
+        Ok(_) => WebSearchVerifyResult { ok: true, error: None },
+        Err(e) => WebSearchVerifyResult {
+            ok: false,
+            error: Some(e.to_string()),
+        },
+    })
+}
+
+/// Forget the stored search key and provider, which also turns Web Search off.
+#[tauri::command]
+fn disconnect_web_search(state: State<'_, App>) -> CmdResult<()> {
+    let config = &state.inner.config;
+    let mut s = config.load().map_err(err)?;
+    config.clear_search_api_key().map_err(err)?;
+    s.search_provider = None;
+    s.search_base_url = None;
+    s.web_search_config = None;
+    config.save(&s).map_err(err)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn test_web_search(state: State<'_, App>) -> CmdResult<WebSearchTestResult> {
+    let config = &state.inner.config;
+    let s = config.load().map_err(err)?;
+    let Some(provider) = s
+        .search_provider
+        .as_deref()
+        .and_then(aria_core::tools::SearchProvider::parse)
+    else {
+        return Ok(WebSearchTestResult {
+            ok: false,
+            titles: Vec::new(),
+            error: Some("Web search is not configured.".into()),
+        });
+    };
+    let key = config.search_api_key().map_err(err)?.map(|(k, _)| k);
+    let ctx = aria_core::tools::context_for(
+        std::path::Path::new("/tmp"),
+        Arc::clone(&state.inner.db),
+        Arc::clone(&state.inner.blobs),
+        "",
+        "web-search-test",
+    )
+    .map_err(err)?;
+    let mut ctx = ctx;
+    ctx.search = Some(aria_core::tools::SearchConfig {
+        provider,
+        api_key: key,
+        base_url: s.search_base_url.clone(),
+    });
+    let out = aria_core::tools::web_search(
+        &ctx,
+        aria_core::tools::search::SearchArgs {
+            query: "aria desktop assistant".into(),
+            max_results: Some(3),
+        },
+    )
+    .await;
+    match out {
+        Ok(text) => {
+            let titles = parse_search_titles(&text);
+            Ok(WebSearchTestResult { ok: true, titles, error: None })
+        }
+        Err(e) => Ok(WebSearchTestResult {
+            ok: false,
+            titles: Vec::new(),
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+/// The web_search tool returns numbered "title — url" lines; extract the first
+/// three into title/domain pairs for the test panel.
+fn parse_search_titles(text: &str) -> Vec<SearchTitle> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.split_once(". ").map(|(_, r)| r) else {
+            continue;
+        };
+        if let Some((title, url)) = rest.split_once(" — ") {
+            let domain = url
+                .trim()
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split('/')
+                .next()
+                .unwrap_or("")
+                .to_string();
+            out.push(SearchTitle { title: title.trim().to_string(), domain });
+            if out.len() == 3 {
+                break;
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------- settings: built-in tools
+
+#[tauri::command]
+fn list_built_in_tools(state: State<'_, App>) -> CmdResult<Vec<BuiltInToolView>> {
+    let s = state.inner.config.load().map_err(err)?;
+    let search_ready = s.web_search_config.is_some();
+    Ok(aria_core::settings::tool_catalog()
+        .into_iter()
+        .map(|t| BuiltInToolView {
+            id: t.id.to_string(),
+            name: t.name.to_string(),
+            description: t.description.to_string(),
+            enabled: s.tool_enabled(t.id),
+            requires_setup: t.requires_setup,
+            setup_complete: !t.requires_setup || search_ready,
+            permission: t.permission.to_string(),
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn set_built_in_tool(
+    state: State<'_, App>,
+    id: String,
+    enabled: bool,
+) -> CmdResult<BuiltInToolView> {
+    let config = &state.inner.config;
+    let mut s = config.load().map_err(err)?;
+    if !aria_core::settings::tool_catalog().iter().any(|t| t.id == id) {
+        return Err(format!("unknown tool {id}"));
+    }
+    s.disabled_tools.retain(|t| t != &id);
+    if !enabled {
+        s.disabled_tools.push(id.clone());
+    }
+    config.save(&s).map_err(err)?;
+    let search_ready = s.web_search_config.is_some();
+    let info = aria_core::settings::tool_catalog()
+        .into_iter()
+        .find(|t| t.id == id)
+        .ok_or("unknown tool")?;
+    Ok(BuiltInToolView {
+        id: info.id.to_string(),
+        name: info.name.to_string(),
+        description: info.description.to_string(),
+        enabled,
+        requires_setup: info.requires_setup,
+        setup_complete: !info.requires_setup || search_ready,
+        permission: info.permission.to_string(),
+    })
 }
 
 // -------------------------------------------------------------- startup hook
@@ -973,6 +1736,7 @@ fn resume_unfinished(app: &AppHandle, inner: &Arc<Inner>) {
             Arc::clone(&inner.blobs),
             settings,
             key,
+            inner.config.clone(),
         );
         let app = app.clone();
         let inner = Arc::clone(inner);
@@ -1044,6 +1808,7 @@ pub fn run() {
             set_workspace_pin,
             get_main_system_paths,
             set_main_system_scope,
+            set_conversation_mode,
             list_conversations,
             get_conversation,
             send_message,
@@ -1067,6 +1832,26 @@ pub fn run() {
             list_background,
             kill_background,
             health,
+            list_ai_providers,
+            get_ai_provider,
+            create_ai_provider,
+            update_ai_provider,
+            delete_ai_provider,
+            set_default_ai_provider,
+            test_ai_provider,
+            fetch_ai_provider_models,
+            get_embedding_config,
+            set_embedding_config,
+            test_embedding,
+            get_embedding_index_info,
+            reindex_memories,
+            get_web_search_config,
+            set_web_search_config,
+            verify_web_search,
+            disconnect_web_search,
+            test_web_search,
+            list_built_in_tools,
+            set_built_in_tool,
         ])
         .run(tauri::generate_context!())
         .expect("error while running aria");

@@ -37,6 +37,7 @@ fn fx() -> Fx {
         search: None,
         vision: None,
         background: None,
+        disabled_tools: Vec::new(),
     };
     Fx { _ws: ws, ctx }
 }

@@ -1,4 +1,4 @@
-use aria_core::db::{self, Db, Decision, Role, RunState, ToolCallState};
+use aria_core::db::{self, Db, Decision, Mode, Role, RunState, ToolCallState};
 use aria_core::db::ApprovalClass;
 
 fn seed(db: &Db) -> (String, String) {
@@ -82,10 +82,10 @@ fn migration_is_idempotent_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("aria.db");
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 6);
+    assert_eq!(db.schema_version().unwrap(), 9);
     drop(db);
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 6);
+    assert_eq!(db.schema_version().unwrap(), 9);
     let (_ws, conv) = seed(&db);
     db.call(|c| db::insert_message(c, &conv, None, Role::User, "persisted"))
         .unwrap();
@@ -200,7 +200,7 @@ fn migrating_v1_keeps_rows_and_allows_a_folderness_conversation() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 6);
+    assert_eq!(db.schema_version().unwrap(), 9);
     db.call(|c| {
         // Existing rows survived the rebuild, and FTS was not disturbed.
         let conv = db::get_conversation(c, "c1")?;
@@ -294,7 +294,7 @@ END;
 #[test]
 fn migration_v4_creates_memories_table() {
     let db = Db::open_in_memory().unwrap();
-    assert_eq!(db.schema_version().unwrap(), 6);
+    assert_eq!(db.schema_version().unwrap(), 9);
     db.call(|c| {
         c.execute_batch("INSERT INTO memories (id, key, content, created_at, updated_at)
                          VALUES ('m1', 'k', 'v', 1, 1)")?;
@@ -363,6 +363,68 @@ fn memory_delete_by_key_and_get() {
 }
 
 #[test]
+fn memory_fts_follows_writes_and_respects_scope() {
+    let db = Db::open_in_memory().unwrap();
+    let ws = db.call(|c| db::insert_workspace(c, "/tmp/ws")).unwrap().id;
+    let other = db.call(|c| db::insert_workspace(c, "/tmp/other")).unwrap().id;
+    db.call(|c| {
+        db::insert_or_update_memory(c, Some(&ws), "editor", "prefers vim", None)?;
+        db::insert_or_update_memory(c, Some(&other), "shell", "uses zsh", None)?;
+        db::insert_or_update_memory(c, None, "city", "lives in Lisbon", None)?;
+        Ok(())
+    })
+    .unwrap();
+
+    let hits = db
+        .call(|c| db::search_memories_by_text(c, Some(&ws), "vim", 10))
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].key, "editor");
+
+    // An upsert re-indexes the new content; the old term no longer matches.
+    db.call(|c| db::insert_or_update_memory(c, Some(&ws), "editor", "prefers helix", None))
+        .unwrap();
+    assert!(db
+        .call(|c| db::search_memories_by_text(c, Some(&ws), "vim", 10))
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        db.call(|c| db::search_memories_by_text(c, Some(&ws), "helix", 10))
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Global memories match inside a workspace; another workspace's do not.
+    assert_eq!(
+        db.call(|c| db::search_memories_by_text(c, Some(&ws), "Lisbon", 10))
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(db
+        .call(|c| db::search_memories_by_text(c, Some(&ws), "zsh", 10))
+        .unwrap()
+        .is_empty());
+
+    // Punctuation in a model-written query is inert, not an FTS syntax error.
+    assert_eq!(
+        db.call(|c| db::search_memories_by_text(c, Some(&ws), "helix?!", 10))
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // A delete removes the row from the index.
+    db.call(|c| db::delete_memory_by_key(c, Some(&ws), "editor"))
+        .unwrap();
+    assert!(db
+        .call(|c| db::search_memories_by_text(c, Some(&ws), "helix", 10))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn embedding_roundtrip_and_similarity_search() {
     let db = Db::open_in_memory().unwrap();
     let ws = db.call(|c| db::insert_workspace(c, "/tmp/ws")).unwrap().id;
@@ -393,7 +455,7 @@ fn embedding_roundtrip_and_similarity_search() {
 #[test]
 fn migration_v5_adds_main_system_and_paths_tables() {
     let db = Db::open_in_memory().unwrap();
-    assert_eq!(db.schema_version().unwrap(), 6);
+    assert_eq!(db.schema_version().unwrap(), 9);
     let (ws, conv) = seed(&db);
     db.call(|c| {
         db::set_conversation_scope(c, &conv, true, &[])?;
@@ -425,6 +487,63 @@ fn conversation_scope_sets_main_system_and_paths() {
         assert!(db::list_main_system_paths(c, &conv)?.is_empty());
         db::set_conversation_scope(c, &conv, false, &[])?;
         assert!(!db::get_conversation(c, &conv)?.main_system);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn migration_v7_gives_existing_main_chat_full_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("aria.db");
+    // Two chats: the no-folder Main System and a workspace chat that happens to
+    // share the title. Both start at v7's predecessor, main_system = 0.
+    let (system_id, workspace_conv) = {
+        let db = Db::open(&path).unwrap();
+        db.call(|c| {
+            let system = db::insert_conversation(c, None, "Main System")?;
+            let ws = db::insert_workspace(c, "/tmp/ws-v7")?;
+            let in_ws = db::insert_conversation(c, Some(&ws.id), "Main System")?;
+            Ok((system.id, in_ws.id))
+        })
+        .unwrap()
+    };
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        // Make it look like a v6 database: the memory FTS index arrived in v8
+        // and the conversation mode column in v9.
+        conn.execute_batch(
+            "DROP TRIGGER memories_au;
+             DROP TRIGGER memories_ad;
+             DROP TRIGGER memories_ai;
+             DROP TABLE memories_fts;
+             ALTER TABLE conversations DROP COLUMN mode;",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 6).unwrap();
+    }
+
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.schema_version().unwrap(), 9);
+    db.call(|c| {
+        assert!(db::get_conversation(c, &system_id)?.main_system);
+        assert!(db::list_main_system_paths(c, &system_id)?.is_empty());
+        // A workspace chat is isolated regardless of its title.
+        assert!(!db::get_conversation(c, &workspace_conv)?.main_system);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn conversation_mode_defaults_to_normal_and_persists() {
+    let db = Db::open_in_memory().unwrap();
+    let (_ws, conv) = seed(&db);
+    db.call(|c| {
+        assert_eq!(db::get_conversation(c, &conv)?.mode, Mode::Normal);
+        db::set_conversation_mode(c, &conv, Mode::Creative)?;
+        assert_eq!(db::get_conversation(c, &conv)?.mode, Mode::Creative);
+        assert!(db::set_conversation_mode(c, "missing", Mode::Normal).is_err());
         Ok(())
     })
     .unwrap();

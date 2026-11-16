@@ -36,6 +36,7 @@ fn fx() -> Fx {
         search: None,
         vision: None,
         background: None,
+        disabled_tools: Vec::new(),
     };
     Fx {
         _ws: ws,
@@ -59,7 +60,7 @@ async fn call(f: &Fx, tool: &str, args: serde_json::Value) -> ToolOutcome {
 
 #[test]
 fn registry_advertises_all_tools_with_classes() {
-    let specs = ToolRegistry::describe(&Scope::Workspace(WorkspaceRoot::new(std::path::Path::new("/tmp")).unwrap()));
+    let specs = ToolRegistry::describe(&Scope::Workspace(WorkspaceRoot::new(std::path::Path::new("/tmp")).unwrap()), &[]);
     assert_eq!(specs.len(), 16);
     assert_eq!(specs.len(), tools::TOOLS.len());
     assert_eq!(tools::approval_class(tools::READ_FILE), Some(ApprovalClass::Read));
@@ -382,7 +383,7 @@ fn summary_shows_exact_content_for_edits_and_commands() {
 
 #[tokio::test]
 async fn without_a_folder_only_filesystem_free_tools_are_offered() {
-    let specs = ToolRegistry::describe(&aria_core::workspace::Scope::None);
+    let specs = ToolRegistry::describe(&aria_core::workspace::Scope::None, &[]);
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         names,
@@ -412,6 +413,7 @@ async fn without_a_folder_only_filesystem_free_tools_are_offered() {
         search: None,
         vision: None,
         background: None,
+        disabled_tools: Vec::new(),
     };
 
     let cases = [
@@ -460,6 +462,7 @@ async fn main_system_scope_reads_allowed_paths_and_refuses_others() {
         search: None,
         vision: None,
         background: None,
+        disabled_tools: Vec::new(),
     };
 
     let ok = ToolRegistry::execute(

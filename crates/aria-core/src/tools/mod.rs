@@ -5,6 +5,7 @@
 //! [`ToolRegistry::describe`] to advertise tools and [`ToolRegistry::execute`]
 //! to run one (issue 07).
 
+use std::path::Path;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -26,7 +27,7 @@ pub use background::BackgroundTasks;
 pub use crate::db::{BackgroundStatus, BackgroundTask};
 pub use fetch::{FetchOutcome, classify_ip, fetch_url};
 pub use search::{SearchConfig, SearchProvider, SearchHit, web_search};
-pub use shell::{ShellArgs, ShellOutcome, run_shell};
+pub use shell::{ShellArgs, ShellOutcome, is_safe_command, run_shell};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
@@ -97,6 +98,9 @@ pub struct ToolContext {
     /// open. `None` in the main session, so background tasks cannot be started
     /// without a folder (and without this capability).
     pub background: Option<Arc<BackgroundTasks>>,
+    /// Tool ids the user turned off in Settings; they are neither advertised
+    /// nor executed.
+    pub disabled_tools: Vec<String>,
 }
 
 impl ToolContext {}
@@ -157,6 +161,16 @@ Rules:
   is open, in which case they are scoped to that folder plus the global set.
 - Report what you changed and how you verified it.";
 
+/// Append when the conversation is the no-folder Main System chat: full device
+/// access, so it must not assume a project folder.
+pub const MAIN_SYSTEM_PROMPT: &str = "\
+This is the Main System chat with access to the whole device.
+
+- Absolute paths are allowed; relative paths resolve from the working
+  directory. Do not assume a project folder.
+- Prefer read_file, list_dir, search_files and the mutating file tools over
+  shell for file work. Shell commands may still ask for approval.";
+
 /// Appended when the conversation has a folder open.
 pub const FOLDER_PROMPT: &str = "\
 A folder is open in this conversation. Its tools act on that folder.
@@ -177,11 +191,100 @@ No folder is open in this conversation, so you have no files or shell. Answer
 questions and fetch web pages. If the user asks for work on files, offer to
 open a folder from the conversation header and let them pick one.";
 
+/// Appended in Creative mode: the conversation is about building or changing
+/// Aria itself, so the source checkout is the project.
+pub const CREATIVE_PROMPT: &str = "\
+You are in Creative mode: you help the user build and customize Aria itself.
+
+- Treat Aria's source checkout as the project. Read GLOSSARY.md, AGENTS.md and
+  docs/adr before changing behavior, and follow the structure already there.
+- Prefer the file tools over shell. After changing code, run the checks the
+  project uses (`cargo test -p aria-core`, `cargo check --workspace`, and the
+  UI type check) and report what passed.
+- A running app picks up core changes on restart; say what needs a restart or
+  rebuild instead of implying a change is already live.
+- If this build has no source checkout, say so and help the user get one
+  rather than pretending to edit Aria.
+- If a folder is open, change that folder; the source checkout is reachable
+  from the Main System chat.
+- Outside the user's request, leave Aria's files alone.";
+
+/// The app's own version, data directory and (in a dev checkout) source root,
+/// so the model can answer questions about Aria instead of guessing.
+pub fn house_prompt(config_dir: &Path) -> String {
+    let data_dir = config_dir.parent().unwrap_or(config_dir);
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .filter(|root| root.join("GLOSSARY.md").is_file())
+        .map(|root| format!("- Source checkout: {}\n", root.display()))
+        .unwrap_or_else(|| {
+            "- Source checkout: not available in this build; do not claim to edit Aria's code.\n"
+                .to_string()
+        });
+    format!(
+        "\n\nAbout Aria, the app you run inside:\
+        \n- Version {}, a local desktop assistant (Rust core, Tauri host, TypeScript UI).\
+        \n- App data: {}\
+        \n- Settings: {}/settings.json\
+        \n- Database: {}/aria.db\
+        \n{source}\
+        \n- Project docs, when a checkout exists: GLOSSARY.md, AGENTS.md, docs/adr.\
+        \nWhen the user asks about Aria itself, read these paths instead of guessing. In a folder-scoped conversation you cannot read them; answer from these facts and point to the Main System chat for live detail.",
+        env!("CARGO_PKG_VERSION"),
+        data_dir.display(),
+        config_dir.display(),
+        data_dir.display(),
+    )
+}
+
 pub fn approval_class(tool: &str) -> Option<ApprovalClass> {
     TOOLS
         .iter()
         .find(|(name, _)| *name == tool)
         .map(|(_, class)| *class)
+}
+
+/// Whether an Exec tool call is a single read-only command that
+/// `AutoApproveSafe` may run without asking. Anything that writes, chains or
+/// is not recognised as read-only needs an Approval.
+pub fn exec_is_safe(tool: &str, args_json: &str) -> bool {
+    if !matches!(tool, RUN_SHELL | RUN_BACKGROUND) {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(args_json)
+        .ok()
+        .and_then(|v| v.get("cmd").and_then(|c| c.as_str()).map(str::to_string))
+        .is_some_and(|cmd| is_safe_command(&cmd))
+}
+
+/// Whether a file Tool call names a path outside a restricted Main System's
+/// allowed roots. Such a call asks for approval even under `AutoApproveSafe`.
+/// Paths that fail for other reasons (missing parent, unreadable) stay
+/// ungated so the Tool reports the real error instead of prompting.
+pub fn outside_scope(scope: &Scope, tool: &str, args_json: &str) -> bool {
+    if !matches!(scope, Scope::MainSystem(paths) if !paths.is_empty()) {
+        return false;
+    }
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(args_json) else {
+        return false;
+    };
+    let arg = |key: &str| args.get(key).and_then(|v| v.as_str()).map(Path::new);
+    let outside = |resolved: std::result::Result<std::path::PathBuf, crate::workspace::PathError>| {
+        matches!(resolved, Err(crate::workspace::PathError::Escapes(_)))
+    };
+    let read = |p: &Path| outside(scope.resolve_read(p));
+    let create = |p: &Path| outside(scope.resolve_create(p));
+    match tool {
+        READ_FILE | VIEW_IMAGE | DELETE_FILE => arg("path").is_some_and(|p| read(p)),
+        // `list_dir` defaults to ".", which may itself be outside a root.
+        LIST_DIR => read(arg("path").unwrap_or_else(|| Path::new("."))),
+        EDIT_FILE | WRITE_FILE => arg("path").is_some_and(|p| create(p)),
+        MOVE_FILE => {
+            arg("from").is_some_and(|p| read(p)) || arg("to").is_some_and(|p| create(p))
+        }
+        _ => false,
+    }
 }
 
 /// JSON Schema descriptions handed to the model, plus dispatch.
@@ -190,7 +293,8 @@ pub struct ToolRegistry;
 impl ToolRegistry {
     /// The tools to advertise. Without a folder only the filesystem-free ones
     /// are offered, so the model is never told about tools it cannot use.
-    pub fn describe(scope: &Scope) -> Vec<ToolSpec> {
+    /// `disabled` lists tool ids the user turned off in Settings.
+    pub fn describe(scope: &Scope, disabled: &[String]) -> Vec<ToolSpec> {
         let all = vec![
             spec(
                 READ_FILE,
@@ -346,8 +450,9 @@ impl ToolRegistry {
             ),
             spec(
                 RECALL,
-                "List stored memories, ranked by similarity to `query` when given. \
-                 Returns the folder's memories plus global ones.",
+                "List stored memories. With `query`, fuses keyword (FTS5) and \
+                 semantic matches; without it, newest first. Returns the \
+                 folder's memories plus global ones.",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -392,17 +497,23 @@ impl ToolRegistry {
             ),
         ];
         if !matches!(scope, Scope::None) {
-            return all;
+            return all.into_iter()
+                .filter(|s| !disabled.contains(&s.name))
+                .collect();
         }
         let usable = [WEB_FETCH, WEB_SEARCH, TODOS, REMEMBER, RECALL];
         all.into_iter()
             .filter(|s| usable.contains(&s.name.as_str()))
+            .filter(|s| !disabled.contains(&s.name))
             .collect()
     }
 
     /// Run one tool. Every failure is a [`ToolOutcome`] marked as an error, never
     /// a panic and never an aborted Run.
     pub async fn execute(tool: &str, args: &str, ctx: &ToolContext) -> ToolOutcome {
+        if ctx.disabled_tools.iter().any(|t| t == tool) {
+            return ToolOutcome::error(format!("tool `{tool}` is disabled in Settings"));
+        }
         match Self::try_execute(tool, args, ctx).await {
             Ok(outcome) => outcome,
             Err(e) => ToolOutcome::error(e.to_string()),
@@ -560,6 +671,7 @@ pub fn context_for(
         search: None,
         vision: None,
         background: None,
+        disabled_tools: Vec::new(),
     })
 }
 

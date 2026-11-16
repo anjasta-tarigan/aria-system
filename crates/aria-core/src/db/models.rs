@@ -45,6 +45,45 @@ impl FromStr for Role {
     }
 }
 
+/// How Aria approaches a conversation. Normal is everyday work; Creative is
+/// for building and changing Aria itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    #[default]
+    Normal,
+    Creative,
+}
+
+impl Mode {
+    pub const ALL: [Mode; 2] = [Mode::Normal, Mode::Creative];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Normal => "normal",
+            Mode::Creative => "creative",
+        }
+    }
+}
+
+impl fmt::Display for Mode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Mode {
+    type Err = DbError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Mode::ALL.into_iter().find(|m| m.as_str() == s).ok_or_else(|| {
+            DbError::InvalidValue {
+                field: "mode",
+                value: s.to_string(),
+            }
+        })
+    }
+}
+
 /// Lifecycle of a [`Run`](crate::GLOSSARY).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -261,6 +300,8 @@ pub struct Conversation {
     pub updated_at: i64,
     /// Full filesystem access (the "main system"); otherwise workspace-scoped.
     pub main_system: bool,
+    /// Normal for everyday work, Creative for changing Aria itself.
+    pub mode: Mode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

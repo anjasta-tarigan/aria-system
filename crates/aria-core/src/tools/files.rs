@@ -2,7 +2,7 @@
 //! All path arguments go through [`WorkspaceRoot`]; all writes through
 //! [`Blobs`], so journaling cannot be skipped.
 
-use std::path::Path;
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
@@ -104,8 +104,8 @@ pub fn search_files(ctx: &ToolContext, args: SearchArgs) -> Result<String> {
     let max = default_limit(args.max_results, 200);
 
     let mut hits = Vec::new();
-    let base = scope.root().unwrap_or_else(|| Path::new("."));
-    let walker = ignore::WalkBuilder::new(base)
+    let base = scope.root().unwrap_or_else(|| PathBuf::from("."));
+    let walker = ignore::WalkBuilder::new(&base)
         .standard_filters(true)
         .build();
     'outer: for entry in walker.flatten() {
@@ -113,7 +113,7 @@ pub fn search_files(ctx: &ToolContext, args: SearchArgs) -> Result<String> {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
-        let rel = path.strip_prefix(base).unwrap_or(path);
+        let rel = path.strip_prefix(&base).unwrap_or(path);
         if let Some(m) = &glob
             && !m.is_match(rel)
         {
@@ -154,7 +154,7 @@ pub fn edit_file(ctx: &ToolContext, args: EditArgs) -> Result<String> {
         ToolError::Refused("no filesystem access".into())
     })?;
     let rel = ctx.scope.relativise(&resolved)?;
-    let current = Blobs::read_text(base, &rel)?;
+    let current = Blobs::read_text(&base, &rel)?;
     let count = current.matches(&args.search).count();
     if count != 1 {
         return Err(ToolError::Args(format!(
@@ -165,7 +165,7 @@ pub fn edit_file(ctx: &ToolContext, args: EditArgs) -> Result<String> {
     let updated = current.replacen(&args.search, &args.replace, 1);
     ctx.blobs.write_file(
         ctx.workspace_id.as_deref().unwrap_or(""),
-        base,
+        &base,
         &rel,
         &updated,
     )?;
@@ -192,7 +192,7 @@ pub fn write_file(ctx: &ToolContext, args: WriteFileArgs) -> Result<String> {
     let rel = ctx.scope.relativise(&resolved)?;
     ctx.blobs.write_file(
         ctx.workspace_id.as_deref().unwrap_or(""),
-        base,
+        &base,
         &rel,
         &args.content,
     )?;
@@ -215,7 +215,7 @@ pub fn delete_file(ctx: &ToolContext, args: PathArg) -> Result<String> {
     let rel = ctx.scope.relativise(&resolved)?;
     ctx.blobs.delete_file(
         ctx.workspace_id.as_deref().unwrap_or(""),
-        base,
+        &base,
         &rel,
     )?;
     Ok(format!("deleted {rel}"))
@@ -243,7 +243,7 @@ pub fn move_file(ctx: &ToolContext, args: MoveArgs) -> Result<String> {
     let to_rel = ctx.scope.relativise(&to)?;
     ctx.blobs.move_file(
         ctx.workspace_id.as_deref().unwrap_or(""),
-        base,
+        &base,
         &from_rel,
         &to_rel,
     )?;

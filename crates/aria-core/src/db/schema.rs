@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use super::{DbError, Result};
 
 /// Maximum schema version understood by this build.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 9;
 
 /// A handle to the application database.
 ///
@@ -111,6 +111,15 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if current < 6 {
         migrate_v6(conn)?;
+    }
+    if current < 7 {
+        migrate_v7(conn)?;
+    }
+    if current < 8 {
+        migrate_v8(conn)?;
+    }
+    if current < 9 {
+        migrate_v9(conn)?;
     }
     Ok(())
 }
@@ -343,5 +352,56 @@ fn migrate_v6(conn: &Connection) -> Result<()> {
         CREATE INDEX background_task_by_conversation ON background_task(conversation_id, started_at DESC);",
     )?;
     conn.pragma_update(None, "user_version", 6)?;
+    Ok(())
+}
+
+/// Version 7: the no-folder Main System chat is the device-wide command center,
+/// so existing ones start with full filesystem access. Workspace chats stay
+/// isolated. The header toggle can still restrict it afterwards.
+fn migrate_v7(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "UPDATE conversations SET main_system = 1
+         WHERE workspace_id IS NULL AND title = 'Main System'",
+        [],
+    )?;
+    conn.pragma_update(None, "user_version", 7)?;
+    Ok(())
+}
+
+/// Version 8: full-text index over memories so recall can match exact keywords
+/// without an embedding model. Mirrors `messages_fts`: external content with
+/// triggers, so existing rows are indexed here and later writes stay in sync.
+fn migrate_v8(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE memories_fts USING fts5(
+            key, content,
+            content='memories',
+            content_rowid='rowid',
+            tokenize='unicode61 remove_diacritics 2'
+        );
+        INSERT INTO memories_fts(rowid, key, content)
+            SELECT rowid, key, content FROM memories;
+        CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+            INSERT INTO memories_fts(rowid, key, content) VALUES (new.rowid, new.key, new.content);
+        END;
+        CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
+            INSERT INTO memories_fts(memories_fts, rowid, key, content) VALUES ('delete', old.rowid, old.key, old.content);
+        END;
+        CREATE TRIGGER memories_au AFTER UPDATE OF key, content ON memories BEGIN
+            INSERT INTO memories_fts(memories_fts, rowid, key, content) VALUES ('delete', old.rowid, old.key, old.content);
+            INSERT INTO memories_fts(rowid, key, content) VALUES (new.rowid, new.key, new.content);
+        END;",
+    )?;
+    conn.pragma_update(None, "user_version", 8)?;
+    Ok(())
+}
+
+/// Version 9: each conversation remembers whether it is in Normal (everyday
+/// work) or Creative (changing Aria itself) mode.
+fn migrate_v9(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE conversations ADD COLUMN mode TEXT NOT NULL DEFAULT 'normal';",
+    )?;
+    conn.pragma_update(None, "user_version", 9)?;
     Ok(())
 }

@@ -1,4 +1,4 @@
-use aria_core::config::{ApprovalPolicy, Caps, Config, SecretBackend, Settings};
+use aria_core::config::{ApprovalPolicy, Caps, Config, EmbeddingConfig, SecretBackend, Settings};
 
 fn cfg() -> (tempfile::TempDir, Config) {
     let dir = tempfile::tempdir().unwrap();
@@ -24,6 +24,21 @@ fn approval_policy_defaults_to_always_ask_and_parses() {
     )
     .unwrap();
     assert_eq!(s.approval_policy, ApprovalPolicy::AutoApproveSafe);
+}
+
+#[test]
+fn embedding_is_off_until_enabled() {
+    assert!(!EmbeddingConfig::default().enabled);
+    let cfg: EmbeddingConfig = serde_json::from_str(
+        r#"{"providerId":"default","model":"m","dimensions":null,"batchSize":64,"timeoutSeconds":30}"#,
+    )
+    .unwrap();
+    assert!(!cfg.enabled);
+    let cfg: EmbeddingConfig = serde_json::from_str(
+        r#"{"enabled":true,"providerId":"default","model":"m","dimensions":null,"batchSize":64,"timeoutSeconds":30}"#,
+    )
+    .unwrap();
+    assert!(cfg.enabled);
 }
 
 #[test]
@@ -96,4 +111,24 @@ fn soft_and_hard_caps() {
     assert!(!caps.hard_limit_reached(9, 999));
     assert!(caps.hard_limit_reached(10, 0));
     assert!(caps.hard_limit_reached(0, 1000));
+}
+
+#[test]
+fn api_key_resolves_default_provider_key_and_falls_back() {
+    let (_dir, c) = cfg();
+    c.set_provider_api_key("prov-1", "sk-provider-key").unwrap();
+
+    let mut s = Settings::default();
+    s.default_ai_provider_id = Some("prov-1".into());
+    c.save(&s).unwrap();
+
+    let (key, _) = c.api_key().unwrap().expect("provider key resolved");
+    assert_eq!(key, "sk-provider-key");
+
+    // Falls back to legacy global key when default provider has no key
+    s.default_ai_provider_id = Some("nonexistent".into());
+    c.save(&s).unwrap();
+    c.set_api_key("sk-legacy-global").unwrap();
+    let (key, _) = c.api_key().unwrap().expect("legacy key fallback");
+    assert_eq!(key, "sk-legacy-global");
 }

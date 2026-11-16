@@ -203,6 +203,7 @@ pub fn insert_conversation(
         created_at: now,
         updated_at: now,
         main_system: false,
+        mode: Mode::Normal,
     };
     conn.execute(
         "INSERT INTO conversations (id, workspace_id, title, created_at, updated_at)
@@ -240,7 +241,20 @@ pub fn rename_conversation(conn: &Connection, id: &str, title: &str) -> Result<(
     Ok(())
 }
 
+/// Switch a conversation between Normal and Creative mode.
+pub fn set_conversation_mode(conn: &Connection, id: &str, mode: Mode) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE conversations SET mode = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, mode.as_str(), now_ms()],
+    )?;
+    if changed == 0 {
+        return Err(DbError::NotFound("conversation"));
+    }
+    Ok(())
+}
+
 fn conversation_from_row(r: &Row<'_>) -> rusqlite::Result<Conversation> {
+    let mode: String = r.get(6)?;
     Ok(Conversation {
         id: r.get(0)?,
         workspace_id: r.get(1)?,
@@ -248,11 +262,12 @@ fn conversation_from_row(r: &Row<'_>) -> rusqlite::Result<Conversation> {
         created_at: r.get(3)?,
         updated_at: r.get(4)?,
         main_system: r.get::<_, i64>(5)? != 0,
+        mode: Mode::from_str(&mode).map_err(to_sql_err)?,
     })
 }
 
 const CONVERSATION_COLS: &str =
-    "id, workspace_id, title, created_at, updated_at, main_system";
+    "id, workspace_id, title, created_at, updated_at, main_system, mode";
 
 pub fn get_conversation(conn: &Connection, id: &str) -> Result<Conversation> {
     conn.query_row(
@@ -997,6 +1012,36 @@ pub fn delete_memory_by_key(conn: &Connection, workspace_id: Option<&str>, key: 
     Ok(())
 }
 
+/// Every memory regardless of scope, for a full re-index.
+pub fn list_all_memories(conn: &Connection) -> Result<Vec<Memory>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, workspace_id, key, content, embedding, created_at, updated_at
+         FROM memories ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], memory_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// How many memories exist, and how many already carry an embedding. Lets
+/// Settings warn that changing the embedding model needs a re-index.
+pub fn memory_embedding_counts(conn: &Connection) -> Result<(i64, i64)> {
+    conn.query_row(
+        "SELECT COUNT(*), COUNT(embedding) FROM memories",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .map_err(Into::into)
+}
+
+/// Replace one memory's embedding after a re-index.
+pub fn set_memory_embedding(conn: &Connection, id: &str, embedding: &[u8]) -> Result<()> {
+    conn.execute(
+        "UPDATE memories SET embedding = ?2 WHERE id = ?1",
+        params![id, embedding],
+    )?;
+    Ok(())
+}
+
 /// Rank memories in the workspace scope by cosine similarity to the query,
 /// returning the top `limit`. Memories without an embedding are skipped.
 pub fn search_memories_by_embedding(
@@ -1016,6 +1061,46 @@ pub fn search_memories_by_embedding(
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(limit);
     Ok(scored)
+}
+
+/// Keyword search over memories (FTS5), scoped like [`list_memories`]. The
+/// query is reduced to alphanumeric prefix terms, so arbitrary model text cannot
+/// raise an FTS syntax error; no terms left means no hits.
+pub fn search_memories_by_text(
+    conn: &Connection,
+    workspace_id: Option<&str>,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<Memory>> {
+    let Some(match_expr) = fts_query(query) else {
+        return Ok(Vec::new());
+    };
+    let mut stmt = conn.prepare(
+        "SELECT m.id, m.workspace_id, m.key, m.content, m.embedding, m.created_at, m.updated_at
+         FROM memories_fts f
+         JOIN memories m ON m.rowid = f.rowid
+         WHERE memories_fts MATCH ?1
+           AND ((?2 IS NULL AND m.workspace_id IS NULL)
+                OR (m.workspace_id = ?2 OR m.workspace_id IS NULL))
+         ORDER BY bm25(memories_fts), m.updated_at DESC
+         LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(
+        params![match_expr, workspace_id, limit as i64],
+        memory_from_row,
+    )?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Turn free text into an FTS5 query: each alphanumeric run becomes a quoted
+/// prefix term, OR-joined. Quoting keeps operators and punctuation inert.
+fn fts_query(query: &str) -> Option<String> {
+    let terms: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{t}\"*"))
+        .collect();
+    (!terms.is_empty()).then(|| terms.join(" OR "))
 }
 
 fn memory_from_row(r: &Row<'_>) -> rusqlite::Result<Memory> {

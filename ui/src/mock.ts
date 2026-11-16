@@ -5,22 +5,33 @@
 // window. This file is not bundled into the real app path; the switch lives in
 // main.ts.
 
-import type {
-  BackgroundTask,
-  ChangedFile,
-  ConversationDetail,
-  ConversationView,
-  HealthView,
-  Memory,
-  MessageHit,
-  PendingApproval,
-  Run,
-  RunEvent,
-  RunEventEnvelope,
-  RunStateView,
-  SettingsView,
-  Todo,
-  ToolCall,
+import {
+  KNOWN_EMBEDDING_MODELS,
+  type AIProvider,
+  type ApprovalClass,
+  type BackgroundTask,
+  type BuiltInTool,
+  type ChangedFile,
+  type ConversationDetail,
+  type ConversationView,
+  type ConversationMode,
+  type EmbeddingConfig,
+  type EmbeddingTestResult,
+  type FetchModelsResult,
+  type HealthView,
+  type Memory,
+  type MessageHit,
+  type PendingApproval,
+  type ProviderTestResult,
+  type Run,
+  type RunEvent,
+  type RunEventEnvelope,
+  type RunStateView,
+  type SettingsView,
+  type ToolCall,
+  type WebSearchConfig,
+  type WebSearchTestResult,
+  type WebSearchVerifyResult,
 } from "./api";
 
 type Handler = (args: Record<string, unknown>) => unknown;
@@ -72,6 +83,18 @@ const settings: SettingsView = {
 };
 
 const memories: Memory[] = [];
+
+// --- Settings domain mock state (AI providers, embedding, web search, tools) ---
+const aiProviders: AIProvider[] = [];
+const embeddingConfig: EmbeddingConfig = {
+  enabled: false,
+  providerId: "default",
+  model: "text-embedding-3-small",
+  batchSize: 64,
+  timeoutSeconds: 30,
+};
+let webSearchConfig: WebSearchConfig | null = null;
+const toolState: Record<string, boolean> = {};
 
 const listeners: Array<(e: { payload: RunEventEnvelope }) => void> = [];
 function emit(event: RunEvent, runId: string) {
@@ -356,6 +379,7 @@ const handlers: Record<string, Handler> = {
       updated_at: now(),
       pinned: false,
       main_system: false,
+      mode: "normal",
       run: null,
     };
     conversations.set(conv.id, {
@@ -401,6 +425,7 @@ const handlers: Record<string, Handler> = {
       updated_at: now(),
       pinned: ws.pinned,
       main_system: false,
+      mode: "normal",
       run: null,
     };
     conversations.set(conv.id, {
@@ -428,6 +453,7 @@ const handlers: Record<string, Handler> = {
       updated_at: now(),
       pinned: existing?.conversation.pinned ?? false,
       main_system: false,
+      mode: "normal",
       run: null,
     };
     conversations.set(conv.id, {
@@ -663,13 +689,187 @@ const handlers: Record<string, Handler> = {
     else mainPaths.delete(d.conversation.id);
     return structuredClone(d.conversation);
   },
+  set_conversation_mode: (a) => {
+    const d = conversations.get(String(a.conversationId));
+    if (!d) throw new Error("no such conversation");
+    d.conversation.mode = a.mode as ConversationMode;
+    return structuredClone(d.conversation);
+  },
+
+  // --- Settings domain: AI providers ---
+  list_ai_providers: () => structuredClone(aiProviders),
+  get_ai_provider: (a) => {
+    const p = aiProviders.find((p) => p.id === a.id);
+    if (!p) throw new Error("no such provider");
+    return structuredClone(p);
+  },
+  create_ai_provider: (a): AIProvider => {
+    const modelIds = (a.modelIds as string[]) ?? [];
+    const p: AIProvider = {
+      id: id("prov"),
+      name: String(a.name),
+      type: "openai-compatible",
+      endpointUrl: String(a.endpointUrl),
+      apiKeyMasked: "sk••••" + String(a.apiKey).slice(-4),
+      modelIds,
+      defaultModelId: String(a.defaultModelId || modelIds[0] || ""),
+      isDefault: aiProviders.length === 0,
+      status: "untested",
+    };
+    aiProviders.push(p);
+    return structuredClone(p);
+  },
+  update_ai_provider: (a): AIProvider => {
+    const p = aiProviders.find((p) => p.id === a.id);
+    if (!p) throw new Error("no such provider");
+    if (a.name !== undefined) p.name = String(a.name);
+    if (a.endpointUrl !== undefined) p.endpointUrl = String(a.endpointUrl);
+    if (a.apiKey) p.apiKeyMasked = "sk••••" + String(a.apiKey).slice(-4);
+    if (a.modelIds !== undefined) p.modelIds = a.modelIds as string[];
+    if (a.defaultModelId !== undefined) p.defaultModelId = String(a.defaultModelId);
+    return structuredClone(p);
+  },
+  delete_ai_provider: (a) => {
+    const i = aiProviders.findIndex((p) => p.id === a.id);
+    if (i < 0) throw new Error("no such provider");
+    const wasDefault = aiProviders[i].isDefault;
+    aiProviders.splice(i, 1);
+    if (wasDefault) {
+      for (const p of aiProviders) p.isDefault = false;
+      if (aiProviders[0]) {
+        aiProviders[0].isDefault = true;
+      }
+    }
+  },
+  set_default_ai_provider: (a) => {
+    for (const p of aiProviders) p.isDefault = p.id === a.id;
+  },
+  test_ai_provider: (a): ProviderTestResult => {
+    // Draft form: no id, test the endpoint being typed.
+    const p = a.id ? aiProviders.find((p) => p.id === a.id) : undefined;
+    if (a.id && !p) throw new Error("no such provider");
+    const endpoint = p ? p.endpointUrl : String(a.endpointUrl ?? "");
+    // An endpoint containing "fail" simulates a broken connection so the E2E
+    // can exercise the error path deterministically.
+    const ok = !endpoint.includes("fail");
+    if (p) {
+      p.status = ok ? "active" : "error";
+      p.lastTestedAt = now();
+    }
+    return { ok, latencyMs: 42, error: ok ? undefined : "Invalid API key" };
+  },
+  fetch_ai_provider_models: (): FetchModelsResult => ({
+    models: ["gpt-4o", "gpt-4o-mini", "o3-mini"],
+  }),
+
+  // --- Settings domain: embedding ---
+  get_embedding_config: () => structuredClone(embeddingConfig),
+  set_embedding_config: (a): EmbeddingConfig => {
+    const cfg = a.config as EmbeddingConfig;
+    Object.assign(embeddingConfig, cfg);
+    return structuredClone(embeddingConfig);
+  },
+  // Mirror the real probe: report the vector width of the model on screen.
+  test_embedding: (a): EmbeddingTestResult => {
+    const model = String(a?.model ?? embeddingConfig.model);
+    return { ok: true, vectorLength: KNOWN_EMBEDDING_MODELS[model] ?? 1536, latencyMs: 30 };
+  },
+
+  // --- Settings domain: web search ---
+  get_web_search_config: () => (webSearchConfig ? structuredClone(webSearchConfig) : null),
+  set_web_search_config: (a): WebSearchConfig => {
+    webSearchConfig = {
+      providerKey: String(a.providerKey),
+      apiKeyMasked: "••••" + String(a.apiKey ?? "").slice(-4),
+      status: "connected",
+      lastVerifiedAt: now(),
+    };
+    toolState.web_search = true;
+    return structuredClone(webSearchConfig);
+  },
+  verify_web_search: (a): WebSearchVerifyResult => {
+    // A provider key containing "bad" simulates a rejected key so the E2E can
+    // exercise the failure path deterministically.
+    if (String(a.apiKey ?? "").includes("bad")) {
+      return { ok: false, error: "Invalid API key" };
+    }
+    return { ok: true };
+  },
+  disconnect_web_search: (): void => {
+    webSearchConfig = null;
+    toolState.web_search = false;
+  },
+  get_embedding_index_info: () => ({ total: 3, embedded: 2 }),
+  reindex_memories: () => 3,
+  test_web_search: (): WebSearchTestResult => ({
+    ok: true,
+    titles: [
+      { title: "Aria — local-first AI assistant", domain: "aria.dev" },
+      { title: "OpenAI-compatible APIs", domain: "platform.openai.com" },
+      { title: "Tauri desktop apps", domain: "tauri.app" },
+    ],
+  }),
+
+  // --- Settings domain: built-in tools ---
+  list_built_in_tools: (): BuiltInTool[] =>
+    TOOL_CATALOG.map((t) => ({
+      id: t.id,
+      name: t.name,
+      description: t.description,
+      enabled: toolState[t.id] ?? true,
+      requiresSetup: t.requiresSetup,
+      setupComplete: !t.requiresSetup || !!webSearchConfig,
+      permission: t.permission,
+    })),
+  set_built_in_tool: (a): BuiltInTool => {
+    const t = TOOL_CATALOG.find((t) => t.id === a.id);
+    if (!t) throw new Error("unknown tool");
+    toolState[t.id] = Boolean(a.enabled);
+    return {
+      id: t.id,
+      name: t.name,
+      description: t.description,
+      enabled: Boolean(a.enabled),
+      requiresSetup: t.requiresSetup,
+      setupComplete: !t.requiresSetup || !!webSearchConfig,
+      permission: t.permission,
+    };
+  },
 };
 
+/// Mirrors aria-core's tool catalog (ids must match the Rust registry).
+const TOOL_CATALOG: { id: string; name: string; description: string; requiresSetup: boolean; permission: ApprovalClass }[] = [
+  { id: "read_file", name: "File reader", description: "Reads a file inside the open workspace.", requiresSetup: false, permission: "read" },
+  { id: "view_image", name: "Image viewer", description: "Views an image with the vision model.", requiresSetup: false, permission: "read" },
+  { id: "list_dir", name: "Folder listing", description: "Lists the contents of a workspace folder.", requiresSetup: false, permission: "read" },
+  { id: "search_files", name: "Workspace search", description: "Searches file contents across the workspace.", requiresSetup: false, permission: "read" },
+  { id: "edit_file", name: "Edit file", description: "Replaces an exact substring in a workspace file.", requiresSetup: false, permission: "mutate" },
+  { id: "write_file", name: "Write file", description: "Creates or overwrites a workspace file.", requiresSetup: false, permission: "mutate" },
+  { id: "delete_file", name: "Delete file", description: "Deletes a file inside the workspace.", requiresSetup: false, permission: "mutate" },
+  { id: "move_file", name: "Move file", description: "Moves or renames a workspace file.", requiresSetup: false, permission: "mutate" },
+  { id: "run_shell", name: "Shell commands", description: "Runs a shell command in the workspace.", requiresSetup: false, permission: "exec" },
+  { id: "web_fetch", name: "Web fetch", description: "Fetches and reads a web page.", requiresSetup: false, permission: "network" },
+  { id: "web_search", name: "Web search", description: "Searches the web through a configured provider.", requiresSetup: true, permission: "network" },
+  { id: "todos", name: "Todo list", description: "Maintains the run's todo list.", requiresSetup: false, permission: "read" },
+  { id: "remember", name: "Remember facts", description: "Persists durable facts for later recall.", requiresSetup: false, permission: "read" },
+  { id: "recall", name: "Recall memories", description: "Recalls previously stored facts.", requiresSetup: false, permission: "read" },
+  { id: "run_background", name: "Background tasks", description: "Starts a long-running command in the background.", requiresSetup: false, permission: "exec" },
+  { id: "poll_task", name: "Task polling", description: "Reads a background task's status and output.", requiresSetup: false, permission: "read" },
+];
+
 /** Drop-in replacement for `invoke`. */
+/// Test hook: make the next invocation of `cmd` reject, so the error paths
+/// (failed save, dropped backend) can be exercised deterministically.
+export const mockFaults: { failNext?: string } = {};
+
 export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const h = handlers[cmd];
   if (!h) throw new Error(`mock: unknown command ${cmd}`);
   await sleep(20);
+  if (mockFaults.failNext === cmd) {
+    mockFaults.failNext = undefined;
+    throw new Error("network unreachable");
+  }
   return h(args ?? {}) as T;
 }
 

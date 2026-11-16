@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use aria_core::agent::{Agent, ProviderSource, RunEvent, RunHandle};
-use aria_core::config::{ApprovalPolicy, Caps, Settings};
-use aria_core::db::{self, Db, Decision, Role, RunState, ToolCallState};
+use aria_core::config::{ApprovalPolicy, Caps, Config, Settings};
+use aria_core::db::{self, Db, Decision, Mode, Role, RunState, ToolCallState};
 use aria_core::journal::Blobs;
 use aria_core::provider::{
     ChatMessage, Provider, ProviderEvent, ToolCallRequest, ToolSpec, TurnResult,
@@ -583,6 +583,63 @@ async fn shell_tool_results_are_fed_back_to_the_model() {
 }
 
 #[tokio::test]
+async fn memories_work_without_an_embedder() {
+    let fx = fixture();
+    // FakeProvider has no embedder, so this is the FTS5-only path.
+    let provider = FakeProvider::new(vec![
+        tools(vec![
+            call(
+                "m1",
+                "remember",
+                serde_json::json!({"key": "editor", "content": "prefers helix"}),
+            ),
+            call("m2", "recall", serde_json::json!({"query": "helix"})),
+        ]),
+        text("recalled "),
+    ]);
+    let agent = fx.agent(Caps::default(), provider);
+    let handle = agent.start(&fx.conversation_id, "remember and recall").await.unwrap();
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
+
+    let calls = fx.tool_calls(&handle);
+    assert_eq!(calls.len(), 2);
+    assert!(!calls[0].is_error, "{:?}", calls[0].result);
+    let recalled = calls[1].result.as_deref().unwrap_or_default();
+    assert!(recalled.contains("prefers helix"), "{recalled}");
+}
+
+#[tokio::test]
+async fn prompts_carry_house_facts_and_creative_only_in_creative_mode() {
+    let fx = fixture();
+    let provider = FakeProvider::new(vec![text("one"), text("two")]);
+    let agent = fx
+        .agent(Caps::default(), Arc::clone(&provider))
+        .with_config(Config::new(fx._blob.path().join("config")));
+
+    let handle = agent.start(&fx.conversation_id, "hi").await.unwrap();
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
+    let normal = system_prompt(&provider.last_messages());
+    assert!(normal.contains("About Aria"), "{normal}");
+    assert!(normal.contains("settings.json"), "{normal}");
+    assert!(!normal.contains("You are in Creative mode"), "{normal}");
+
+    fx.db
+        .call(|c| db::set_conversation_mode(c, &fx.conversation_id, Mode::Creative))
+        .unwrap();
+    let handle = agent.start(&fx.conversation_id, "make a tool").await.unwrap();
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
+    let creative = system_prompt(&provider.last_messages());
+    assert!(creative.contains("You are in Creative mode"), "{creative}");
+}
+
+fn system_prompt(messages: &[ChatMessage]) -> String {
+    match &messages[0] {
+        ChatMessage::System { content } => content.clone(),
+        other => panic!("expected a system prompt first, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn auto_approve_safe_runs_mutate_without_parking() {
     let fx = fixture();
     let provider = FakeProvider::new(vec![
@@ -621,6 +678,222 @@ async fn auto_approve_safe_runs_mutate_without_parking() {
 }
 
 #[tokio::test]
+async fn main_system_shell_approval_is_adaptive() {
+    let fx = fixture();
+    let conversation_id = fx
+        .db
+        .call(|c| db::insert_conversation(c, None, "main"))
+        .unwrap()
+        .id;
+    fx.db
+        .call(|c| db::set_conversation_scope(c, &conversation_id, true, &[]))
+        .unwrap();
+
+    // A single read-only command runs without parking.
+    let provider = FakeProvider::new(vec![
+        tools(vec![call(
+            "s1",
+            "run_shell",
+            serde_json::json!({"cmd": "echo safe-output"}),
+        )]),
+        text("ran it "),
+    ]);
+    let agent = Agent::new(
+        Arc::clone(&fx.db),
+        Arc::new(Blobs::new(fx._blob.path(), Arc::clone(&fx.db))),
+        Caps::default(),
+        ProviderSource::Fixed {
+            provider,
+            approval_policy: ApprovalPolicy::AutoApproveSafe,
+        },
+    );
+    let handle = agent.start(&conversation_id, "run a read-only command").await.unwrap();
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
+    let stored = fx
+        .db
+        .call(|c| db::list_tool_calls(c, handle.run_id()))
+        .unwrap()
+        .remove(0);
+    assert_eq!(stored.state, ToolCallState::Done);
+    assert!(stored.result.unwrap().contains("safe-output"));
+
+    // A destructive command still parks.
+    let provider = FakeProvider::new(vec![
+        tools(vec![call(
+            "s2",
+            "run_shell",
+            serde_json::json!({"cmd": "rm -rf /tmp/aria-never-created"}),
+        )]),
+        text("asked "),
+    ]);
+    let agent = Agent::new(
+        Arc::clone(&fx.db),
+        Arc::new(Blobs::new(fx._blob.path(), Arc::clone(&fx.db))),
+        Caps::default(),
+        ProviderSource::Fixed {
+            provider,
+            approval_policy: ApprovalPolicy::AutoApproveSafe,
+        },
+    );
+    let handle = agent.start(&conversation_id, "delete something").await.unwrap();
+    wait_awaiting(&fx, &handle).await;
+    assert_eq!(fx.tool_calls(&handle)[0].state, ToolCallState::Pending);
+}
+
+#[tokio::test]
+async fn caps_are_hot_reloaded_between_turns() {
+    let fx = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config::new(dir.path());
+    let initial = Settings {
+        model: "test-model".to_string(),
+        caps: Caps {
+            max_turns: 50,
+            ..Caps::default()
+        },
+        ..Settings::default()
+    };
+    config.save(&initial).unwrap();
+    let mut lowered = initial.clone();
+    lowered.caps.max_turns = 1;
+    let write_settings = config.clone();
+
+    let fake = Arc::new(FakeProvider {
+        calls: Mutex::new(Vec::new()),
+        script: Mutex::new(vec![Box::new(move |_: &[ChatMessage]| {
+            // The user saves a tighter cap while the Run is live.
+            write_settings.save(&lowered).unwrap();
+            tools(vec![call("l1", "list_dir", serde_json::json!({"path": "."}))])
+        })
+            as Box<dyn Fn(&[ChatMessage]) -> TurnResult + Send + Sync>]),
+    });
+    let provider: Arc<dyn Provider> = fake.clone();
+    let agent = Agent::new(
+        Arc::clone(&fx.db),
+        Arc::new(Blobs::new(fx._blob.path(), Arc::clone(&fx.db))),
+        Caps::default(),
+        ProviderSource::Fixed {
+            provider,
+            approval_policy: ApprovalPolicy::AlwaysAsk,
+        },
+    )
+    .with_config(config);
+    let handle = agent.start(&fx.conversation_id, "list").await.unwrap();
+
+    // The next loop iteration must see max_turns = 1 and stop before Turn 2.
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::BudgetExhausted);
+    assert_eq!(fake.call_count(), 1);
+}
+
+#[tokio::test]
+async fn main_system_outside_path_parks_then_reads_after_approval() {
+    let fx = fixture();
+    let allowed = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.txt"), "secret-data").unwrap();
+    let conversation_id = fx
+        .db
+        .call(|c| db::insert_conversation(c, None, "main"))
+        .unwrap()
+        .id;
+    fx.db
+        .call(|c| {
+            db::set_conversation_scope(
+                c,
+                &conversation_id,
+                true,
+                &[allowed.path().display().to_string()],
+            )
+        })
+        .unwrap();
+
+    let provider = FakeProvider::new(vec![
+        tools(vec![call(
+            "r1",
+            "read_file",
+            serde_json::json!({ "path": outside.path().join("secret.txt").display().to_string() }),
+        )]),
+        text("read it "),
+    ]);
+    let agent = Agent::new(
+        Arc::clone(&fx.db),
+        Arc::new(Blobs::new(fx._blob.path(), Arc::clone(&fx.db))),
+        Caps::default(),
+        ProviderSource::Fixed {
+            provider,
+            approval_policy: ApprovalPolicy::AutoApproveSafe,
+        },
+    );
+    let handle = agent.start(&conversation_id, "read the secret").await.unwrap();
+
+    // Outside the allowed root, even a Read must ask.
+    wait_awaiting(&fx, &handle).await;
+    let id = pending(&fx, &handle).pop().unwrap();
+    agent.answer_approval(&id, Decision::Approve).unwrap();
+
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
+    let call = fx
+        .db
+        .call(|c| db::list_tool_calls(c, handle.run_id()))
+        .unwrap()
+        .remove(0);
+    assert_eq!(call.state, ToolCallState::Done);
+    assert!(!call.is_error, "{:?}", call.result);
+    assert!(call.result.unwrap().contains("secret-data"));
+}
+
+#[tokio::test]
+async fn main_system_inside_allowed_path_runs_without_parking() {
+    let fx = fixture();
+    let allowed = tempfile::tempdir().unwrap();
+    std::fs::write(allowed.path().join("keep.txt"), "kept").unwrap();
+    let conversation_id = fx
+        .db
+        .call(|c| db::insert_conversation(c, None, "main"))
+        .unwrap()
+        .id;
+    fx.db
+        .call(|c| {
+            db::set_conversation_scope(
+                c,
+                &conversation_id,
+                true,
+                &[allowed.path().display().to_string()],
+            )
+        })
+        .unwrap();
+
+    let provider = FakeProvider::new(vec![
+        tools(vec![call(
+            "r1",
+            "read_file",
+            serde_json::json!({ "path": allowed.path().join("keep.txt").display().to_string() }),
+        )]),
+        text("read it "),
+    ]);
+    let agent = Agent::new(
+        Arc::clone(&fx.db),
+        Arc::new(Blobs::new(fx._blob.path(), Arc::clone(&fx.db))),
+        Caps::default(),
+        ProviderSource::Fixed {
+            provider,
+            approval_policy: ApprovalPolicy::AutoApproveSafe,
+        },
+    );
+    let handle = agent.start(&conversation_id, "read the file").await.unwrap();
+
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
+    let call = fx
+        .db
+        .call(|c| db::list_tool_calls(c, handle.run_id()))
+        .unwrap()
+        .remove(0);
+    assert_eq!(call.state, ToolCallState::Done);
+    assert!(!call.is_error, "{:?}", call.result);
+    assert!(call.result.unwrap().contains("kept"));
+}
+
+#[tokio::test]
 async fn ids_seen_by_the_model_match_persisted_calls() {
     // The provider's tool_call ids are replaced by row ids, which is what the
     // Tool Result must reference.
@@ -643,4 +916,29 @@ async fn ids_seen_by_the_model_match_persisted_calls() {
         })
         .unwrap();
     assert_eq!(assistant_id, stored.id);
+}
+
+#[tokio::test]
+async fn disabled_shell_tool_is_gated_and_returns_error_outcome() {
+    let fx = fixture();
+    let provider = FakeProvider::new(vec![
+        tools(vec![call("s1", "run_shell", serde_json::json!({"cmd": "echo disabled"}))]),
+        text("handled disabled shell "),
+    ]);
+    let agent = fx
+        .agent(Caps::default(), provider)
+        .with_disabled_tools(vec!["run_shell".to_string()]);
+    let handle = agent.start(&fx.conversation_id, "run echo").await.unwrap();
+
+    wait_awaiting(&fx, &handle).await;
+    let id = pending(&fx, &handle).pop().unwrap();
+    agent.answer_approval(&id, Decision::Approve).unwrap();
+
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
+
+    let call = fx.tool_calls(&handle).remove(0);
+    assert_eq!(call.state, ToolCallState::Done);
+    assert!(call.is_error);
+    let result = call.result.unwrap();
+    assert!(result.contains("tool `run_shell` is disabled in Settings"), "{result}");
 }

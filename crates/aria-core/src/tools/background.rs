@@ -76,6 +76,7 @@ impl BackgroundTasks {
             search: None,
             vision: None,
             background: None,
+            disabled_tools: Vec::new(),
         };
 
         let db = Arc::clone(&self.db);

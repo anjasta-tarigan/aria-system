@@ -10,7 +10,6 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::{default_limit, truncate, Result, ToolContext, ToolError};
-use crate::tools::fetch::check_host_allowed;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SearchProvider {
@@ -90,26 +89,98 @@ async fn run_search(cfg: &SearchConfig, query: &str, max: usize) -> Result<Vec<S
 
 fn client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::default())
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| ToolError::Refused(e.to_string()))
 }
 
-/// Refuse to reach a non-public host (loopback, private, cloud metadata, etc.),
-/// mirroring the guard in `fetch.rs`. A user-supplied `base_url` (searXNG) is
-/// fully attacker-controllable, so it must pass the same SSRF check.
+/// Refuse link-local and cloud metadata addresses (e.g. 169.254.169.254).
+/// Loopback and private LAN addresses are allowed because users run SearXNG
+/// locally or on their home network via user-configured base_url.
 fn guard_url(u: &url::Url) -> Result<()> {
+    if !matches!(u.scheme(), "http" | "https") {
+        return Err(ToolError::Refused(format!(
+            "only http and https URLs are allowed, got {}",
+            u.scheme()
+        )));
+    }
     let host = u
         .host_str()
         .ok_or_else(|| ToolError::Refused("URL has no host".into()))?;
-    let port = u.port_or_known_default().unwrap_or(443);
+    let port = u.port_or_known_default().unwrap_or(80);
     let addrs: Vec<IpAddr> = (host, port)
         .to_socket_addrs()
         .map_err(|e| ToolError::Refused(format!("cannot resolve {host}: {e}")))?
         .map(|a| a.ip())
         .collect();
-    check_host_allowed(&addrs)
+    if addrs.is_empty() {
+        return Err(ToolError::Refused("host resolved to no addresses".into()));
+    }
+    for ip in &addrs {
+        if is_link_local_or_metadata(ip) {
+            return Err(ToolError::Refused(format!(
+                "refusing to reach link-local/metadata address ({ip})"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn is_link_local_or_metadata(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            v6.is_unicast_link_local()
+                || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_link_local())
+        }
+    }
+}
+
+fn extract_error_msg(body: &str, status: reqwest::StatusCode) -> String {
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(err) = val.get("error").or_else(|| val.get("message")) {
+            if let Some(s) = err.as_str() {
+                return s.to_string();
+            }
+            if let Some(m) = err.get("message").and_then(|m| m.as_str()) {
+                return m.to_string();
+            }
+            return err.to_string();
+        }
+    }
+    let trimmed = body.trim();
+    if !trimmed.is_empty() {
+        return truncate(trimmed.to_string(), 200);
+    }
+    status.canonical_reason().unwrap_or("error").to_string()
+}
+
+async fn check_response_status(resp: reqwest::Response, provider: &str) -> Result<reqwest::Response> {
+    if resp.status().is_success() {
+        return Ok(resp);
+    }
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    let msg = extract_error_msg(&body, status);
+    Err(ToolError::Refused(format!("{provider} returned {status}: {msg}")))
+}
+
+/// Read the response body as text, then parse as JSON. On failure, surface the
+/// raw body (truncated) so "error decode response body" is never cryptic.
+async fn read_json<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
+    provider: &str,
+) -> Result<T> {
+    let body = resp.text().await.map_err(|e| {
+        ToolError::Refused(format!("{provider} failed to read response body: {e}"))
+    })?;
+    serde_json::from_str::<T>(&body).map_err(|_e| {
+        ToolError::Refused(format!(
+            "{provider} error decode response body: {}",
+            truncate(body, 200)
+        ))
+    })
 }
 
 /// Normalize result URLs: prefix `//` with `https:`, and unwrap duckduckgo
@@ -142,13 +213,17 @@ fn normalize_url(raw: &str) -> String {
 
 #[derive(Deserialize)]
 struct ExaResponse {
+    #[serde(default)]
     results: Vec<ExaHit>,
 }
 #[derive(Deserialize)]
 struct ExaHit {
-    title: String,
-    url: String,
-    text: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 async fn search_exa(cfg: &SearchConfig, query: &str, max: usize) -> Result<Vec<SearchHit>> {
@@ -159,35 +234,49 @@ async fn search_exa(cfg: &SearchConfig, query: &str, max: usize) -> Result<Vec<S
     let resp = client()?
         .post("https://api.exa.ai/search")
         .bearer_auth(key)
-        .json(&serde_json::json!({"query": query, "numResults": max}))
+        .json(&serde_json::json!({
+            "query": query,
+            "numResults": max,
+            "contents": {
+                "text": {
+                    "maxCharacters": 1000
+                }
+            }
+        }))
         .send()
         .await
         .map_err(|e| ToolError::Refused(e.to_string()))?;
-    let data: ExaResponse = resp
-        .json()
-        .await
-        .map_err(|e| ToolError::Refused(e.to_string()))?;
+    let resp = check_response_status(resp, "exa").await?;
+    let data: ExaResponse = read_json(resp, "exa").await?;
     Ok(data
         .results
         .into_iter()
         .take(max)
         .map(|h| SearchHit {
-            title: h.title,
-            url: normalize_url(&h.url),
-            snippet: h.text,
+            title: h.title.unwrap_or_default(),
+            url: normalize_url(h.url.as_deref().unwrap_or_default()),
+            snippet: h.text.unwrap_or_default(),
         })
         .collect())
 }
 
 #[derive(Deserialize)]
 struct FirecrawlResponse {
-    data: Vec<FirecrawlHit>,
+    #[serde(default)]
+    success: Option<bool>,
+    #[serde(default)]
+    data: Option<Vec<FirecrawlHit>>,
+    #[serde(default)]
+    error: Option<String>,
 }
 #[derive(Deserialize)]
 struct FirecrawlHit {
-    title: String,
-    url: String,
-    description: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 async fn search_firecrawl(cfg: &SearchConfig, query: &str, max: usize) -> Result<Vec<SearchHit>> {
@@ -202,31 +291,38 @@ async fn search_firecrawl(cfg: &SearchConfig, query: &str, max: usize) -> Result
         .send()
         .await
         .map_err(|e| ToolError::Refused(e.to_string()))?;
-    let data: FirecrawlResponse = resp
-        .json()
-        .await
-        .map_err(|e| ToolError::Refused(e.to_string()))?;
-    Ok(data
-        .data
+    let resp = check_response_status(resp, "firecrawl").await?;
+    let data: FirecrawlResponse = read_json(resp, "firecrawl").await?;
+    if data.success == Some(false) || data.data.is_none() {
+        if let Some(err) = data.error {
+            return Err(ToolError::Refused(format!("firecrawl returned error: {err}")));
+        }
+    }
+    let hits = data.data.unwrap_or_default();
+    Ok(hits
         .into_iter()
         .take(max)
         .map(|h| SearchHit {
-            title: h.title,
-            url: normalize_url(&h.url),
-            snippet: h.description,
+            title: h.title.unwrap_or_default(),
+            url: normalize_url(h.url.as_deref().unwrap_or_default()),
+            snippet: h.description.unwrap_or_default(),
         })
         .collect())
 }
 
 #[derive(Deserialize)]
 struct SearxngResponse {
+    #[serde(default)]
     results: Vec<SearxngHit>,
 }
 #[derive(Deserialize)]
 struct SearxngHit {
-    title: String,
-    url: String,
-    content: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
 }
 
 async fn search_searxng(cfg: &SearchConfig, query: &str, max: usize) -> Result<Vec<SearchHit>> {
@@ -245,18 +341,16 @@ async fn search_searxng(cfg: &SearchConfig, query: &str, max: usize) -> Result<V
         .send()
         .await
         .map_err(|e| ToolError::Refused(e.to_string()))?;
-    let data: SearxngResponse = resp
-        .json()
-        .await
-        .map_err(|e| ToolError::Refused(e.to_string()))?;
+    let resp = check_response_status(resp, "searxng").await?;
+    let data: SearxngResponse = read_json(resp, "searxng").await?;
     Ok(data
         .results
         .into_iter()
         .take(max)
         .map(|h| SearchHit {
-            title: h.title,
-            url: normalize_url(&h.url),
-            snippet: h.content,
+            title: h.title.unwrap_or_default(),
+            url: normalize_url(h.url.as_deref().unwrap_or_default()),
+            snippet: h.content.unwrap_or_default(),
         })
         .collect())
 }
@@ -311,4 +405,95 @@ fn decode_entity(s: &str) -> String {
         .replace("&#39;", "'")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guard_url_allows_loopback_and_lan() {
+        assert!(guard_url(&url::Url::parse("http://127.0.0.1:8888").unwrap()).is_ok());
+        assert!(guard_url(&url::Url::parse("http://localhost:2301").unwrap()).is_ok());
+        assert!(guard_url(&url::Url::parse("http://192.168.1.1:8080").unwrap()).is_ok());
+    }
+
+    #[test]
+    fn guard_url_blocks_metadata() {
+        let err = guard_url(&url::Url::parse("http://169.254.169.254/latest/meta-data").unwrap())
+            .unwrap_err();
+        assert!(err.to_string().contains("link-local/metadata"));
+    }
+
+    #[test]
+    fn extract_error_msg_formats_correctly() {
+        use reqwest::StatusCode;
+
+        // JSON with "error" string
+        assert_eq!(
+            extract_error_msg(r#"{"error": "invalid api key"}"#, StatusCode::UNAUTHORIZED),
+            "invalid api key"
+        );
+        // JSON with "error" object containing "message"
+        assert_eq!(
+            extract_error_msg(
+                r#"{"error": {"message": "bad token"}}"#,
+                StatusCode::UNAUTHORIZED
+            ),
+            "bad token"
+        );
+        // JSON with "message" string
+        assert_eq!(
+            extract_error_msg(
+                r#"{"message": "rate limited"}"#,
+                StatusCode::TOO_MANY_REQUESTS
+            ),
+            "rate limited"
+        );
+        // Plain text fallback
+        assert_eq!(
+            extract_error_msg("Bad Gateway", StatusCode::BAD_GATEWAY),
+            "Bad Gateway"
+        );
+        // Empty body fallback to status reason
+        assert_eq!(
+            extract_error_msg("", StatusCode::NOT_FOUND),
+            "Not Found"
+        );
+    }
+
+    #[test]
+    fn exa_deserializes_missing_or_null_fields() {
+        let json = r#"{"results": [{"url": "https://example.com", "title": null, "text": null}]}"#;
+        let resp: ExaResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.results.len(), 1);
+        assert_eq!(resp.results[0].title, None);
+        assert_eq!(resp.results[0].text, None);
+        assert_eq!(resp.results[0].url.as_deref(), Some("https://example.com"));
+
+        let empty: ExaResponse = serde_json::from_str("{}").unwrap();
+        assert!(empty.results.is_empty());
+    }
+
+    #[test]
+    fn firecrawl_deserializes_missing_or_null_fields() {
+        let json = r#"{"success": true, "data": [{"url": "https://example.com", "title": null}]}"#;
+        let resp: FirecrawlResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.data.as_ref().unwrap().len(), 1);
+        assert_eq!(resp.data.as_ref().unwrap()[0].description, None);
+
+        let err_json = r#"{"success": false, "error": "Unauthorized"}"#;
+        let resp: FirecrawlResponse = serde_json::from_str(err_json).unwrap();
+        assert_eq!(resp.success, Some(false));
+        assert_eq!(resp.error.as_deref(), Some("Unauthorized"));
+    }
+
+    #[test]
+    fn searxng_deserializes_missing_or_null_fields() {
+        let json = r#"{"results": [{"url": "https://example.com", "title": null, "content": null}]}"#;
+        let resp: SearxngResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.results.len(), 1);
+        assert_eq!(resp.results[0].title, None);
+        assert_eq!(resp.results[0].content, None);
+    }
 }

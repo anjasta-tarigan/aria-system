@@ -6,11 +6,23 @@ The single directory a conversation is bound to. It is the agent's whole world: 
 
 _Avoid_: project, folder root, cwd.
 
+## Main System
+
+A Conversation with no Workspace that may touch the filesystem system-wide. The no-folder chat starts enabled with empty allowed roots (everywhere); workspace chats are always isolated. Its allowed roots run silently; a path outside them asks for an Approval, even for a read. Under auto-approve-safe a single read-only shell command runs silently; anything that writes, chains or is not recognised asks.
+
+_Avoid_: global mode, admin mode.
+
 ## Conversation
 
-An ordered transcript of user and assistant messages, bound to exactly one Workspace and one model configuration. It is the unit the user opens, searches and resumes.
+An ordered transcript of user and assistant messages, bound to at most one Workspace and one model configuration. It is the unit the user opens, searches and resumes.
 
 _Avoid_: session, chat, thread.
+
+## Mode
+
+Per-Conversation intent. **Normal** is everyday work. **Creative** adds a prompt section that treats Aria's own source checkout as the project, so the user can build tools or change Aria itself; it is a persona and prompt, not a second provider. Every Conversation also gets a short house block with Aria's version, app-data, settings and database paths (and the source checkout in a dev build) so it can answer questions about the app.
+
+_Avoid_: preset, personality, profile.
 
 ## Run
 
@@ -50,7 +62,7 @@ _Avoid_: patch, diff, hunk, modification.
 
 ## Approval
 
-A pending decision, recorded in the database, asking the user to allow one Tool Call whose class is mutate, exec or network. It has no timeout: it waits until the user answers or the Run is cancelled.
+A pending decision, recorded in the database, asking the user to allow one Tool Call whose class is mutate, exec or network, or whose path is outside a restricted Main System's allowed roots. It has no timeout: it waits until the user answers or the Run is cancelled.
 
 _Avoid_: permission, consent, confirmation dialog.
 
@@ -83,3 +95,27 @@ _Avoid_: job, daemon, service, long-running shell.
 The in-app file panel (Files section) that lets a user browse a Workspace's tree and read or write files in a plain textarea, through the same scope-contained, journaled commands the agent uses. It is not a separate editor program.
 
 _Avoid_: IDE, text editor, code editor.
+
+## Memory
+
+A durable keyed fact stored per Workspace or globally (no Workspace). Recall fuses an FTS5 keyword index (`memories_fts`) with embedding cosine similarity. Embeddings are opt-in: when off, the provider is unset, or an embed call fails, keyword recall still works and `remember` stores the fact without a vector.
+
+_Avoid_: note, knowledge base.
+
+## Settings section
+
+One panel inside the Settings dialog (General, AI Provider, Embedding Provider, Built-in Tools, Web Configuration). Sections other than General persist the moment the user acts on them; General is the only form with an explicit Save and a dirty state.
+
+_Avoid_: settings tab, page.
+
+## AI Provider (saved)
+
+A named, OpenAI-compatible endpoint stored in `settings.json`, with its API key in the OS keyring (or a `0600` fallback file) under `provider:{id}`. One provider is the default and supplies the runtime `base_url`/`model`; the others can be tested, edited or promoted. Distinct from the older flat `base_url`/`model` fields, which are kept in sync with the default provider.
+
+_Avoid_: connection, account, model.
+
+## Web Search provider
+
+The one search backend (Exa, Firecrawl, SearXNG, DuckDuckGo) that powers the `web_search` tool. Connecting one stores its key in the secret store and turns the tool's "setup required" state off; disconnecting clears both.
+
+_Avoid_: search engine, web plugin.
