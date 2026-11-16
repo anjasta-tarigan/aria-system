@@ -292,6 +292,36 @@ async fn approval_parks_the_run_until_answered() {
 }
 
 #[tokio::test]
+async fn allow_all_this_run_approves_remaining_calls() {
+    let fx = fixture();
+    let provider = FakeProvider::new(vec![
+        tools(vec![
+            call(
+                "w1",
+                "write_file",
+                serde_json::json!({"path": "a.txt", "content": "a"}),
+            ),
+            call(
+                "w2",
+                "write_file",
+                serde_json::json!({"path": "b.txt", "content": "b"}),
+            ),
+        ]),
+        text("both written "),
+    ]);
+    let agent = fx.agent(Caps::default(), Arc::clone(&provider));
+    let handle = agent.start(&fx.conversation_id, "write two files").await.unwrap();
+    wait_awaiting(&fx, &handle).await;
+    let ids = pending(&fx, &handle);
+    assert_eq!(ids.len(), 2);
+
+    agent.answer_approval(&ids[0], Decision::ApproveAll).unwrap();
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
+    assert_eq!(std::fs::read_to_string(fx.root().join("a.txt")).unwrap(), "a");
+    assert_eq!(std::fs::read_to_string(fx.root().join("b.txt")).unwrap(), "b");
+}
+
+#[tokio::test]
 async fn denying_an_approval_yields_an_error_result_and_the_run_continues() {
     let fx = fixture();
     let provider = FakeProvider::new(vec![

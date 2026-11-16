@@ -3,7 +3,6 @@
 //! Every path a Tool touches goes through this module. Containment is enforced
 //! here, never in the prompt (issue 03).
 
-use std::env;
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
@@ -243,7 +242,8 @@ mod tests {
 
     #[test]
     fn scope_main_system_empty_allows_everything() {
-        let scope = Scope::MainSystem(vec![]);
+        let base = std::env::current_dir().unwrap();
+        let scope = Scope::MainSystem { roots: vec![], base };
         let abs = std::fs::canonicalize("/").unwrap();
         assert!(scope.contains(&abs));
     }
@@ -252,7 +252,8 @@ mod tests {
     fn scope_main_system_paths_restricts() {
         let dir = tempfile::tempdir().unwrap();
         let other = tempfile::tempdir().unwrap();
-        let scope = Scope::MainSystem(vec![std::fs::canonicalize(dir.path()).unwrap()]);
+        let roots = vec![std::fs::canonicalize(dir.path()).unwrap()];
+        let scope = Scope::MainSystem { roots, base: std::env::current_dir().unwrap() };
         std::fs::write(dir.path().join("x"), "").unwrap();
         let child = std::fs::canonicalize(dir.path().join("x")).unwrap();
         assert!(scope.contains(&child));
@@ -267,9 +268,10 @@ mod tests {
     }
 
     #[test]
-    fn scope_main_system_unrestricted_roots_at_cwd_and_journals_absolute_paths() {
-        let scope = Scope::MainSystem(vec![]);
-        assert_eq!(scope.root().unwrap(), std::env::current_dir().unwrap());
+    fn scope_main_system_base_roots_at_home_and_journals_absolute_paths() {
+        let base = std::env::current_dir().unwrap();
+        let scope = Scope::MainSystem { roots: vec![], base: base.clone() };
+        assert_eq!(scope.root().unwrap(), base);
         let outside = Path::new("/etc/passwd");
         assert_eq!(scope.relativise(outside).unwrap(), "/etc/passwd");
     }
@@ -284,36 +286,40 @@ mod tests {
 pub enum Scope {
     None,
     Workspace(WorkspaceRoot),
-    MainSystem(Vec<PathBuf>),
+    /// Whole-device access, optionally restricted to `roots`. `base` is Aria's
+    /// own home directory: shell cwd, relative paths and recursive-search
+    /// default. An empty `roots` list means every path is allowed.
+    MainSystem { roots: Vec<PathBuf>, base: PathBuf },
 }
 
 impl Scope {
     /// The base directory for recursive searches, shell cwd and journal keys, or
-    /// `None` if filesystem access is disabled. For the main system this is the
-    /// first allowed root, or the working dir when unrestricted.
+    /// `None` if filesystem access is disabled. For the main system this is its
+    /// home directory; allowed roots only widen what `resolve_*` accepts.
     pub fn root(&self) -> Option<PathBuf> {
         match self {
             Scope::Workspace(w) => Some(w.root().to_path_buf()),
-            Scope::MainSystem(paths) => Some(
-                paths
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
-            ),
+            Scope::MainSystem { base, .. } => Some(base.clone()),
             Scope::None => None,
         }
     }
 
     /// All roots to walk for a recursive search: the folder root, or the
-    /// permitted system paths (current directory if unrestricted).
+    /// permitted system paths (Aria's home when unrestricted).
     pub fn roots(&self) -> Vec<PathBuf> {
         match self {
             Scope::Workspace(w) => vec![w.root().to_path_buf()],
-            Scope::MainSystem(paths) => {
-                if paths.is_empty() {
-                    vec![std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))]
+            Scope::MainSystem { roots, base } => {
+                if !roots.is_empty() {
+                    roots.clone()
+                } else if let Some(home) =
+                    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+                {
+                    // Unrestricted: walk the user's home rather than Aria's own
+                    // small scratch dir, so a bare search is device-wide.
+                    vec![PathBuf::from(home)]
                 } else {
-                    paths.clone()
+                    vec![base.clone()]
                 }
             }
             Scope::None => vec![],
@@ -327,19 +333,19 @@ impl Scope {
 
     /// Resolve a path for reading. The result is absolute, canonical, and inside
     /// this scope; otherwise an error. Workspace paths are folder-relative; for
-    /// the main system the path must be absolute or relative to the working dir.
+    /// the main system the path is absolute or relative to Aria's home.
     pub fn resolve_read(&self, requested: impl AsRef<Path>) -> Result<PathBuf> {
         match self {
             Scope::None => Err(PathError::Escapes("no filesystem access".into())),
             Scope::Workspace(w) => w.resolve_read(requested),
-            Scope::MainSystem(paths) => {
+            Scope::MainSystem { roots, base } => {
                 let candidate = if requested.as_ref().is_absolute() {
                     requested.as_ref().to_path_buf()
                 } else {
-                    env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(requested.as_ref())
+                    base.join(requested.as_ref())
                 };
                 let resolved = std::fs::canonicalize(&candidate)?;
-                if paths.is_empty() || paths.iter().any(|p| resolved.starts_with(p)) {
+                if roots.is_empty() || roots.iter().any(|p| resolved.starts_with(p)) {
                     Ok(resolved)
                 } else {
                     Err(PathError::Escapes(resolved.display().to_string()))
@@ -353,15 +359,15 @@ impl Scope {
         match self {
             Scope::None => Err(PathError::Escapes("no filesystem access".into())),
             Scope::Workspace(w) => w.resolve_create(requested),
-            Scope::MainSystem(paths) => {
+            Scope::MainSystem { roots, base } => {
                 let candidate = if requested.as_ref().is_absolute() {
                     requested.as_ref().to_path_buf()
                 } else {
-                    env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(requested.as_ref())
+                    base.join(requested.as_ref())
                 };
                 if candidate.exists() || std::fs::symlink_metadata(&candidate).is_ok() {
                     let resolved = std::fs::canonicalize(&candidate)?;
-                    if paths.is_empty() || paths.iter().any(|p| resolved.starts_with(p)) {
+                    if roots.is_empty() || roots.iter().any(|p| resolved.starts_with(p)) {
                         Ok(resolved)
                     } else {
                         Err(PathError::Escapes(resolved.display().to_string()))
@@ -371,7 +377,7 @@ impl Scope {
                         .parent()
                         .ok_or_else(|| PathError::MissingParent(candidate.display().to_string()))?;
                     let parent = std::fs::canonicalize(parent)?;
-                    if paths.is_empty() || paths.iter().any(|p| parent.starts_with(p)) {
+                    if roots.is_empty() || roots.iter().any(|p| parent.starts_with(p)) {
                         Ok(candidate)
                     } else {
                         Err(PathError::Escapes(parent.display().to_string()))
@@ -386,27 +392,21 @@ impl Scope {
         match self {
             Scope::None => false,
             Scope::Workspace(w) => w.check_inside(abs).is_ok(),
-            Scope::MainSystem(paths) => {
-                paths.is_empty() || paths.iter().any(|p| abs.starts_with(p))
+            Scope::MainSystem { roots, .. } => {
+                roots.is_empty() || roots.iter().any(|p| abs.starts_with(p))
             }
         }
     }
 
     /// Convert an absolute resolved path back to a stable key for the edit
     /// journal. For the workspace it is folder-relative; for the main system it
-    /// is relative to the first allowed root (or the working dir when
-    /// unrestricted). A path outside that base falls back to the absolute path,
-    /// which `Path::join` accepts and keeps unambiguous.
+    /// is relative to Aria's home. A path outside that base falls back to the
+    /// absolute path, which `Path::join` accepts and keeps unambiguous.
     pub fn relativise(&self, absolute: &Path) -> Result<String> {
         match self {
             Scope::Workspace(w) => w.relativise(absolute),
-            Scope::MainSystem(paths) => {
-                let base = if paths.is_empty() {
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                } else {
-                    paths[0].clone()
-                };
-                let rel = absolute.strip_prefix(&base).unwrap_or(absolute);
+            Scope::MainSystem { base, .. } => {
+                let rel = absolute.strip_prefix(base).unwrap_or(absolute);
                 Ok(rel.to_string_lossy().replace('\\', "/"))
             }
             Scope::None => Err(PathError::Escapes(absolute.display().to_string())),

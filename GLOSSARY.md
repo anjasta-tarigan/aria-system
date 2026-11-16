@@ -10,6 +10,8 @@ _Avoid_: project, folder root, cwd.
 
 A Conversation with no Workspace that may touch the filesystem system-wide. The no-folder chat starts enabled with empty allowed roots (everywhere); workspace chats are always isolated. Its allowed roots run silently; a path outside them asks for an Approval, even for a read. Under auto-approve-safe a single read-only shell command runs silently; anything that writes, chains or is not recognised asks.
 
+It has a Base Directory (`<app data>/system`), created automatically: the shell cwd, where relative paths land, the background-task root and the key for its file-edit journal. It is not a Workspace, so no folder is picked and nothing appears in the sidebar; full device access stays.
+
 _Avoid_: global mode, admin mode.
 
 ## Conversation
@@ -63,6 +65,8 @@ _Avoid_: patch, diff, hunk, modification.
 ## Approval
 
 A pending decision, recorded in the database, asking the user to allow one Tool Call whose class is mutate, exec or network, or whose path is outside a restricted Main System's allowed roots. It has no timeout: it waits until the user answers or the Run is cancelled.
+
+A Conversation may override the global approval policy (Settings by default, or Always ask / Only risky), and "Allow all this run" approves the remaining calls of the current Run without further prompts.
 
 _Avoid_: permission, consent, confirmation dialog.
 

@@ -9,6 +9,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::models::*;
 use super::{DbError, Result};
+use crate::config::ApprovalPolicy;
 
 /// Wall-clock milliseconds since the Unix epoch.
 pub fn now_ms() -> i64 {
@@ -204,6 +205,7 @@ pub fn insert_conversation(
         updated_at: now,
         main_system: false,
         mode: Mode::Normal,
+        approval_policy: None,
     };
     conn.execute(
         "INSERT INTO conversations (id, workspace_id, title, created_at, updated_at)
@@ -253,8 +255,34 @@ pub fn set_conversation_mode(conn: &Connection, id: &str, mode: Mode) -> Result<
     Ok(())
 }
 
+/// Override (or clear, with `None`) the global approval policy for one chat.
+pub fn set_conversation_approval(
+    conn: &Connection,
+    id: &str,
+    policy: Option<ApprovalPolicy>,
+) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE conversations SET approval_policy = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, policy.map(|p| p.as_str()), now_ms()],
+    )?;
+    if changed == 0 {
+        return Err(DbError::NotFound("conversation"));
+    }
+    Ok(())
+}
+
 fn conversation_from_row(r: &Row<'_>) -> rusqlite::Result<Conversation> {
     let mode: String = r.get(6)?;
+    let approval: Option<String> = r.get(7)?;
+    let approval_policy = match approval.as_deref() {
+        Some(s) => Some(ApprovalPolicy::parse(s).ok_or_else(|| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(DbError::InvalidValue {
+                field: "approval_policy",
+                value: s.to_string(),
+            }))
+        })?),
+        None => None,
+    };
     Ok(Conversation {
         id: r.get(0)?,
         workspace_id: r.get(1)?,
@@ -263,11 +291,12 @@ fn conversation_from_row(r: &Row<'_>) -> rusqlite::Result<Conversation> {
         updated_at: r.get(4)?,
         main_system: r.get::<_, i64>(5)? != 0,
         mode: Mode::from_str(&mode).map_err(to_sql_err)?,
+        approval_policy,
     })
 }
 
 const CONVERSATION_COLS: &str =
-    "id, workspace_id, title, created_at, updated_at, main_system, mode";
+    "id, workspace_id, title, created_at, updated_at, main_system, mode, approval_policy";
 
 pub fn get_conversation(conn: &Connection, id: &str) -> Result<Conversation> {
     conn.query_row(
@@ -723,6 +752,17 @@ pub fn approval_for_tool_call(conn: &Connection, tool_call_id: &str) -> Result<O
             approval_from_row,
         )
         .optional()?)
+}
+
+/// Approve every still-undecided approval in a Run ("allow all this run").
+pub fn approve_pending_approvals(conn: &Connection, run_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE approvals SET decision = 'approve', decided_at = ?2
+         WHERE decision IS NULL AND tool_call_id IN
+           (SELECT id FROM tool_calls WHERE run_id = ?1)",
+        params![run_id, now_ms()],
+    )?;
+    Ok(())
 }
 
 /// Answer a pending approval. Deciding twice is an error.

@@ -143,6 +143,10 @@ let activeFile: string | null = null;
 // every re-render so openFile/saveFile don't lose the text (render rebuilds it).
 const editorBuffer: Map<string, string> = new Map();
 const openDirs: Set<string> = new Set([""]);
+/// Directory the Files panel is browsing: blank for the conversation root, an
+/// absolute path to reach anywhere the scope allows.
+let filesRoot = "";
+let filesConvId: string | null = null;
 
 // Auto-poll timer for background tasks; cleared on re-render so only one loop
 // runs for the visible conversation.
@@ -742,7 +746,7 @@ function emptyPane(): HTMLElement {
 }
 
 /// Greeting shown inside a conversation that has no messages yet.
-function welcomeNode(): HTMLElement {
+function welcomeNode(conv: ConversationView): HTMLElement {
   const chip = (text: string) =>
     h(
       "button",
@@ -765,13 +769,20 @@ function welcomeNode(): HTMLElement {
     h(
       "p",
       {},
-      "Ask me anything — explain something, draft an email, or plan a task. " +
-        "When you want me to work on files, open a folder from the header.",
+      conv.main_system
+        ? "I can work anywhere on this device — read and edit files, run commands, " +
+            "start background tasks. Just tell me what you need in plain words."
+        : "Ask me anything — explain something, draft an email, or plan a task. " +
+            "When you want me to work on files, open a folder from the header.",
     ),
     h(
       "div",
       { class: "chips" },
-      chip("Explain this error message"),
+      chip(
+        conv.main_system
+          ? "Find the largest files in my home folder"
+          : "Explain this error message",
+      ),
       chip("Draft a short email about…"),
       chip("Summarize the pros and cons of…"),
     ),
@@ -784,19 +795,26 @@ function conversationPane(detail: ConversationDetail): HTMLElement {
   const busy = isBusy(run);
   const pending = detail.pending;
   const hasFolder = !!conv.workspace_id;
+  const hasFiles = hasFolder || conv.main_system;
 
   const folderSlot = hasFolder
     ? h("span", { class: "path", title: conv.root_path ?? "" }, conv.root_path)
-    : h(
-        "span",
-        { class: "path no-folder" },
-        "No folder · ",
-        h(
-          "button",
-          { class: "link", onclick: () => void chooseFolder() },
-          "Choose one…",
-        ),
-      );
+    : conv.main_system
+      ? h(
+          "span",
+          { class: "path", title: "Aria can work anywhere on this device" },
+          "Whole device",
+        )
+      : h(
+          "span",
+          { class: "path no-folder" },
+          "No folder · ",
+          h(
+            "button",
+            { class: "link", onclick: () => void chooseFolder() },
+            "Choose one…",
+          ),
+        );
 
   // Main System chats (no folder) can grant Aria filesystem-wide access.
   const systemAccess = !hasFolder
@@ -853,16 +871,47 @@ function conversationPane(detail: ConversationDetail): HTMLElement {
   ) as HTMLSelectElement;
   modeSelect.value = conv.mode;
 
+  // Per-chat approval override; "Settings" keeps following the global policy.
+  const approvalSelect = h(
+    "select",
+    {
+      class: "mode-select",
+      title: "When Aria must ask before running a tool in this chat.",
+      "aria-label": "Approval policy for this chat",
+      onchange: async (e: Event) => {
+        const value = (e.target as HTMLSelectElement).value;
+        try {
+          const updated = await call.invoke<ConversationView>(
+            "set_conversation_approval",
+            { conversationId: conv.id, approvalPolicy: value || null },
+          );
+          if (ui.detail) ui.detail.conversation = updated;
+          render();
+        } catch (err) {
+          ui.notice = String(err);
+          render();
+        }
+      },
+    },
+    h("option", { value: "" }, "Ask: Settings"),
+    h("option", { value: "always_ask" }, "Ask: Always"),
+    h("option", { value: "auto_approve_safe" }, "Ask: Only risky"),
+  ) as HTMLSelectElement;
+  approvalSelect.value = conv.approval_policy ?? "";
+
   const header = h(
     "header",
     { class: "conv-header" },
     h("div", {}, h("h2", {}, convTitle(conv)), folderSlot, systemAccess),
     modeSelect,
+    approvalSelect,
     run ? h("span", { class: `badge ${run.state}` }, stateLabel[run.state]) : null,
     run?.state === "cancelled" || run?.state === "errored"
       ? h("span", { class: "error-text" }, run.error ?? run.stop_reason ?? "")
       : null,
-    busy ? h("button", { class: "ghost", onclick: () => void cancel() }, "Cancel") : null,
+    busy && run
+      ? h("button", { class: "ghost", onclick: () => void cancel(run.id) }, "Cancel")
+      : null,
     run?.state === "budget_exhausted"
       ? h("button", { class: "primary", onclick: () => void resume(run.id) }, "Continue")
       : null,
@@ -871,16 +920,16 @@ function conversationPane(detail: ConversationDetail): HTMLElement {
   const transcript = h(
     "div",
     { class: "transcript", role: "log", "aria-live": "polite" },
-    ...(detail.messages.length === 0 && !busy ? [welcomeNode()] : []),
+    ...(detail.messages.length === 0 && !busy ? [welcomeNode(conv)] : []),
     ...detail.messages.map((m) => messageNode(m)),
     streamingNode(),
     ...pending.map(approvalNode),
   );
 
-  const composer = composerNode(busy, hasFolder);
+  const composer = composerNode(busy, hasFolder, conv.main_system);
 
-  const filesPanel = hasFolder ? filesPanelNode(conv) : null;
-  const bgPanel = hasFolder ? backgroundTasksNode(conv) : null;
+  const filesPanel = hasFiles ? filesPanelNode(conv) : null;
+  const bgPanel = hasFiles ? backgroundTasksNode(conv) : null;
 
   return h(
     "section",
@@ -935,7 +984,15 @@ function conversationPane(detail: ConversationDetail): HTMLElement {
 // same scope-contained backend commands the agent uses (no escape hatch to an
 // arbitrary path).
 function filesPanelNode(conv: ConversationView): HTMLElement {
-  const workspaceId = conv.workspace_id!;
+  const conversationId = conv.id;
+  // A typed path belongs to one conversation; start each chat at its root.
+  if (filesConvId !== conv.id) {
+    filesConvId = conv.id;
+    filesRoot = "";
+    openDirs.clear();
+    openDirs.add("");
+    activeFile = null;
+  }
   const tree = h("div", { class: "file-tree" });
   const editor = h("textarea", {
     class: "editor",
@@ -946,7 +1003,22 @@ function filesPanelNode(conv: ConversationView): HTMLElement {
   if (activeFile) editor.value = editorBuffer.get(activeFile) ?? "";
   const saved = h("span", { class: "muted small" });
 
-  const reload = () => void renderFileTree(tree, workspaceId, editor, saved);
+  const reload = () => void renderFileTree(tree, conversationId, editor, saved);
+
+  const pathInput = h("input", {
+    class: "file-path",
+    type: "text",
+    value: filesRoot,
+    placeholder: "Path (blank = conversation root)",
+    title: "Absolute path, or relative to the conversation root",
+    onchange: (e: Event) => {
+      filesRoot = (e.target as HTMLInputElement).value.trim();
+      openDirs.clear();
+      openDirs.add(filesRoot);
+      activeFile = null;
+      render();
+    },
+  });
 
   const panel = h(
     "div",
@@ -972,6 +1044,7 @@ function filesPanelNode(conv: ConversationView): HTMLElement {
       ? h(
           "div",
           {},
+          pathInput,
           tree,
           activeFile
             ? h(
@@ -982,7 +1055,7 @@ function filesPanelNode(conv: ConversationView): HTMLElement {
                   "button",
                   {
                     class: "primary",
-                    onclick: () => void saveFile(workspaceId, editor, saved),
+                    onclick: () => void saveFile(conversationId, editor, saved),
                   },
                   "Save",
                 ),
@@ -1056,7 +1129,7 @@ function backgroundTasksNode(conv: ConversationView): HTMLElement {
 
 async function renderFileTree(
   container: HTMLElement,
-  workspaceId: string,
+  conversationId: string,
   editor: HTMLTextAreaElement,
   saved: HTMLElement,
 ) {
@@ -1067,7 +1140,7 @@ async function renderFileTree(
     const depth = rel === "" ? 0 : rel.split("/").length - 1;
     let entries: string[];
     try {
-      entries = await call.invoke<string[]>("list_workspace_dir", { workspaceId, rel });
+      entries = await call.invoke<string[]>("list_workspace_dir", { conversationId, rel });
     } catch (e) {
       container.append(
         h("div", { class: "file-row muted small" }, `Could not read ${rel || "."}: ${e}`),
@@ -1075,7 +1148,7 @@ async function renderFileTree(
       continue;
     }
     entries.sort((a, b) => Number(b.endsWith("/")) - Number(a.endsWith("/")) || a.localeCompare(b));
-    const childPrefix = rel === "" ? "" : rel;
+    const childPrefix = rel === "" || rel.endsWith("/") ? rel : `${rel}/`;
     for (const name of entries) {
       const childRel = childPrefix + name;
       const isDir = name.endsWith("/");
@@ -1089,9 +1162,9 @@ async function renderFileTree(
               if (isDir) {
                 if (openDirs.has(childRel)) openDirs.delete(childRel);
                 else openDirs.add(childRel);
-                renderFileTree(container, workspaceId, editor, saved);
+                renderFileTree(container, conversationId, editor, saved);
               } else {
-                void openFile(workspaceId, childRel, editor, saved);
+                void openFile(conversationId, childRel, editor, saved);
               }
             },
           },
@@ -1104,7 +1177,7 @@ async function renderFileTree(
 }
 
 async function openFile(
-  workspaceId: string,
+  conversationId: string,
   rel: string,
   editor: HTMLTextAreaElement,
   saved: HTMLElement,
@@ -1112,7 +1185,7 @@ async function openFile(
   activeFile = rel;
   saved.textContent = "";
   try {
-    const text = await call.invoke<string>("read_workspace_file", { workspaceId, rel });
+    const text = await call.invoke<string>("read_workspace_file", { conversationId, rel });
     editorBuffer.set(rel, text);
     // Re-render so the Save row appears (filesPanelNode restores the editor
     // value from editorBuffer, so the just-loaded text survives the rebuild).
@@ -1128,7 +1201,7 @@ async function openFile(
 }
 
 async function saveFile(
-  workspaceId: string,
+  conversationId: string,
   editor: HTMLTextAreaElement,
   saved: HTMLElement,
 ) {
@@ -1137,7 +1210,7 @@ async function saveFile(
     const text = editor.value;
     editorBuffer.set(activeFile, text);
     await call.invoke<void>("write_workspace_file", {
-      workspaceId,
+      conversationId,
       rel: activeFile,
       content: text,
     });
@@ -1398,11 +1471,24 @@ function approvalNode(p: PendingApproval): HTMLElement {
         { class: "ghost", onclick: () => void answer(p.approval_id, "deny") },
         "Deny",
       ),
+      h(
+        "button",
+        {
+          class: "ghost",
+          title: "Approve this and stop asking for the rest of this run",
+          onclick: () => void answer(p.approval_id, "approve_all"),
+        },
+        "Allow all this run",
+      ),
     ),
   );
 }
 
-function composerNode(busy: boolean, hasFolder: boolean): HTMLElement {
+function composerNode(
+  busy: boolean,
+  hasFolder: boolean,
+  mainSystem = false,
+): HTMLElement {
   const input = h("textarea", {
     class: "composer-input",
     rows: "1",
@@ -1410,7 +1496,9 @@ function composerNode(busy: boolean, hasFolder: boolean): HTMLElement {
       ? "Aria is working…"
       : hasFolder
         ? "Ask Aria about this folder"
-        : "Message Aria",
+        : mainSystem
+          ? "Ask Aria to do anything on this device"
+          : "Message Aria",
     disabled: busy,
     oninput: (e: Event) => {
       const t = e.target as HTMLTextAreaElement;
@@ -1501,7 +1589,7 @@ async function refreshChanged() {
   const detail = ui.detail;
   if (!detail) return;
   ui.changed = await call.invoke<ChangedFile[]>("changed_files", {
-    workspaceId: detail.conversation.workspace_id,
+    conversationId: detail.conversation.id,
   });
 }
 
@@ -1559,7 +1647,10 @@ async function send() {
   }
 }
 
-async function answer(approvalId: string, decision: "approve" | "deny") {
+async function answer(
+  approvalId: string,
+  decision: "approve" | "deny" | "approve_all",
+) {
   try {
     await call.invoke<void>("answer_approval", { approvalId, decision });
     const detail = ui.detail;
@@ -1570,8 +1661,8 @@ async function answer(approvalId: string, decision: "approve" | "deny") {
   }
 }
 
-async function cancel() {
-  await call.invoke<void>("cancel_run");
+async function cancel(runId: string) {
+  await call.invoke<void>("cancel_run", { runId });
 }
 
 async function resume(runId: string) {
@@ -1589,7 +1680,7 @@ async function undo(path: string) {
   if (!detail) return;
   try {
     await call.invoke<void>("undo", {
-      workspaceId: detail.conversation.workspace_id,
+      conversationId: detail.conversation.id,
       path,
     });
     await refreshChanged();

@@ -17,6 +17,7 @@ fn ctx_with(search: Option<SearchConfig>) -> ToolContext {
         scope: Scope::None,
         root: None,
         workspace_id: None,
+        journal_id: String::new(),
         run_id: run.id,
         db: Arc::clone(&db),
         blobs: Arc::new(Blobs::new(ws.path(), db)),

@@ -36,12 +36,12 @@ pub struct BackgroundTasks {
 impl BackgroundTasks {
     /// Start `cmd` detached. Returns immediately with the running task row.
     ///
-    /// Refuses unless the scope is a single workspace folder (`None` and
-    /// `MainSystem` are rejected: we only run in a known, contained root).
+    /// Refuses only when the conversation has no filesystem access at all.
+    /// Workspace and Main System runs both have a known base directory.
     pub fn start(&self, conversation_id: &str, cmd: &str) -> Result<BackgroundTask> {
-        if !matches!(self.scope, Scope::Workspace(_)) {
+        if matches!(self.scope, Scope::None) {
             return Err(ToolError::Refused(
-                "background tasks require an open workspace folder".into(),
+                "background tasks need file access in this conversation".into(),
             ));
         }
         let id = db::uuid_v7();
@@ -68,6 +68,7 @@ impl BackgroundTasks {
                 .map(WorkspaceRoot::new)
                 .transpose()?,
             workspace_id: None,
+            journal_id: id.clone(),
             run_id: id.clone(),
             db: Arc::clone(&self.db),
             blobs: Arc::clone(&self.blobs),

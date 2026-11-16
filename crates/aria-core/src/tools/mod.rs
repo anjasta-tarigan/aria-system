@@ -74,13 +74,16 @@ impl ToolOutcome {
 /// Everything a Tool needs to act for one run.
 ///
 /// `root` and `workspace_id` are `None` in the main session, which has no
-/// folder: only the tools that never touch the filesystem are advertised, and
-/// the rest refuse cleanly if the model asks for them anyway.
+/// folder. `journal_id` is what the edit journal is keyed by: the workspace id
+/// when one is open, otherwise the conversation id, so Main System edits stay
+/// undoable per chat.
 #[derive(Clone)]
 pub struct ToolContext {
     pub scope: Scope,
     pub root: Option<WorkspaceRoot>,
     pub workspace_id: Option<String>,
+    /// Key for the edit journal (`workspace_id`, or the conversation id).
+    pub journal_id: String,
     pub run_id: String,
     pub db: Arc<Db>,
     pub blobs: Arc<Blobs>,
@@ -94,9 +97,8 @@ pub struct ToolContext {
     /// Vision model configuration for `view_image`. Absent when unconfigured;
     /// the tool then refuses.
     pub vision: Option<crate::tools::vision::VisionConfig>,
-    /// Background task runner, set by the agent loop only when a workspace is
-    /// open. `None` in the main session, so background tasks cannot be started
-    /// without a folder (and without this capability).
+    /// Background task runner, set by the agent loop whenever the conversation
+    /// has filesystem access (workspace or Main System). `None` without access.
     pub background: Option<Arc<BackgroundTasks>>,
     /// Tool ids the user turned off in Settings; they are neither advertised
     /// nor executed.
@@ -166,10 +168,13 @@ Rules:
 pub const MAIN_SYSTEM_PROMPT: &str = "\
 This is the Main System chat with access to the whole device.
 
-- Absolute paths are allowed; relative paths resolve from the working
-  directory. Do not assume a project folder.
+- Absolute paths are allowed; relative paths resolve from Aria's base
+  directory (named in the house block). Do not assume a project folder.
 - Prefer read_file, list_dir, search_files and the mutating file tools over
-  shell for file work. Shell commands may still ask for approval.";
+  shell for file work. Pass `path` to search_files to search any directory.
+- Long or unattended work (builds, servers, downloads) should use
+  `run_background`, then `poll_task` to read its status and output. Plain
+  shell commands may still ask for approval.";
 
 /// Appended when the conversation has a folder open.
 pub const FOLDER_PROMPT: &str = "\
@@ -211,7 +216,7 @@ You are in Creative mode: you help the user build and customize Aria itself.
 
 /// The app's own version, data directory and (in a dev checkout) source root,
 /// so the model can answer questions about Aria instead of guessing.
-pub fn house_prompt(config_dir: &Path) -> String {
+pub fn house_prompt(config_dir: &Path, system_dir: &Path) -> String {
     let data_dir = config_dir.parent().unwrap_or(config_dir);
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -222,9 +227,16 @@ pub fn house_prompt(config_dir: &Path) -> String {
             "- Source checkout: not available in this build; do not claim to edit Aria's code.\n"
                 .to_string()
         });
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|h| h.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unknown".to_string());
     format!(
         "\n\nAbout Aria, the app you run inside:\
         \n- Version {}, a local desktop assistant (Rust core, Tauri host, TypeScript UI).\
+        \n- Platform: {} {}; shell commands run with `sh -c`.\
+        \n- Home directory: {home}\
+        \n- Aria's base directory: {} (shell cwd and where relative paths land).\
         \n- App data: {}\
         \n- Settings: {}/settings.json\
         \n- Database: {}/aria.db\
@@ -232,6 +244,9 @@ pub fn house_prompt(config_dir: &Path) -> String {
         \n- Project docs, when a checkout exists: GLOSSARY.md, AGENTS.md, docs/adr.\
         \nWhen the user asks about Aria itself, read these paths instead of guessing. In a folder-scoped conversation you cannot read them; answer from these facts and point to the Main System chat for live detail.",
         env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        system_dir.display(),
         data_dir.display(),
         config_dir.display(),
         data_dir.display(),
@@ -263,7 +278,7 @@ pub fn exec_is_safe(tool: &str, args_json: &str) -> bool {
 /// Paths that fail for other reasons (missing parent, unreadable) stay
 /// ungated so the Tool reports the real error instead of prompting.
 pub fn outside_scope(scope: &Scope, tool: &str, args_json: &str) -> bool {
-    if !matches!(scope, Scope::MainSystem(paths) if !paths.is_empty()) {
+    if !matches!(scope, Scope::MainSystem { roots, .. } if !roots.is_empty()) {
         return false;
     }
     let Ok(args) = serde_json::from_str::<serde_json::Value>(args_json) else {
@@ -280,6 +295,8 @@ pub fn outside_scope(scope: &Scope, tool: &str, args_json: &str) -> bool {
         // `list_dir` defaults to ".", which may itself be outside a root.
         LIST_DIR => read(arg("path").unwrap_or_else(|| Path::new("."))),
         EDIT_FILE | WRITE_FILE => arg("path").is_some_and(|p| create(p)),
+        // A search may name any directory; the default searches allowed roots.
+        SEARCH_FILES => arg("path").is_some_and(|p| read(p)),
         MOVE_FILE => {
             arg("from").is_some_and(|p| read(p)) || arg("to").is_some_and(|p| create(p))
         }
@@ -332,11 +349,12 @@ impl ToolRegistry {
             ),
             spec(
                 SEARCH_FILES,
-                "Search file contents by regular expression, optionally limited by a glob. Respects .gitignore.",
+                "Search file contents by regular expression, optionally limited by a glob. Respects .gitignore. Pass `path` to search a specific directory; otherwise the home directory (or the allowed roots) is searched.",
                 serde_json::json!({
                     "type": "object",
                     "properties": {
                         "pattern": { "type": "string", "description": "Rust regex" },
+                        "path": { "type": "string", "description": "Directory to search; absolute or relative to the base" },
                         "glob": { "type": "string", "description": "e.g. **/*.rs" },
                         "max_results": { "type": "integer", "minimum": 1, "default": 200 }
                     },
@@ -663,6 +681,7 @@ pub fn context_for(
         scope: Scope::Workspace(root.clone()),
         root: Some(root),
         workspace_id: Some(workspace_id.to_string()),
+        journal_id: workspace_id.to_string(),
         run_id: run_id.to_string(),
         db,
         blobs,

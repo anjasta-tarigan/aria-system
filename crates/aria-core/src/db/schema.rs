@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use super::{DbError, Result};
 
 /// Maximum schema version understood by this build.
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 /// A handle to the application database.
 ///
@@ -120,6 +120,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if current < 9 {
         migrate_v9(conn)?;
+    }
+    if current < 10 {
+        migrate_v10(conn)?;
     }
     Ok(())
 }
@@ -403,5 +406,15 @@ fn migrate_v9(conn: &Connection) -> Result<()> {
         "ALTER TABLE conversations ADD COLUMN mode TEXT NOT NULL DEFAULT 'normal';",
     )?;
     conn.pragma_update(None, "user_version", 9)?;
+    Ok(())
+}
+
+/// Version 10: a conversation may override the global approval policy. NULL
+/// means "follow Settings", so existing chats keep the current behavior.
+fn migrate_v10(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE conversations ADD COLUMN approval_policy TEXT;",
+    )?;
+    conn.pragma_update(None, "user_version", 10)?;
     Ok(())
 }

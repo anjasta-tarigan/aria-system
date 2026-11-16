@@ -180,6 +180,8 @@ pub struct Agent {
     source: ProviderSource,
     config: Option<Config>,
     disabled_tools: Vec<String>,
+    /// Aria's home for Main System chats: shell cwd and relative paths.
+    system_dir: Option<PathBuf>,
 }
 
 impl Agent {
@@ -192,6 +194,7 @@ impl Agent {
             source,
             config: None,
             disabled_tools: Vec::new(),
+            system_dir: None,
         }
     }
 
@@ -213,6 +216,12 @@ impl Agent {
     /// Carry the app config so search keys can be read at drive time.
     pub fn with_config(mut self, config: Config) -> Self {
         self.config = Some(config);
+        self
+    }
+
+    /// Where Main System Runs start: shell cwd, relative paths, background root.
+    pub fn with_system_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.system_dir = Some(dir.into());
         self
     }
 
@@ -325,6 +334,10 @@ impl Agent {
                 events,
             })),
         };
+        let conversation = self.db.call(|c| {
+            let run = db::get_run(c, &run_id)?;
+            db::get_conversation(c, &run.conversation_id)
+        })?;
         let provider = self.source.build()?;
         let (search, vision, approval_policy, mut disabled_tools) = match &self.source {
             ProviderSource::Settings { settings, .. } => {
@@ -382,6 +395,9 @@ impl Agent {
             config: self.config.clone(),
             agent_disabled_tools: self.disabled_tools.clone(),
             source: self.source.clone(),
+            system_dir: self.system_dir.clone(),
+            conversation_policy: conversation.approval_policy,
+            auto_approve_run: false,
         };
         tokio::spawn(ctx.run_to_end());
         Ok(handle)
@@ -424,7 +440,7 @@ fn needs_approval(
         // even a read could reach outside the folder.
         ApprovalPolicy::AutoApproveSafe => match class {
             ApprovalClass::Exec => {
-                !matches!(scope, Scope::MainSystem(_)) || !tools::exec_is_safe(tool, args_json)
+                !matches!(scope, Scope::MainSystem { .. }) || !tools::exec_is_safe(tool, args_json)
             }
             _ => false,
         },
@@ -453,6 +469,12 @@ struct LoopCtx {
     agent_disabled_tools: Vec<String>,
     /// How to rebuild the provider from freshly loaded settings.
     source: ProviderSource,
+    /// Aria's home for Main System Runs (shell cwd, relative paths).
+    system_dir: Option<PathBuf>,
+    /// Per-conversation policy override; `None` follows Settings.
+    conversation_policy: Option<ApprovalPolicy>,
+    /// Set by "Allow all this run"; suppresses every further approval in it.
+    auto_approve_run: bool,
 }
 
 impl LoopCtx {
@@ -473,7 +495,9 @@ impl LoopCtx {
             };
             self.caps = settings.caps.clone();
             self.shell_timeout_secs = settings.shell_timeout_secs;
-            self.approval_policy = settings.approval_policy;
+            self.approval_policy = self
+                .conversation_policy
+                .unwrap_or(settings.approval_policy);
             self.disabled_tools = settings.disabled_tools.clone();
             if !self.agent_disabled_tools.is_empty() {
                 let additions: Vec<String> = self
@@ -585,6 +609,12 @@ impl LoopCtx {
             Some(id) => Some(self.call(|c| db::get_workspace(c, id))?),
             None => None,
         };
+        // Main System Runs need a real home for shell cwd and relative paths.
+        if conversation.main_system
+            && let Some(dir) = &self.system_dir
+        {
+            std::fs::create_dir_all(dir).map_err(|e| AgentError::Task(e.to_string()))?;
+        }
         loop {
             // Live hot reload: re-read settings from disk each iteration so
             // provider, Caps, timeouts, policy, tools, search and vision take
@@ -595,12 +625,16 @@ impl LoopCtx {
             let scope = if let Some(ws) = &workspace {
                 Scope::Workspace(WorkspaceRoot::new(&ws.root_path)?)
             } else if conversation.main_system {
-                let paths = self
+                let roots = self
                     .call(|c| db::list_main_system_paths(c, &conversation.id))?
                     .into_iter()
                     .map(PathBuf::from)
                     .collect::<Vec<_>>();
-                Scope::MainSystem(paths)
+                let base = match &self.system_dir {
+                    Some(dir) => dir.clone(),
+                    None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                };
+                Scope::MainSystem { roots, base }
             } else {
                 Scope::None
             };
@@ -610,6 +644,10 @@ impl LoopCtx {
                     .map(|ws| WorkspaceRoot::new(&ws.root_path))
                     .transpose()?,
                 workspace_id: workspace.as_ref().map(|ws| ws.id.clone()),
+                journal_id: workspace
+                    .as_ref()
+                    .map(|ws| ws.id.clone())
+                    .unwrap_or_else(|| conversation.id.clone()),
                 run_id: self.run_id.clone(),
                 db: Arc::clone(&self.db),
                 blobs: Arc::clone(&self.blobs),
@@ -618,11 +656,11 @@ impl LoopCtx {
                 scope: scope.clone(),
                 search: self.search.clone(),
                 vision: self.vision.clone(),
-                background: workspace.as_ref().map(|ws| {
+                background: scope.root().map(|root| {
                     Arc::new(BackgroundTasks {
                         db: Arc::clone(&self.db),
                         blobs: Arc::clone(&self.blobs),
-                        root: WorkspaceRoot::new(&ws.root_path).map(|r| r.root().to_path_buf()).unwrap_or_default(),
+                        root,
                         scope: scope.clone(),
                         shell_timeout_secs: self.shell_timeout_secs,
                     })
@@ -694,8 +732,21 @@ impl LoopCtx {
             if self.handle.is_cancelled() {
                 return Ok(false);
             }
-            let unanswered = self
-                .call(|c| db::pending_tool_calls(c, &self.run_id))?
+            let waiting = self.call(|c| db::pending_tool_calls(c, &self.run_id))?;
+            // "Allow all this run": clear every other parked approval first, or
+            // the loop would keep waiting on one of them forever.
+            if !self.auto_approve_run
+                && waiting.iter().any(|call| {
+                    self.call(|c| db::approval_for_tool_call(c, &call.id))
+                        .ok()
+                        .flatten()
+                        .is_some_and(|a| a.decision == Some(Decision::ApproveAll))
+                })
+            {
+                self.auto_approve_run = true;
+                self.call(|c| db::approve_pending_approvals(c, &self.run_id))?;
+            }
+            let unanswered = waiting
                 .into_iter()
                 .filter(|call| {
                     self.call(|c| db::approval_for_tool_call(c, &call.id))
@@ -737,12 +788,12 @@ impl LoopCtx {
     }
 
     /// Apply the approval decision of a pending call.
-    fn record_decision(&self, call: &ToolCall) -> Result<()> {
+    fn record_decision(&mut self, call: &ToolCall) -> Result<()> {
         let decision = self
             .call(|c| db::approval_for_tool_call(c, &call.id))?
             .and_then(|a| a.decision);
         match decision {
-            Some(Decision::Approve) => {
+            Some(Decision::Approve | Decision::ApproveAll) => {
                 self.call(|c| db::set_tool_call_state(c, &call.id, ToolCallState::Approved))?;
             }
             Some(Decision::Deny) => {
@@ -771,13 +822,19 @@ impl LoopCtx {
         // roots may reach that exact path; the approval row is what unlocks it.
         let mut call_ctx = ctx.clone();
         if tools::outside_scope(&ctx.scope, &call.tool, &call.args_json)
-            && self
-                .call(|c| db::approval_for_tool_call(c, &call.id))
-                .ok()
-                .flatten()
-                .is_some_and(|a| a.decision == Some(Decision::Approve))
+            && (self.auto_approve_run
+                || self
+                    .call(|c| db::approval_for_tool_call(c, &call.id))
+                    .ok()
+                    .flatten()
+                    .is_some_and(|a| {
+                        matches!(a.decision, Some(Decision::Approve | Decision::ApproveAll))
+                    }))
         {
-            call_ctx.scope = Scope::MainSystem(Vec::new());
+            call_ctx.scope = Scope::MainSystem {
+                roots: Vec::new(),
+                base: ctx.scope.root().unwrap_or_default(),
+            };
         }
         let ctx = &call_ctx;
 
@@ -947,13 +1004,14 @@ impl LoopCtx {
         let class = tools::approval_class(&request.function.name).unwrap_or(ApprovalClass::Read);
         // A path outside a restricted Main System asks too, even when its class
         // would otherwise run automatically.
-        let ask = needs_approval(
-            class,
-            self.approval_policy,
-            scope,
-            &request.function.name,
-            &request.function.arguments,
-        ) || tools::outside_scope(scope, &request.function.name, &request.function.arguments);
+        let ask = !self.auto_approve_run
+            && (needs_approval(
+                class,
+                self.approval_policy,
+                scope,
+                &request.function.name,
+                &request.function.arguments,
+            ) || tools::outside_scope(scope, &request.function.name, &request.function.arguments));
         let state = if ask {
             ToolCallState::Pending
         } else {
@@ -1008,7 +1066,7 @@ impl LoopCtx {
             tools::SYSTEM_PROMPT,
             match scope {
                 Scope::Workspace(_) => tools::FOLDER_PROMPT,
-                Scope::MainSystem(_) => tools::MAIN_SYSTEM_PROMPT,
+                Scope::MainSystem { .. } => tools::MAIN_SYSTEM_PROMPT,
                 Scope::None => tools::NO_FOLDER_PROMPT,
             },
             match conversation.mode {
@@ -1017,7 +1075,10 @@ impl LoopCtx {
             },
             self.config
                 .as_ref()
-                .map(|c| tools::house_prompt(c.dir()))
+                .map(|c| {
+                    let system = self.system_dir.clone().unwrap_or_else(|| c.system_dir());
+                    tools::house_prompt(c.dir(), &system)
+                })
                 .unwrap_or_default(),
             memory_block,
         );

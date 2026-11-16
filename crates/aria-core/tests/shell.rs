@@ -28,6 +28,7 @@ fn fx() -> Fx {
     let ctx = ToolContext {
         scope: Scope::Workspace(ws_root.clone()),
         root: Some(ws_root),
+        journal_id: ws_id.clone(),
         workspace_id: Some(ws_id),
         run_id: run.id,
         db: Arc::clone(&db),

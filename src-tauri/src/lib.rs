@@ -4,6 +4,7 @@
 //! owns the one [`Agent`], and forwards its event stream to the webview on a
 //! single Tauri event name.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -34,8 +35,8 @@ struct Inner {
     db: Arc<Db>,
     config: Config,
     blobs: Arc<Blobs>,
-    /// The live Run, if any; approvals and cancellation go through it.
-    handle: Mutex<Option<RunHandle>>,
+    /// Live Runs by id; approvals and cancellation go through them.
+    handles: Mutex<HashMap<String, RunHandle>>,
 }
 
 struct App {
@@ -65,6 +66,7 @@ impl App {
 }
 
 fn build_agent(db: Arc<Db>, blobs: Arc<Blobs>, settings: Settings, api_key: String, config: Config) -> Agent {
+    let system_dir = config.system_dir();
     Agent::new(
         db,
         blobs,
@@ -72,6 +74,7 @@ fn build_agent(db: Arc<Db>, blobs: Arc<Blobs>, settings: Settings, api_key: Stri
         ProviderSource::Settings { settings, api_key },
     )
     .with_config(config)
+    .with_system_dir(system_dir)
 }
 
 // ---------------------------------------------------------------- app layout
@@ -118,6 +121,8 @@ pub struct ConversationView {
     pub main_system: bool,
     /// Normal for everyday work, Creative for changing Aria itself.
     pub mode: Mode,
+    /// Per-chat approval override; `None` follows Settings.
+    pub approval_policy: Option<String>,
     pub run: Option<Run>,
 }
 
@@ -324,8 +329,49 @@ fn conversation_view(db: &Db, c: db::Conversation) -> CmdResult<ConversationView
         pinned,
         main_system: c.main_system,
         mode: c.mode,
+        approval_policy: c.approval_policy.map(|p| p.as_str().to_string()),
         run,
     })
+}
+
+/// Filesystem access for a conversation: its folder, or Aria's whole-device
+/// home for the Main System chat. `None` when it has no file access.
+fn conversation_scope(inner: &Inner, conversation_id: &str) -> CmdResult<Option<Scope>> {
+    let conv = inner
+        .db
+        .call(|c| db::get_conversation(c, conversation_id))
+        .map_err(err)?;
+    if let Some(ws_id) = &conv.workspace_id {
+        let ws = inner
+            .db
+            .call(|c| db::get_workspace(c, ws_id))
+            .map_err(err)?;
+        return Ok(Some(Scope::Workspace(
+            WorkspaceRoot::new(&ws.root_path).map_err(err)?,
+        )));
+    }
+    if !conv.main_system {
+        return Ok(None);
+    }
+    let roots = inner
+        .db
+        .call(|c| db::list_main_system_paths(c, conversation_id))
+        .map_err(err)?
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    let base = inner.config.system_dir();
+    std::fs::create_dir_all(&base).map_err(err)?;
+    Ok(Some(Scope::MainSystem { roots, base }))
+}
+
+/// Edit-journal key: the workspace id when one is open, else the conversation.
+fn journal_id(db: &Db, conversation_id: &str) -> CmdResult<String> {
+    Ok(db
+        .call(|c| db::get_conversation(c, conversation_id))
+        .map_err(err)?
+        .workspace_id
+        .unwrap_or_else(|| conversation_id.to_string()))
 }
 
 /// Tool Calls are grouped by Turn; the n-th assistant message of a Run is that
@@ -420,8 +466,13 @@ fn detail(db: &Db, conversation_id: &str) -> CmdResult<ConversationDetail> {
 fn pump(app: AppHandle, inner: &Arc<Inner>, handle: RunHandle) {
     let mut events = handle.subscribe();
     let run_id = handle.run_id().to_string();
-    *inner.handle.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
+    inner
+        .handles
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(run_id.clone(), handle);
 
+    let inner = Arc::clone(inner);
     tauri::async_runtime::spawn(async move {
         loop {
             match events.recv().await {
@@ -439,6 +490,11 @@ fn pump(app: AppHandle, inner: &Arc<Inner>, handle: RunHandle) {
                 Err(_) => break,
             }
         }
+        inner
+            .handles
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&run_id);
     });
 }
 
@@ -646,6 +702,29 @@ async fn set_main_system_scope(
     .and_then(|c| conversation_view(&state.inner.db, c))
 }
 
+/// Override (or clear, with `None`) the global approval policy for one chat.
+#[tauri::command]
+fn set_conversation_approval(
+    state: State<'_, App>,
+    conversation_id: String,
+    approval_policy: Option<String>,
+) -> CmdResult<ConversationView> {
+    let policy = match approval_policy.as_deref() {
+        None => None,
+        Some(text) => Some(
+            aria_core::config::ApprovalPolicy::parse(text)
+                .ok_or("approval policy must be always_ask or auto_approve_safe")?,
+        ),
+    };
+    let db = &state.inner.db;
+    db.call(|conn| {
+        db::set_conversation_approval(conn, &conversation_id, policy)?;
+        db::get_conversation(conn, &conversation_id)
+    })
+    .map_err(err)
+    .and_then(|c| conversation_view(db, c))
+}
+
 /// Switch a conversation between Normal and Creative mode.
 #[tauri::command]
 fn set_conversation_mode(
@@ -718,7 +797,7 @@ fn answer_approval(
     decision: String,
 ) -> CmdResult<()> {
     let decision =
-        aria_core::agent::parse_decision(&decision).ok_or("decision must be approve or deny")?;
+        aria_core::agent::parse_decision(&decision).ok_or("decision must be approve, approve_all or deny")?;
     state
         .agent()?
         .answer_approval(&approval_id, decision)
@@ -726,13 +805,13 @@ fn answer_approval(
 }
 
 #[tauri::command]
-fn cancel_run(state: State<'_, App>) -> CmdResult<()> {
+fn cancel_run(state: State<'_, App>, run_id: String) -> CmdResult<()> {
     if let Some(handle) = state
         .inner
-        .handle
+        .handles
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .as_ref()
+        .get(&run_id)
     {
         handle.cancel();
     }
@@ -755,50 +834,48 @@ fn get_run_state(state: State<'_, App>, run_id: String) -> CmdResult<RunStateVie
 }
 
 #[tauri::command]
-fn undo(state: State<'_, App>, workspace_id: String, path: String) -> CmdResult<()> {
-    let ws = state
-        .inner
-        .db
-        .call(|conn| db::get_workspace(conn, &workspace_id))
-        .map_err(err)?;
-    let root = WorkspaceRoot::new(&ws.root_path).map_err(err)?;
-    state
-        .inner
-        .blobs
-        .undo(&workspace_id, &root, &path)
-        .map_err(err)
+fn undo(state: State<'_, App>, conversation_id: String, path: String) -> CmdResult<()> {
+    let inner = &state.inner;
+    let scope = conversation_scope(inner, &conversation_id)?
+        .ok_or("No file access in this conversation")?;
+    let base = scope.root().ok_or("No file access in this conversation")?;
+    let key = journal_id(&inner.db, &conversation_id)?;
+    inner.blobs.undo(&key, &base, &path).map_err(err)
 }
 
 #[tauri::command]
-fn changed_files(
-    state: State<'_, App>,
-    workspace_id: Option<String>,
-) -> CmdResult<Vec<ChangedFile>> {
-    // A conversation with no folder has no journal, so nothing has changed.
-    let Some(workspace_id) = workspace_id else {
+fn changed_files(state: State<'_, App>, conversation_id: String) -> CmdResult<Vec<ChangedFile>> {
+    let inner = &state.inner;
+    // A conversation with no file access has no journal, so nothing changed.
+    if conversation_scope(inner, &conversation_id)?.is_none() {
         return Ok(Vec::new());
-    };
-    let blobs = &state.inner.blobs;
+    }
+    let key = journal_id(&inner.db, &conversation_id)?;
+    let blobs = &inner.blobs;
     Ok(blobs
-        .changed_paths(&workspace_id)
+        .changed_paths(&key)
         .map_err(err)?
         .into_iter()
         .map(|path| ChangedFile {
-            can_undo: blobs.can_undo(&workspace_id, &path).unwrap_or(false),
+            can_undo: blobs.can_undo(&key, &path).unwrap_or(false),
             path,
         })
         .collect())
 }
 
-/// List a workspace directory (relative paths), directories marked with a
-/// trailing slash. Read-only; contained to the workspace root.
+/// List a conversation's directory (relative paths), directories marked with a
+/// trailing slash. Read-only; contained to the conversation's scope.
 #[tauri::command]
-async fn list_workspace_dir(state: State<'_, App>, workspace_id: String, rel: String) -> CmdResult<Vec<String>> {
+async fn list_workspace_dir(
+    state: State<'_, App>,
+    conversation_id: String,
+    rel: String,
+) -> CmdResult<Vec<String>> {
     let inner = Arc::clone(&state.inner);
     tokio::task::spawn_blocking(move || -> CmdResult<Vec<String>> {
-        let ws = inner.db.call(|c| db::get_workspace(c, &workspace_id)).map_err(err)?;
-        let root = WorkspaceRoot::new(&ws.root_path).map_err(err)?;
-        let resolved = root.resolve_read(&rel).map_err(err)?;
+        let scope = conversation_scope(&inner, &conversation_id)?
+            .ok_or("No file access in this conversation")?;
+        let resolved = scope.resolve_read(&rel).map_err(err)?;
         let mut out = Vec::new();
         for entry in std::fs::read_dir(&resolved).map_err(err)? {
             let entry = entry.map_err(err)?;
@@ -813,33 +890,45 @@ async fn list_workspace_dir(state: State<'_, App>, workspace_id: String, rel: St
     .map_err(err)?
 }
 
-/// Read a workspace file as UTF-8. Contained to the workspace root; refuses
-/// binary content via the journal's read_text.
+/// Read a conversation file as UTF-8. Refuses binary content.
 #[tauri::command]
-async fn read_workspace_file(state: State<'_, App>, workspace_id: String, rel: String) -> CmdResult<String> {
+async fn read_workspace_file(
+    state: State<'_, App>,
+    conversation_id: String,
+    rel: String,
+) -> CmdResult<String> {
     let inner = Arc::clone(&state.inner);
     tokio::task::spawn_blocking(move || -> CmdResult<String> {
-        let ws = inner.db.call(|c| db::get_workspace(c, &workspace_id)).map_err(err)?;
-        let root = WorkspaceRoot::new(&ws.root_path).map_err(err)?;
-        let resolved = root.resolve_read(&rel).map_err(err)?;
-        let rel_norm = resolved.strip_prefix(&root.root()).unwrap_or(&resolved).to_string_lossy().into_owned();
-        Ok(Blobs::read_text(&root.root(), &rel_norm).map_err(err)?)
+        let scope = conversation_scope(&inner, &conversation_id)?
+            .ok_or("No file access in this conversation")?;
+        let resolved = scope.resolve_read(&rel).map_err(err)?;
+        std::fs::read_to_string(&resolved).map_err(err)
     })
     .await
     .map_err(err)?
 }
 
-/// Write a workspace file, journaling the prior version first (undoable, like
-/// edit_file). Contained to the workspace root via resolve_create.
+/// Write a conversation file, journaling the prior version first (undoable, like
+/// edit_file). Contained to the conversation's scope via resolve_create.
 #[tauri::command]
-async fn write_workspace_file(state: State<'_, App>, workspace_id: String, rel: String, content: String) -> CmdResult<()> {
+async fn write_workspace_file(
+    state: State<'_, App>,
+    conversation_id: String,
+    rel: String,
+    content: String,
+) -> CmdResult<()> {
     let inner = Arc::clone(&state.inner);
     tokio::task::spawn_blocking(move || -> CmdResult<()> {
-        let ws = inner.db.call(|c| db::get_workspace(c, &workspace_id)).map_err(err)?;
-        let root = WorkspaceRoot::new(&ws.root_path).map_err(err)?;
-        let resolved = root.resolve_create(&rel).map_err(err)?;
-        let rel_norm = resolved.strip_prefix(&root.root()).unwrap_or(&resolved).to_string_lossy().into_owned();
-        inner.blobs.write_file(&workspace_id, &root.root(), &rel_norm, &content).map_err(err)?;
+        let scope = conversation_scope(&inner, &conversation_id)?
+            .ok_or("No file access in this conversation")?;
+        let resolved = scope.resolve_create(&rel).map_err(err)?;
+        let base = scope.root().ok_or("No file access in this conversation")?;
+        let rel_norm = scope.relativise(&resolved).map_err(err)?;
+        let key = journal_id(&inner.db, &conversation_id)?;
+        inner
+            .blobs
+            .write_file(&key, &base, &rel_norm, &content)
+            .map_err(err)?;
         Ok(())
     })
     .await
@@ -915,27 +1004,17 @@ fn list_cloud_folders() -> CmdResult<Vec<CloudFolder>> {
 
 /// Build a cheap [`BackgroundTasks`] for a conversation's workspace root, reusing
 /// the shared `db`/`blobs`. Returns `Err` when the conversation has no folder.
-fn background_tasks(
-    db: &Arc<Db>,
-    blobs: &Arc<Blobs>,
-    conversation_id: &str,
-) -> CmdResult<BackgroundTasks> {
-    let conv = db
-        .call(|c| db::get_conversation(c, conversation_id))
-        .map_err(err)?;
-    let Some(ws_id) = conv.workspace_id else {
-        return Err("No folder open in this conversation".into());
-    };
-    let ws = db
-        .call(|c| db::get_workspace(c, &ws_id))
-        .map_err(err)?;
-    let root = WorkspaceRoot::new(&ws.root_path).map_err(err)?;
-    let root_path = root.root().to_path_buf();
+fn background_tasks(inner: &Inner, conversation_id: &str) -> CmdResult<BackgroundTasks> {
+    let scope = conversation_scope(inner, conversation_id)?
+        .ok_or("No file access in this conversation")?;
+    let root = scope
+        .root()
+        .ok_or("No file access in this conversation")?;
     Ok(BackgroundTasks {
-        db: Arc::clone(db),
-        blobs: Arc::clone(blobs),
-        root: root_path,
-        scope: Scope::Workspace(root),
+        db: Arc::clone(&inner.db),
+        blobs: Arc::clone(&inner.blobs),
+        root,
+        scope,
         shell_timeout_secs: 120,
     })
 }
@@ -958,7 +1037,7 @@ async fn start_background(
     cmd: String,
     conversation_id: String,
 ) -> CmdResult<BackgroundTask> {
-    let bt = background_tasks(&state.inner.db, &state.inner.blobs, &conversation_id)?;
+    let bt = background_tasks(&state.inner, &conversation_id)?;
     bt.start(&conversation_id, &cmd).map_err(err)
 }
 
@@ -975,7 +1054,7 @@ async fn list_background(
     state: State<'_, App>,
     conversation_id: String,
 ) -> CmdResult<Vec<BackgroundTask>> {
-    let bt = background_tasks(&state.inner.db, &state.inner.blobs, &conversation_id)?;
+    let bt = background_tasks(&state.inner, &conversation_id)?;
     bt.list(&conversation_id).map_err(err)
 }
 
@@ -1789,7 +1868,7 @@ pub fn run() {
                     db,
                     config: Config::new(dir.join("config")),
                     blobs,
-                    handle: Mutex::new(None),
+                    handles: Mutex::new(HashMap::new()),
                 }),
             };
             resume_unfinished(app.handle(), &state.inner);
@@ -1809,6 +1888,7 @@ pub fn run() {
             get_main_system_paths,
             set_main_system_scope,
             set_conversation_mode,
+            set_conversation_approval,
             list_conversations,
             get_conversation,
             send_message,

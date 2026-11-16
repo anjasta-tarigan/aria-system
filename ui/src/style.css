@@ -1215,6 +1215,13 @@ pre {
   padding: 3px 4px 3px var(--sp-3);
 }
 
+.file-path {
+  width: 100%;
+  padding: var(--sp-1) var(--sp-2);
+  font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  font-size: var(--fs-sm);
+}
+
 .file-tree {
   display: flex;
   flex-direction: column;

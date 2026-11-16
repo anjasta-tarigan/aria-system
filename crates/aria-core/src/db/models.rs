@@ -4,6 +4,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use super::DbError;
+use crate::config::ApprovalPolicy;
 
 /// Who authored a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,11 +246,14 @@ impl FromStr for ToolCallState {
 }
 
 /// A persisted decision on one Tool Call.
+/// How the user answered a pending Approval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Decision {
     Approve,
     Deny,
+    /// Approve this call and stop asking for the rest of the Run.
+    ApproveAll,
 }
 
 impl Decision {
@@ -257,6 +261,7 @@ impl Decision {
         match self {
             Decision::Approve => "approve",
             Decision::Deny => "deny",
+            Decision::ApproveAll => "approve_all",
         }
     }
 }
@@ -273,6 +278,7 @@ impl FromStr for Decision {
         match s {
             "approve" => Ok(Decision::Approve),
             "deny" => Ok(Decision::Deny),
+            "approve_all" => Ok(Decision::ApproveAll),
             other => Err(DbError::InvalidValue {
                 field: "decision",
                 value: other.to_string(),
@@ -302,6 +308,9 @@ pub struct Conversation {
     pub main_system: bool,
     /// Normal for everyday work, Creative for changing Aria itself.
     pub mode: Mode,
+    /// Per-conversation override of the global approval policy. `None` follows
+    /// Settings, so changing the global policy still affects every chat.
+    pub approval_policy: Option<ApprovalPolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

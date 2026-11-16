@@ -1,3 +1,4 @@
+use aria_core::config::ApprovalPolicy;
 use aria_core::db::{self, Db, Decision, Mode, Role, RunState, ToolCallState};
 use aria_core::db::ApprovalClass;
 
@@ -82,10 +83,10 @@ fn migration_is_idempotent_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("aria.db");
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 9);
+    assert_eq!(db.schema_version().unwrap(), 10);
     drop(db);
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 9);
+    assert_eq!(db.schema_version().unwrap(), 10);
     let (_ws, conv) = seed(&db);
     db.call(|c| db::insert_message(c, &conv, None, Role::User, "persisted"))
         .unwrap();
@@ -200,7 +201,7 @@ fn migrating_v1_keeps_rows_and_allows_a_folderness_conversation() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 9);
+    assert_eq!(db.schema_version().unwrap(), 10);
     db.call(|c| {
         // Existing rows survived the rebuild, and FTS was not disturbed.
         let conv = db::get_conversation(c, "c1")?;
@@ -294,7 +295,7 @@ END;
 #[test]
 fn migration_v4_creates_memories_table() {
     let db = Db::open_in_memory().unwrap();
-    assert_eq!(db.schema_version().unwrap(), 9);
+    assert_eq!(db.schema_version().unwrap(), 10);
     db.call(|c| {
         c.execute_batch("INSERT INTO memories (id, key, content, created_at, updated_at)
                          VALUES ('m1', 'k', 'v', 1, 1)")?;
@@ -455,7 +456,7 @@ fn embedding_roundtrip_and_similarity_search() {
 #[test]
 fn migration_v5_adds_main_system_and_paths_tables() {
     let db = Db::open_in_memory().unwrap();
-    assert_eq!(db.schema_version().unwrap(), 9);
+    assert_eq!(db.schema_version().unwrap(), 10);
     let (ws, conv) = seed(&db);
     db.call(|c| {
         db::set_conversation_scope(c, &conv, true, &[])?;
@@ -510,26 +511,45 @@ fn migration_v7_gives_existing_main_chat_full_access() {
     };
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
-        // Make it look like a v6 database: the memory FTS index arrived in v8
-        // and the conversation mode column in v9.
+        // Make it look like a v6 database: the memory FTS index arrived in v8,
+        // the conversation mode column in v9 and the approval override in v10.
         conn.execute_batch(
             "DROP TRIGGER memories_au;
              DROP TRIGGER memories_ad;
              DROP TRIGGER memories_ai;
              DROP TABLE memories_fts;
-             ALTER TABLE conversations DROP COLUMN mode;",
+             ALTER TABLE conversations DROP COLUMN mode;
+             ALTER TABLE conversations DROP COLUMN approval_policy;",
         )
         .unwrap();
         conn.pragma_update(None, "user_version", 6).unwrap();
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 9);
+    assert_eq!(db.schema_version().unwrap(), 10);
     db.call(|c| {
         assert!(db::get_conversation(c, &system_id)?.main_system);
         assert!(db::list_main_system_paths(c, &system_id)?.is_empty());
         // A workspace chat is isolated regardless of its title.
         assert!(!db::get_conversation(c, &workspace_conv)?.main_system);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn conversation_approval_override_persists_and_clears() {
+    let db = Db::open_in_memory().unwrap();
+    let (_ws, conv) = seed(&db);
+    db.call(|c| {
+        assert_eq!(db::get_conversation(c, &conv)?.approval_policy, None);
+        db::set_conversation_approval(c, &conv, Some(ApprovalPolicy::AutoApproveSafe))?;
+        assert_eq!(
+            db::get_conversation(c, &conv)?.approval_policy,
+            Some(ApprovalPolicy::AutoApproveSafe)
+        );
+        db::set_conversation_approval(c, &conv, None)?;
+        assert_eq!(db::get_conversation(c, &conv)?.approval_policy, None);
         Ok(())
     })
     .unwrap();

@@ -378,8 +378,9 @@ const handlers: Record<string, Handler> = {
       created_at: now(),
       updated_at: now(),
       pinned: false,
-      main_system: false,
+      main_system: true,
       mode: "normal",
+      approval_policy: null,
       run: null,
     };
     conversations.set(conv.id, {
@@ -426,6 +427,7 @@ const handlers: Record<string, Handler> = {
       pinned: ws.pinned,
       main_system: false,
       mode: "normal",
+      approval_policy: null,
       run: null,
     };
     conversations.set(conv.id, {
@@ -454,6 +456,7 @@ const handlers: Record<string, Handler> = {
       pinned: existing?.conversation.pinned ?? false,
       main_system: false,
       mode: "normal",
+      approval_policy: null,
       run: null,
     };
     conversations.set(conv.id, {
@@ -530,7 +533,13 @@ const handlers: Record<string, Handler> = {
       for (const m of d.messages) {
         for (const c of m.tool_calls) {
           if (`ap-${c.id}` === approvalId) {
-            c.state = a.decision === "approve" ? "approved" : "denied";
+            const allowAll = a.decision === "approve_all";
+            c.state = a.decision === "deny" ? "denied" : "approved";
+            for (const m of d.messages) {
+              for (const other of m.tool_calls) {
+                if (allowAll && other.state === "pending") other.state = "approved";
+              }
+            }
             d.pending = pendingOf(d.messages.flatMap((x) => x.tool_calls));
             return null;
           }
@@ -553,13 +562,13 @@ const handlers: Record<string, Handler> = {
     throw new Error("no such run");
   },
   undo: (a) => {
-    const ws = String(a.workspaceId ?? "");
+    const key = String(a.conversationId ?? "");
     const p = String(a.path);
-    changed.set(ws, (changed.get(ws) ?? []).filter((x) => x !== p));
+    changed.set(key, (changed.get(key) ?? []).filter((x) => x !== p));
     return null;
   },
   changed_files: (a): ChangedFile[] =>
-    (changed.get(String(a.workspaceId ?? "")) ?? []).map((path) => ({
+    (changed.get(String(a.conversationId ?? "")) ?? []).map((path) => ({
       path,
       can_undo: true,
     })),
@@ -693,6 +702,12 @@ const handlers: Record<string, Handler> = {
     const d = conversations.get(String(a.conversationId));
     if (!d) throw new Error("no such conversation");
     d.conversation.mode = a.mode as ConversationMode;
+    return structuredClone(d.conversation);
+  },
+  set_conversation_approval: (a) => {
+    const d = conversations.get(String(a.conversationId));
+    if (!d) throw new Error("no such conversation");
+    d.conversation.approval_policy = (a.approvalPolicy as string | null) ?? null;
     return structuredClone(d.conversation);
   },
 

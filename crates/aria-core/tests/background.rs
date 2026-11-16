@@ -38,6 +38,17 @@ fn fx() -> Fx {
     }
 }
 
+async fn poll_with(bg: &BackgroundTasks, id: &str) -> (aria_core::db::BackgroundTask, String) {
+    for _ in 0..200 {
+        let (task, tail) = bg.poll(id).unwrap();
+        if task.status != BackgroundStatus::Running {
+            return (task, tail);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("task {id} did not finish in time");
+}
+
 /// Poll until the task reaches a terminal state or we time out.
 async fn poll_until_done(fx: &Fx, id: &str) -> (aria_core::db::BackgroundTask, String) {
     for _ in 0..200 {
@@ -139,6 +150,26 @@ async fn orphaned_running_task_is_reaped_on_startup() {
     // No other task is wrongly reported as running.
     let remaining: Vec<String> = fx.bg.db.call(db::running_background_task_ids).unwrap();
     assert_eq!(remaining, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn main_system_scope_can_start_tasks() {
+    let fx = fx();
+    let db = Arc::clone(&fx.bg.db);
+    let blobs = Arc::clone(&fx.bg.blobs);
+    let conv = db.call(|c| db::insert_conversation(c, None, "")).unwrap();
+    let base = fx._ws.path().to_path_buf();
+    let bg = BackgroundTasks {
+        db,
+        blobs,
+        root: base.clone(),
+        scope: Scope::MainSystem { roots: vec![], base },
+        shell_timeout_secs: 120,
+    };
+    let task = bg.start(&conv.id, "echo system").unwrap();
+    let (task, tail) = poll_with(&bg, &task.id).await;
+    assert_eq!(task.status, BackgroundStatus::Succeeded);
+    assert!(tail.contains("system"));
 }
 
 #[tokio::test]

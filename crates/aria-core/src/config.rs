@@ -67,6 +67,23 @@ pub enum ApprovalPolicy {
     AutoApproveSafe,
 }
 
+impl ApprovalPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ApprovalPolicy::AlwaysAsk => "always_ask",
+            ApprovalPolicy::AutoApproveSafe => "auto_approve_safe",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "always_ask" => Some(ApprovalPolicy::AlwaysAsk),
+            "auto_approve_safe" => Some(ApprovalPolicy::AutoApproveSafe),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AIProvider {
@@ -265,6 +282,16 @@ impl Config {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Aria's own scratch/home directory for the Main System chat: shell cwd,
+    /// background task root and the place files land when no absolute path is
+    /// given. Sits beside the config directory in the app data dir.
+    pub fn system_dir(&self) -> PathBuf {
+        self.dir
+            .parent()
+            .unwrap_or(&self.dir)
+            .join("system")
     }
 
     fn settings_path(&self) -> PathBuf {

@@ -27,6 +27,7 @@ fn fx() -> Fx {
     let ctx = ToolContext {
         scope: Scope::Workspace(ws_root.clone()),
         root: Some(ws_root),
+        journal_id: ws_id.clone(),
         workspace_id: Some(ws_id),
         run_id: run.id,
         db: Arc::clone(&db),
@@ -152,6 +153,14 @@ async fn search_files_regex_and_glob() {
     .await;
     assert!(rs.text.contains("main.rs"));
     assert!(!rs.text.contains("notes.md"));
+    let sub = call(
+        &f,
+        "search_files",
+        serde_json::json!({"pattern": "panic", "path": "src"}),
+    )
+    .await;
+    assert!(sub.text.contains("src/main.rs:1"));
+    assert!(!sub.text.contains("notes.md"));
     let none = call(&f, "search_files", serde_json::json!({"pattern": "absent"})).await;
     assert_eq!(none.text, "no matches");
     let bad = call(&f, "search_files", serde_json::json!({"pattern": "("})).await;
@@ -404,6 +413,7 @@ async fn without_a_folder_only_filesystem_free_tools_are_offered() {
     let ctx = ToolContext {
         root: None,
         workspace_id: None,
+        journal_id: String::new(),
         run_id: run.id,
         db: Arc::clone(&db),
         blobs: Arc::new(Blobs::new(ws.path(), db)),
@@ -452,13 +462,17 @@ async fn main_system_scope_reads_allowed_paths_and_refuses_others() {
     let ctx = ToolContext {
         root: None,
         workspace_id: None,
+        journal_id: String::new(),
         run_id: run.id,
         db: Arc::clone(&db),
         blobs: Arc::new(Blobs::new(allowed.path(), db)),
         shell_timeout_secs: 10,
         embed: None,
         // Factory-style path: only `allowed` may be touched.
-        scope: Scope::MainSystem(vec![allowed.path().to_path_buf()]),
+        scope: Scope::MainSystem {
+            roots: vec![allowed.path().to_path_buf()],
+            base: allowed.path().to_path_buf(),
+        },
         search: None,
         vision: None,
         background: None,

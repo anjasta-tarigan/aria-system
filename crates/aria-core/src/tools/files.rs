@@ -2,7 +2,6 @@
 //! All path arguments go through [`WorkspaceRoot`]; all writes through
 //! [`Blobs`], so journaling cannot be skipped.
 
-use std::path::PathBuf;
 
 use serde::Deserialize;
 
@@ -83,11 +82,19 @@ pub fn list_dir(ctx: &ToolContext, args: ListDirArgs) -> Result<String> {
 #[derive(Debug, Deserialize)]
 pub struct SearchArgs {
     pub pattern: String,
+    /// Directory to search. Defaults to the allowed roots (or the base dir).
+    #[serde(default)]
+    pub path: Option<String>,
     #[serde(default)]
     pub glob: Option<String>,
     #[serde(default)]
     pub max_results: Option<usize>,
 }
+
+/// Stop after this many files so a search from `/` or a home directory cannot
+/// hang the Run. The model can narrow the search with `path` or `glob`.
+// shortcut: fixed 20k-file walk cap; make it time-based if large repos suffer.
+const MAX_SCAN: usize = 20_000;
 
 pub fn search_files(ctx: &ToolContext, args: SearchArgs) -> Result<String> {
     let scope = &ctx.scope;
@@ -102,39 +109,64 @@ pub fn search_files(ctx: &ToolContext, args: SearchArgs) -> Result<String> {
         None => None,
     };
     let max = default_limit(args.max_results, 200);
+    let bases = match &args.path {
+        Some(p) => vec![scope.resolve_read(p)?],
+        None => scope.roots(),
+    };
+    let multi = bases.len() > 1;
+    // One base: show paths relative to the conversation root, even when a
+    // subdirectory was named, so hits stay identifiable.
+    let display_root = if multi { None } else { scope.root() };
 
     let mut hits = Vec::new();
-    let base = scope.root().unwrap_or_else(|| PathBuf::from("."));
-    let walker = ignore::WalkBuilder::new(&base)
-        .standard_filters(true)
-        .build();
-    'outer: for entry in walker.flatten() {
-        let path = entry.path();
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
-            continue;
-        }
-        let rel = path.strip_prefix(&base).unwrap_or(path);
-        if let Some(m) = &glob
-            && !m.is_match(rel)
-        {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(path) else {
-            continue; // binary or unreadable
-        };
-        for (n, line) in text.lines().enumerate() {
-            if re.is_match(line) {
-                hits.push(format!("{}:{}: {}", rel.display(), n + 1, truncate(line.to_string(), 400)));
-                if hits.len() >= max {
-                    break 'outer;
+    let mut scanned = 0usize;
+    let mut capped = false;
+    'outer: for base in &bases {
+        let walker = ignore::WalkBuilder::new(base)
+            .standard_filters(true)
+            .build();
+        for entry in walker.flatten() {
+            let path = entry.path();
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
+            scanned += 1;
+            if scanned > MAX_SCAN {
+                capped = true;
+                break 'outer;
+            }
+            let target = path.strip_prefix(base).unwrap_or(path);
+            if let Some(m) = &glob
+                && !m.is_match(target)
+            {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue; // binary or unreadable
+            };
+            let shown = match &display_root {
+                Some(root) => path.strip_prefix(root).unwrap_or(path),
+                None => path,
+            };
+            for (n, line) in text.lines().enumerate() {
+                if re.is_match(line) {
+                    hits.push(format!("{}:{}: {}", shown.display(), n + 1, truncate(line.to_string(), 400)));
+                    if hits.len() >= max {
+                        break 'outer;
+                    }
                 }
             }
         }
     }
-    if hits.is_empty() {
-        Ok("no matches".to_string())
+    let note = if capped {
+        format!("\n… [stopped after {MAX_SCAN} files; narrow it with `path` or `glob`]")
     } else {
-        Ok(hits.join("\n"))
+        String::new()
+    };
+    if hits.is_empty() {
+        Ok(format!("no matches{note}"))
+    } else {
+        Ok(format!("{}{note}", hits.join("\n")))
     }
 }
 
@@ -164,7 +196,7 @@ pub fn edit_file(ctx: &ToolContext, args: EditArgs) -> Result<String> {
     }
     let updated = current.replacen(&args.search, &args.replace, 1);
     ctx.blobs.write_file(
-        ctx.workspace_id.as_deref().unwrap_or(""),
+        &ctx.journal_id,
         &base,
         &rel,
         &updated,
@@ -191,7 +223,7 @@ pub fn write_file(ctx: &ToolContext, args: WriteFileArgs) -> Result<String> {
     })?;
     let rel = ctx.scope.relativise(&resolved)?;
     ctx.blobs.write_file(
-        ctx.workspace_id.as_deref().unwrap_or(""),
+        &ctx.journal_id,
         &base,
         &rel,
         &args.content,
@@ -214,7 +246,7 @@ pub fn delete_file(ctx: &ToolContext, args: PathArg) -> Result<String> {
     })?;
     let rel = ctx.scope.relativise(&resolved)?;
     ctx.blobs.delete_file(
-        ctx.workspace_id.as_deref().unwrap_or(""),
+        &ctx.journal_id,
         &base,
         &rel,
     )?;
@@ -242,7 +274,7 @@ pub fn move_file(ctx: &ToolContext, args: MoveArgs) -> Result<String> {
     let from_rel = ctx.scope.relativise(&from)?;
     let to_rel = ctx.scope.relativise(&to)?;
     ctx.blobs.move_file(
-        ctx.workspace_id.as_deref().unwrap_or(""),
+        &ctx.journal_id,
         &base,
         &from_rel,
         &to_rel,

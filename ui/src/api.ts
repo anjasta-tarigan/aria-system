@@ -72,6 +72,8 @@ export interface ConversationView {
   main_system: boolean;
   /// Normal for everyday work, Creative for changing Aria itself.
   mode: ConversationMode;
+  /// Per-chat approval override; `null` follows Settings.
+  approval_policy: string | null;
   run: Run | null;
 }
 
@@ -180,15 +182,17 @@ export const api = {
     invoke<ConversationDetail>("get_conversation", { conversationId }),
   sendMessage: (conversationId: string, text: string) =>
     invoke<Run>("send_message", { conversationId, text }),
-  answerApproval: (approvalId: string, decision: "approve" | "deny") =>
-    invoke<void>("answer_approval", { approvalId, decision }),
-  cancelRun: () => invoke<void>("cancel_run"),
+  answerApproval: (
+    approvalId: string,
+    decision: "approve" | "deny" | "approve_all",
+  ) => invoke<void>("answer_approval", { approvalId, decision }),
+  cancelRun: (runId: string) => invoke<void>("cancel_run", { runId }),
   resumeRun: (runId: string) => invoke<void>("resume_run", { runId }),
   getRunState: (runId: string) => invoke<RunStateView>("get_run_state", { runId }),
-  undo: (workspaceId: string, path: string) =>
-    invoke<void>("undo", { workspaceId, path }),
-  changedFiles: (workspaceId: string) =>
-    invoke<ChangedFile[]>("changed_files", { workspaceId }),
+  undo: (conversationId: string, path: string) =>
+    invoke<void>("undo", { conversationId, path }),
+  changedFiles: (conversationId: string) =>
+    invoke<ChangedFile[]>("changed_files", { conversationId }),
   searchMessages: (query: string, conversationId?: string) =>
     invoke<MessageHit[]>("search_messages", {
       query,
@@ -224,12 +228,17 @@ export const api = {
     }),
   setConversationMode: (conversationId: string, mode: ConversationMode) =>
     invoke<ConversationView>("set_conversation_mode", { conversationId, mode }),
-  listWorkspaceDir: (workspaceId: string, rel: string) =>
-    invoke<string[]>("list_workspace_dir", { workspaceId, rel }),
-  readWorkspaceFile: (workspaceId: string, rel: string) =>
-    invoke<string>("read_workspace_file", { workspaceId, rel }),
-  writeWorkspaceFile: (workspaceId: string, rel: string, content: string) =>
-    invoke<void>("write_workspace_file", { workspaceId, rel, content }),
+  setConversationApproval: (conversationId: string, approvalPolicy: string | null) =>
+    invoke<ConversationView>("set_conversation_approval", {
+      conversationId,
+      approvalPolicy,
+    }),
+  listWorkspaceDir: (conversationId: string, rel: string) =>
+    invoke<string[]>("list_workspace_dir", { conversationId, rel }),
+  readWorkspaceFile: (conversationId: string, rel: string) =>
+    invoke<string>("read_workspace_file", { conversationId, rel }),
+  writeWorkspaceFile: (conversationId: string, rel: string, content: string) =>
+    invoke<void>("write_workspace_file", { conversationId, rel, content }),
   startBackground: (cmd: string, conversationId: string) =>
     invoke<BackgroundTask>("start_background", { cmd, conversationId }),
   pollBackground: (id: string) =>
