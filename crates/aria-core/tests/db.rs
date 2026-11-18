@@ -83,10 +83,10 @@ fn migration_is_idempotent_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("aria.db");
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 10);
+    assert_eq!(db.schema_version().unwrap(), 11);
     drop(db);
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 10);
+    assert_eq!(db.schema_version().unwrap(), 11);
     let (_ws, conv) = seed(&db);
     db.call(|c| db::insert_message(c, &conv, None, Role::User, "persisted"))
         .unwrap();
@@ -201,7 +201,7 @@ fn migrating_v1_keeps_rows_and_allows_a_folderness_conversation() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 10);
+    assert_eq!(db.schema_version().unwrap(), 11);
     db.call(|c| {
         // Existing rows survived the rebuild, and FTS was not disturbed.
         let conv = db::get_conversation(c, "c1")?;
@@ -288,6 +288,14 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
 CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
     INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
 END;
+CREATE TABLE edit_journal (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id TEXT NOT NULL,
+    path         TEXT NOT NULL,
+    blob_hash    TEXT NOT NULL,
+    existed      INTEGER NOT NULL DEFAULT 1,
+    created_at   INTEGER NOT NULL
+);
 "#;
 
 // ----------------------------------------------------------------- memories
@@ -295,7 +303,7 @@ END;
 #[test]
 fn migration_v4_creates_memories_table() {
     let db = Db::open_in_memory().unwrap();
-    assert_eq!(db.schema_version().unwrap(), 10);
+    assert_eq!(db.schema_version().unwrap(), 11);
     db.call(|c| {
         c.execute_batch("INSERT INTO memories (id, key, content, created_at, updated_at)
                          VALUES ('m1', 'k', 'v', 1, 1)")?;
@@ -456,7 +464,7 @@ fn embedding_roundtrip_and_similarity_search() {
 #[test]
 fn migration_v5_adds_main_system_and_paths_tables() {
     let db = Db::open_in_memory().unwrap();
-    assert_eq!(db.schema_version().unwrap(), 10);
+    assert_eq!(db.schema_version().unwrap(), 11);
     let (ws, conv) = seed(&db);
     db.call(|c| {
         db::set_conversation_scope(c, &conv, true, &[])?;
@@ -467,6 +475,22 @@ fn migration_v5_adds_main_system_and_paths_tables() {
         // workspace id still round-trips; nothing else disturbed.
         let got = db::get_conversation(c, &conv)?;
         assert_eq!(got.workspace_id.as_deref(), Some(ws.as_str()));
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn journal_entries_accept_a_conversation_owner() {
+    let db = Db::open_in_memory().unwrap();
+    let (_ws, conv) = seed(&db);
+    db.call(|c| {
+        let id = db::insert_journal_entry(c, &conv, "notes/a.txt", "", false)?;
+        let entries = db::journal_entries_for(c, &conv, "notes/a.txt")?;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, id);
+        assert_eq!(entries[0].owner_id, conv);
+        assert_eq!(db::changed_paths(c, &conv)?, vec!["notes/a.txt".to_string()]);
         Ok(())
     })
     .unwrap();
@@ -512,21 +536,31 @@ fn migration_v7_gives_existing_main_chat_full_access() {
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
         // Make it look like a v6 database: the memory FTS index arrived in v8,
-        // the conversation mode column in v9 and the approval override in v10.
+        // the conversation mode column in v9, the approval override in v10 and
+        // the journal owner in v11.
         conn.execute_batch(
             "DROP TRIGGER memories_au;
              DROP TRIGGER memories_ad;
              DROP TRIGGER memories_ai;
              DROP TABLE memories_fts;
              ALTER TABLE conversations DROP COLUMN mode;
-             ALTER TABLE conversations DROP COLUMN approval_policy;",
+             ALTER TABLE conversations DROP COLUMN approval_policy;
+             DROP TABLE edit_journal;
+             CREATE TABLE edit_journal (
+                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                 workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                 path         TEXT NOT NULL,
+                 blob_hash    TEXT NOT NULL,
+                 existed      INTEGER NOT NULL DEFAULT 1,
+                 created_at   INTEGER NOT NULL
+             );",
         )
         .unwrap();
         conn.pragma_update(None, "user_version", 6).unwrap();
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 10);
+    assert_eq!(db.schema_version().unwrap(), 11);
     db.call(|c| {
         assert!(db::get_conversation(c, &system_id)?.main_system);
         assert!(db::list_main_system_paths(c, &system_id)?.is_empty());

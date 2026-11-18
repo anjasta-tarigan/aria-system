@@ -57,7 +57,7 @@ const STR = {
     intro: "How Aria asks for permission and spends its budget.",
     approval: "Approval policy",
     approvalHelp:
-      "Always ask prompts for every file change, shell command and web call. Auto-approve safe runs file edits and web calls without a prompt. In the Main System chat, single read-only shell commands run without a prompt; anything that writes or chains still asks. Shell commands inside a workspace always ask because a shell can leave the folder.",
+      "Always ask prompts for every file change, shell command and web call. Auto-approve safe runs reads without a prompt. In a folder, edits and web calls also run silently, and shell always asks because it can leave the folder. In the Main System chat, edits and web calls still ask, and only one safe read-only shell command runs silently (a Main System restricted to allowed paths asks for every command).",
     approvalAlways: "Always ask",
     approvalAuto: "Auto-approve safe tools",
     maxTurns: "Max turns",

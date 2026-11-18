@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use super::{DbError, Result};
 
 /// Maximum schema version understood by this build.
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 /// A handle to the application database.
 ///
@@ -123,6 +123,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if current < 10 {
         migrate_v10(conn)?;
+    }
+    if current < 11 {
+        migrate_v11(conn)?;
     }
     Ok(())
 }
@@ -416,5 +419,31 @@ fn migrate_v10(conn: &Connection) -> Result<()> {
         "ALTER TABLE conversations ADD COLUMN approval_policy TEXT;",
     )?;
     conn.pragma_update(None, "user_version", 10)?;
+    Ok(())
+}
+
+/// Version 11: the edit journal owner is either a Workspace or a Main System
+/// Conversation. Version 1 declared it as a foreign key to `workspaces`, so
+/// Main System edits failed to journal. SQLite cannot drop a constraint in
+/// place, so rebuild the table with the owner as a plain id.
+fn migrate_v11(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        "CREATE TABLE edit_journal_v11 (
+             id         INTEGER PRIMARY KEY AUTOINCREMENT,
+             owner_id   TEXT NOT NULL,
+             path       TEXT NOT NULL,
+             blob_hash  TEXT NOT NULL,
+             existed    INTEGER NOT NULL DEFAULT 1,
+             created_at INTEGER NOT NULL
+         );
+         INSERT INTO edit_journal_v11 (id, owner_id, path, blob_hash, existed, created_at)
+             SELECT id, workspace_id, path, blob_hash, existed, created_at FROM edit_journal;
+         DROP TABLE edit_journal;
+         ALTER TABLE edit_journal_v11 RENAME TO edit_journal;
+         CREATE INDEX edit_journal_by_path ON edit_journal(owner_id, path, id);",
+    )?;
+    tx.pragma_update(None, "user_version", 11)?;
+    tx.commit()?;
     Ok(())
 }

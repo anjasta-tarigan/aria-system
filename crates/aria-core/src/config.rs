@@ -62,8 +62,11 @@ pub enum ApprovalPolicy {
     /// Every mutate/exec/network call waits for the user (current behavior).
     #[default]
     AlwaysAsk,
-    /// Read, file mutations (edit/write/delete/move) and network (web
-    /// search/fetch) run automatically; only shell (Exec) stays gated.
+    /// Read everywhere. In a workspace, file mutations (edit/write/delete/move)
+    /// and network (web search/fetch) also run automatically, and shell stays
+    /// gated. In the Main System only reads run silently: mutations and network
+    /// ask, and shell asks too unless it is one safe read-only command. A Main
+    /// System restricted to allowed roots asks for every shell command.
     AutoApproveSafe,
 }
 

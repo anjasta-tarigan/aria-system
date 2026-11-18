@@ -396,6 +396,7 @@ impl Agent {
             agent_disabled_tools: self.disabled_tools.clone(),
             source: self.source.clone(),
             system_dir: self.system_dir.clone(),
+            conversation_id: conversation.id.clone(),
             conversation_policy: conversation.approval_policy,
             auto_approve_run: false,
         };
@@ -433,16 +434,23 @@ fn needs_approval(
 ) -> bool {
     match policy {
         ApprovalPolicy::AlwaysAsk => class.requires_approval(),
-        // AutoApproveSafe: read, mutate (writing/editing) and network (web
-        // search/fetch) run without asking. A Main System shell command runs
-        // too when it is a single read-only command; destructive or composed
-        // commands ask. Workspace shell always asks: shell is not sandboxed, so
-        // even a read could reach outside the folder.
+        // AutoApproveSafe: reads run everywhere. In a workspace, mutations and
+        // network stay automatic because the folder bounds them. The Main
+        // System reaches the whole device, so there only reads (and a single
+        // read-only shell command) run silently; mutations and egress ask.
+        // A restricted Main System asks for every command: shell cannot be
+        // confined to the allowed roots.
         ApprovalPolicy::AutoApproveSafe => match class {
-            ApprovalClass::Exec => {
-                !matches!(scope, Scope::MainSystem { .. }) || !tools::exec_is_safe(tool, args_json)
+            ApprovalClass::Read => false,
+            ApprovalClass::Mutate | ApprovalClass::Network => {
+                matches!(scope, Scope::MainSystem { .. })
             }
-            _ => false,
+            ApprovalClass::Exec => match scope {
+                Scope::MainSystem { roots, .. } => {
+                    !roots.is_empty() || !tools::exec_is_safe(tool, args_json)
+                }
+                _ => true,
+            },
         },
     }
 }
@@ -471,6 +479,8 @@ struct LoopCtx {
     source: ProviderSource,
     /// Aria's home for Main System Runs (shell cwd, relative paths).
     system_dir: Option<PathBuf>,
+    /// The chat this Run belongs to, for live policy refresh.
+    conversation_id: String,
     /// Per-conversation policy override; `None` follows Settings.
     conversation_policy: Option<ApprovalPolicy>,
     /// Set by "Allow all this run"; suppresses every further approval in it.
@@ -488,6 +498,11 @@ impl LoopCtx {
     /// policy and disabled tools take effect without restarting the Run (live
     /// hot reload).
     fn refresh_settings(&mut self) -> Result<()> {
+        // The chat's own override can change while a Run is parked at an
+        // approval; re-read it each loop iteration like the global settings.
+        self.conversation_policy = self
+            .call(|c| db::get_conversation(c, &self.conversation_id))?
+            .approval_policy;
         if let Some(config) = &self.config {
             let settings = match config.load() {
                 Ok(s) => s,
@@ -560,6 +575,10 @@ impl LoopCtx {
                     self.provider = AnyProvider::OpenAi(provider);
                 }
             }
+        } else {
+            // Fixed source (tests, embedded): the policy it was built with is
+            // the base, unless this chat overrides it.
+            self.approval_policy = self.conversation_policy.unwrap_or(self.approval_policy);
         }
         Ok(())
     }
@@ -818,8 +837,9 @@ impl LoopCtx {
     }
 
     async fn run_one(&self, ctx: &ToolContext, call: &ToolCall) -> Result<()> {
-        // An approved call that names a path outside the restricted Main System
-        // roots may reach that exact path; the approval row is what unlocks it.
+        // An approved call that names paths outside the restricted Main System
+        // roots may reach those exact paths; the approval row is what unlocks
+        // them. Do not unlock the whole device for one approved call.
         let mut call_ctx = ctx.clone();
         if tools::outside_scope(&ctx.scope, &call.tool, &call.args_json)
             && (self.auto_approve_run
@@ -830,11 +850,14 @@ impl LoopCtx {
                     .is_some_and(|a| {
                         matches!(a.decision, Some(Decision::Approve | Decision::ApproveAll))
                     }))
+            && let Scope::MainSystem { mut roots, base } = ctx.scope.clone()
         {
-            call_ctx.scope = Scope::MainSystem {
-                roots: Vec::new(),
-                base: ctx.scope.root().unwrap_or_default(),
-            };
+            for target in tools::approval_targets(&ctx.scope, &call.tool, &call.args_json) {
+                if !roots.iter().any(|root| target.starts_with(root)) {
+                    roots.push(target);
+                }
+            }
+            call_ctx.scope = Scope::MainSystem { roots, base };
         }
         let ctx = &call_ctx;
 

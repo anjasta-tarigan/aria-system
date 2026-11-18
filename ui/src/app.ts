@@ -876,7 +876,10 @@ function conversationPane(detail: ConversationDetail): HTMLElement {
     "select",
     {
       class: "mode-select",
-      title: "When Aria must ask before running a tool in this chat.",
+      title:
+        "When Aria must ask before running a tool in this chat. Only risky: " +
+        "reads run silently. In a folder, edits and web calls also run; in the " +
+        "Main System they ask, and shell asks unless it is one safe read-only command.",
       "aria-label": "Approval policy for this chat",
       onchange: async (e: Event) => {
         const value = (e.target as HTMLSelectElement).value;

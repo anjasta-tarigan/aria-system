@@ -670,7 +670,7 @@ fn system_prompt(messages: &[ChatMessage]) -> String {
 }
 
 #[tokio::test]
-async fn auto_approve_safe_runs_mutate_without_parking() {
+async fn workspace_auto_approve_safe_runs_mutate_without_parking() {
     let fx = fixture();
     let provider = FakeProvider::new(vec![
         tools(vec![
@@ -921,6 +921,191 @@ async fn main_system_inside_allowed_path_runs_without_parking() {
     assert_eq!(call.state, ToolCallState::Done);
     assert!(!call.is_error, "{:?}", call.result);
     assert!(call.result.unwrap().contains("kept"));
+}
+
+/// Poll until a specific tool call of this Run is parked on an approval.
+async fn wait_pending_tool(fx: &Fx, handle: &RunHandle, tool: &str) -> String {
+    for _ in 0..600 {
+        for c in fx.tool_calls(handle) {
+            if c.tool == tool && c.state == ToolCallState::Pending
+                && let Some(a) = fx
+                    .db
+                    .call(|conn| db::approval_for_tool_call(conn, &c.id))
+                    .unwrap()
+                && a.decision.is_none()
+            {
+                return a.id;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!(
+        "{tool} never parked; run {:?}, calls {:?}",
+        fx.run_of(handle).state,
+        fx.tool_calls(handle)
+            .into_iter()
+            .map(|c| (c.tool, c.state))
+            .collect::<Vec<_>>()
+    );
+}
+
+fn main_system_agent(
+    fx: &Fx,
+    provider: Arc<FakeProvider>,
+    policy: ApprovalPolicy,
+) -> Agent {
+    Agent::new(
+        Arc::clone(&fx.db),
+        Arc::new(Blobs::new(fx._blob.path(), Arc::clone(&fx.db))),
+        Caps::default(),
+        ProviderSource::Fixed {
+            provider,
+            approval_policy: policy,
+        },
+    )
+}
+
+fn main_system(fx: &Fx, roots: &[&std::path::Path]) -> String {
+    let conversation_id = fx
+        .db
+        .call(|c| db::insert_conversation(c, None, "main"))
+        .unwrap()
+        .id;
+    let paths: Vec<String> = roots.iter().map(|p| p.display().to_string()).collect();
+    fx.db
+        .call(|c| db::set_conversation_scope(c, &conversation_id, true, &paths))
+        .unwrap();
+    conversation_id
+}
+
+/// The policy contract: "Only risky" silently reads everywhere, but mutations
+/// and egress reach the whole device in the Main System and must ask.
+#[tokio::test]
+async fn main_system_auto_approve_still_asks_for_mutations_and_network() {
+    let fx = fixture();
+    let conversation_id = main_system(&fx, &[]);
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("note.txt");
+    std::fs::write(&file, "before").unwrap();
+
+    let provider = FakeProvider::new(vec![
+        tools(vec![call(
+            "e1",
+            "edit_file",
+            serde_json::json!({"path": file.display().to_string(), "search": "before", "replace": "after"}),
+        )]),
+        text("edited "),
+    ]);
+    let agent = main_system_agent(
+        &fx,
+        provider,
+        ApprovalPolicy::AutoApproveSafe,
+    );
+    let handle = agent.start(&conversation_id, "edit the file").await.unwrap();
+    let id = wait_pending_tool(&fx, &handle, "edit_file").await;
+    agent.answer_approval(&id, Decision::Approve).unwrap();
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "after",
+        "{:?}",
+        fx.tool_calls(&handle)
+    );
+
+    let provider = FakeProvider::new(vec![
+        tools(vec![call(
+            "w1",
+            "web_fetch",
+            serde_json::json!({"url": "https://example.com"}),
+        )]),
+        text("fetched "),
+    ]);
+    let agent = main_system_agent(
+        &fx,
+        provider,
+        ApprovalPolicy::AutoApproveSafe,
+    );
+    let handle = agent.start(&conversation_id, "fetch a page").await.unwrap();
+    let id = wait_pending_tool(&fx, &handle, "web_fetch").await;
+    agent.answer_approval(&id, Decision::Deny).unwrap();
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
+    let call = fx.tool_calls(&handle).remove(0);
+    assert_eq!(call.state, ToolCallState::Denied);
+}
+
+/// A restricted Main System asks for shell even when the command looks
+/// read-only: shell cannot be confined to the allowed roots.
+#[tokio::test]
+async fn main_system_restricted_roots_ask_for_safe_shell() {
+    let fx = fixture();
+    let allowed = tempfile::tempdir().unwrap();
+    let conversation_id = main_system(&fx, &[allowed.path()]);
+
+    let provider = FakeProvider::new(vec![
+        tools(vec![call(
+            "s1",
+            "run_shell",
+            serde_json::json!({"cmd": "echo hi"}),
+        )]),
+        text("done "),
+    ]);
+    let agent = main_system_agent(
+        &fx,
+        provider,
+        ApprovalPolicy::AutoApproveSafe,
+    );
+    let handle = agent.start(&conversation_id, "run echo").await.unwrap();
+    let id = wait_pending_tool(&fx, &handle, "run_shell").await;
+    agent.answer_approval(&id, Decision::Deny).unwrap();
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
+}
+
+/// Changing this chat's override while a Run is live applies from the next
+/// tool call, not just the next Run.
+#[tokio::test]
+async fn conversation_policy_change_applies_mid_run() {
+    let fx = fixture();
+    std::fs::write(fx.root().join("f.txt"), "original").unwrap();
+    fx.db
+        .call(|c| {
+            db::set_conversation_approval(
+                c,
+                &fx.conversation_id,
+                Some(ApprovalPolicy::AutoApproveSafe),
+            )
+        })
+        .unwrap();
+
+    let provider = FakeProvider::new(vec![
+        tools(vec![call(
+            "s1",
+            "run_shell",
+            serde_json::json!({"cmd": "echo hi"}),
+        )]),
+        tools(vec![call(
+            "e1",
+            "edit_file",
+            serde_json::json!({"path": "f.txt", "search": "original", "replace": "edited"}),
+        )]),
+        text("done "),
+    ]);
+    let agent = fx.agent(Caps::default(), provider);
+    let handle = agent.start(&fx.conversation_id, "run then edit").await.unwrap();
+
+    // Workspace shell always asks; use it as the parking point.
+    let id = wait_pending_tool(&fx, &handle, "run_shell").await;
+    fx.db
+        .call(|c| {
+            db::set_conversation_approval(c, &fx.conversation_id, Some(ApprovalPolicy::AlwaysAsk))
+        })
+        .unwrap();
+    agent.answer_approval(&id, Decision::Approve).unwrap();
+
+    // Under the old captured policy this edit would run silently.
+    let id = wait_pending_tool(&fx, &handle, "edit_file").await;
+    agent.answer_approval(&id, Decision::Approve).unwrap();
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
+    assert_eq!(std::fs::read_to_string(fx.root().join("f.txt")).unwrap(), "edited");
 }
 
 #[tokio::test]

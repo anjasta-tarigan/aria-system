@@ -15,9 +15,10 @@ exactly once in the file; otherwise the Tool Result is an error the model can
 retry. Whole-file writes are for new files only.
 
 Before each change to an existing file, its content is written to a
-content-addressed blob store and a journal row `(workspace, path, blob, time)`
-is recorded. **Undo** restores the previous version from the journal, multi-step
-per file. Blobs unreferenced by any journal row are pruned at startup.
+content-addressed blob store and a journal row `(owner, path, blob, time)` is
+recorded, where the owner is a Workspace id or a Main System Conversation id.
+**Undo** restores the previous version from the journal, multi-step per file.
+Blobs unreferenced by any journal row are pruned at startup.
 
 ## Trade-offs
 

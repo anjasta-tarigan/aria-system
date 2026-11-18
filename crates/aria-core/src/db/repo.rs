@@ -880,7 +880,8 @@ fn is_fts_syntax(e: &rusqlite::ffi::Error) -> bool {
 
 pub struct JournalEntry {
     pub id: i64,
-    pub workspace_id: String,
+    /// Workspace id or Main System conversation id.
+    pub owner_id: String,
     pub path: String,
     pub blob_hash: String,
     pub existed: bool,
@@ -889,15 +890,15 @@ pub struct JournalEntry {
 
 pub fn insert_journal_entry(
     conn: &Connection,
-    workspace_id: &str,
+    owner_id: &str,
     path: &str,
     blob_hash: &str,
     existed: bool,
 ) -> Result<i64> {
     conn.execute(
-        "INSERT INTO edit_journal (workspace_id, path, blob_hash, existed, created_at)
+        "INSERT INTO edit_journal (owner_id, path, blob_hash, existed, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![workspace_id, path, blob_hash, existed as i64, now_ms()],
+        params![owner_id, path, blob_hash, existed as i64, now_ms()],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -905,17 +906,17 @@ pub fn insert_journal_entry(
 /// Journal entries for one path, newest first.
 pub fn journal_entries_for(
     conn: &Connection,
-    workspace_id: &str,
+    owner_id: &str,
     path: &str,
 ) -> Result<Vec<JournalEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT id, workspace_id, path, blob_hash, existed, created_at
-         FROM edit_journal WHERE workspace_id = ?1 AND path = ?2 ORDER BY id DESC",
+        "SELECT id, owner_id, path, blob_hash, existed, created_at
+         FROM edit_journal WHERE owner_id = ?1 AND path = ?2 ORDER BY id DESC",
     )?;
-    let rows = stmt.query_map(params![workspace_id, path], |r| {
+    let rows = stmt.query_map(params![owner_id, path], |r| {
         Ok(JournalEntry {
             id: r.get(0)?,
-            workspace_id: r.get(1)?,
+            owner_id: r.get(1)?,
             path: r.get(2)?,
             blob_hash: r.get(3)?,
             existed: r.get::<_, i64>(4)? != 0,
@@ -925,13 +926,13 @@ pub fn journal_entries_for(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// Distinct changed paths in a workspace, most recently changed first.
-pub fn changed_paths(conn: &Connection, workspace_id: &str) -> Result<Vec<String>> {
+/// Distinct changed paths for a journal owner, most recently changed first.
+pub fn changed_paths(conn: &Connection, owner_id: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
-        "SELECT path FROM edit_journal WHERE workspace_id = ?1
+        "SELECT path FROM edit_journal WHERE owner_id = ?1
          GROUP BY path ORDER BY MAX(id) DESC",
     )?;
-    let rows = stmt.query_map([workspace_id], |r| r.get::<_, String>(0))?;
+    let rows = stmt.query_map([owner_id], |r| r.get::<_, String>(0))?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 

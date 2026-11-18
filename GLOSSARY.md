@@ -8,7 +8,7 @@ _Avoid_: project, folder root, cwd.
 
 ## Main System
 
-A Conversation with no Workspace that may touch the filesystem system-wide. The no-folder chat starts enabled with empty allowed roots (everywhere); workspace chats are always isolated. Its allowed roots run silently; a path outside them asks for an Approval, even for a read. Under auto-approve-safe a single read-only shell command runs silently; anything that writes, chains or is not recognised asks.
+A Conversation with no Workspace that may touch the filesystem system-wide. The no-folder chat starts enabled with empty allowed roots (everywhere); workspace chats are always isolated. Its allowed roots run silently; a path outside them asks for an Approval, even for a read, and the approval unlocks only the paths that call named. Under "Only risky" (auto-approve-safe) only reads run silently: mutations and network ask, and a shell command asks too unless it is one safe read-only command. A Main System restricted to allowed roots asks for every shell command, because shell cannot be confined to those roots.
 
 It has a Base Directory (`<app data>/system`), created automatically: the shell cwd, where relative paths land, the background-task root and the key for its file-edit journal. It is not a Workspace, so no folder is picked and nothing appears in the sidebar; full device access stays.
 
@@ -66,7 +66,9 @@ _Avoid_: patch, diff, hunk, modification.
 
 A pending decision, recorded in the database, asking the user to allow one Tool Call whose class is mutate, exec or network, or whose path is outside a restricted Main System's allowed roots. It has no timeout: it waits until the user answers or the Run is cancelled.
 
-A Conversation may override the global approval policy (Settings by default, or Always ask / Only risky), and "Allow all this run" approves the remaining calls of the current Run without further prompts.
+A Conversation may override the global approval policy (Settings by default, or Always ask / Only risky), and the override applies from the next tool call, even mid-Run. "Allow all this run" approves the remaining calls of the current Run without further prompts.
+
+"Only risky" is scope-aware: in a Workspace, mutations and network run silently (the folder bounds them); in the Main System, only reads and one safe read-only shell command do.
 
 _Avoid_: permission, consent, confirmation dialog.
 

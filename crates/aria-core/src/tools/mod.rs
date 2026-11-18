@@ -174,7 +174,9 @@ This is the Main System chat with access to the whole device.
   shell for file work. Pass `path` to search_files to search any directory.
 - Long or unattended work (builds, servers, downloads) should use
   `run_background`, then `poll_task` to read its status and output. Plain
-  shell commands may still ask for approval.";
+  shell commands may still ask for approval.
+- Shell commands start in Aria's base directory (empty by design), not the
+  user's project or home; give them absolute paths or `cd` first.";
 
 /// Appended when the conversation has a folder open.
 pub const FOLDER_PROMPT: &str = "\
@@ -363,6 +365,46 @@ pub fn outside_scope(scope: &Scope, tool: &str, args_json: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// The resolved paths a file Tool call names, used to widen a restricted Main
+/// System only as far as an approved call needs. Empty when the call names no
+/// path; a path that cannot be resolved stays outside (the Tool errors).
+pub fn approval_targets(scope: &Scope, tool: &str, args_json: &str) -> Vec<std::path::PathBuf> {
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(args_json) else {
+        return Vec::new();
+    };
+    // Resolve without the allow-list, which is exactly what made the call ask.
+    let open = match scope {
+        Scope::MainSystem { base, .. } => Scope::MainSystem {
+            roots: Vec::new(),
+            base: base.clone(),
+        },
+        other => other.clone(),
+    };
+    let arg = |key: &str| args.get(key).and_then(|v| v.as_str()).map(Path::new);
+    let target = |resolved: std::result::Result<std::path::PathBuf, crate::workspace::PathError>| {
+        resolved.ok()
+    };
+    let mut out = Vec::new();
+    match tool {
+        READ_FILE | VIEW_IMAGE | DELETE_FILE => {
+            out.extend(arg("path").and_then(|p| target(open.resolve_read(p))));
+        }
+        LIST_DIR => out.extend(target(open.resolve_read(
+            arg("path").unwrap_or_else(|| Path::new(".")),
+        ))),
+        EDIT_FILE | WRITE_FILE => {
+            out.extend(arg("path").and_then(|p| target(open.resolve_create(p))));
+        }
+        SEARCH_FILES => out.extend(arg("path").and_then(|p| target(open.resolve_read(p)))),
+        MOVE_FILE => {
+            out.extend(arg("from").and_then(|p| target(open.resolve_read(p))));
+            out.extend(arg("to").and_then(|p| target(open.resolve_create(p))));
+        }
+        _ => {}
+    }
+    out
 }
 
 /// JSON Schema descriptions handed to the model, plus dispatch.
@@ -650,7 +692,14 @@ fn poll_task(ctx: &ToolContext, args: PollTaskArgs) -> Result<String> {
         .background
         .as_ref()
         .ok_or_else(|| ToolError::Refused("no background runner for this session".into()))?;
+    let conversation_id = ctx
+        .db
+        .call(|c| crate::db::get_run(c, &ctx.run_id))?
+        .conversation_id;
     let (task, tail) = bg.poll(&args.id)?;
+    if task.conversation_id != conversation_id {
+        return Err(ToolError::Refused(format!("no background task {}", args.id)));
+    }
     Ok(format!(
         "status: {}\nexit_code: {}\n{}",
         task.status.as_str(),

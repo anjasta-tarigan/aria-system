@@ -560,3 +560,108 @@ async fn view_image_validation_and_refusal() {
     assert!(dir.is_error);
     assert!(dir.text.contains("directory"));
 }
+
+#[test]
+fn approval_targets_resolve_only_the_named_paths() {
+    let allowed = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let allowed_dir = std::fs::canonicalize(allowed.path()).unwrap();
+    let outside_dir = std::fs::canonicalize(outside.path()).unwrap();
+    std::fs::write(allowed_dir.join("in.txt"), "x").unwrap();
+    std::fs::write(outside_dir.join("out.txt"), "y").unwrap();
+    let scope = Scope::MainSystem {
+        roots: vec![allowed_dir.clone()],
+        base: allowed_dir.clone(),
+    };
+
+    let read = tools::approval_targets(
+        &scope,
+        tools::READ_FILE,
+        &serde_json::json!({ "path": outside_dir.join("out.txt").display().to_string() })
+            .to_string(),
+    );
+    assert_eq!(read, vec![outside_dir.join("out.txt")]);
+
+    // No path named: nothing to widen.
+    let search = tools::approval_targets(
+        &scope,
+        tools::SEARCH_FILES,
+        &serde_json::json!({ "pattern": "x" }).to_string(),
+    );
+    assert!(search.is_empty());
+
+    // A move unlocks exactly its two ends, not the directories around them.
+    let to = outside_dir.join("new.txt");
+    let moved = tools::approval_targets(
+        &scope,
+        tools::MOVE_FILE,
+        &serde_json::json!({
+            "from": allowed_dir.join("in.txt").display().to_string(),
+            "to": to.display().to_string(),
+        })
+        .to_string(),
+    );
+    assert_eq!(moved.len(), 2);
+    assert!(moved.contains(&to));
+}
+
+#[tokio::test]
+async fn poll_task_is_scoped_to_its_conversation() {
+    let f = fx();
+    let own = f
+        .db
+        .call(|c| db::get_run(c, &f.ctx.run_id))
+        .unwrap()
+        .conversation_id;
+    let foreign = f
+        .db
+        .call(|c| db::insert_conversation(c, None, "other"))
+        .unwrap()
+        .id;
+    let mut ctx = f.ctx.clone();
+    ctx.background = Some(Arc::new(tools::BackgroundTasks {
+        db: Arc::clone(&f.db),
+        blobs: Arc::clone(&f.ctx.blobs),
+        root: f.ctx.root.as_ref().unwrap().root().to_path_buf(),
+        scope: f.ctx.scope.clone(),
+        shell_timeout_secs: 10,
+    }));
+    let insert = |id: &str, conversation_id: &str| {
+        f.db.call(|c| {
+            db::insert_background_task(
+                c,
+                &db::BackgroundTask {
+                    id: id.to_string(),
+                    cmd: "true".to_string(),
+                    conversation_id: conversation_id.to_string(),
+                    started_at: 0,
+                    ended_at: Some(1),
+                    exit_code: Some(0),
+                    status: db::BackgroundStatus::Succeeded,
+                    log_blob: String::new(),
+                },
+            )
+        })
+        .unwrap();
+    };
+    insert("bg-own", &own);
+    insert("bg-other", &foreign);
+
+    let mine = ToolRegistry::execute(
+        "poll_task",
+        &serde_json::json!({ "id": "bg-own" }).to_string(),
+        &ctx,
+    )
+    .await;
+    assert!(!mine.is_error, "{}", mine.text);
+    assert!(mine.text.contains("status: succeeded"));
+
+    let theirs = ToolRegistry::execute(
+        "poll_task",
+        &serde_json::json!({ "id": "bg-other" }).to_string(),
+        &ctx,
+    )
+    .await;
+    assert!(theirs.is_error);
+    assert!(theirs.text.contains("no background task"));
+}
