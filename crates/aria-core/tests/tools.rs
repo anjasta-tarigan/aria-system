@@ -120,7 +120,33 @@ async fn read_file_truncates_at_max_bytes() {
     )
     .await;
     assert!(out.text.contains("truncated"));
+    assert!(out.text.contains("of 1000 bytes"));
     assert!(out.text.len() < 300);
+
+    // A cut inside a multi-byte character is not an encoding error.
+    write(&f, "utf8.txt", &"é".repeat(300));
+    let wide = call(
+        &f,
+        "read_file",
+        serde_json::json!({"path": "utf8.txt", "max_bytes": 11}),
+    )
+    .await;
+    assert!(!wide.is_error, "{}", wide.text);
+    assert!(wide.text.contains("of 600 bytes"));
+
+    // Invalid bytes inside the shown prefix still are.
+    std::fs::write(
+        f.ctx.root.as_ref().unwrap().root().join("bad.dat"),
+        [b'a', b'b', b'c', 0xff, b'd'],
+    )
+    .unwrap();
+    let bad = call(
+        &f,
+        "read_file",
+        serde_json::json!({"path": "bad.dat", "max_bytes": 10}),
+    )
+    .await;
+    assert!(bad.is_error);
 }
 
 #[tokio::test]
@@ -134,6 +160,21 @@ async fn list_dir_orders_dirs_first() {
     assert_eq!(lines[0], "sub/");
     assert!(lines[1].starts_with("a.txt\t2 bytes"));
     assert!(lines[2].starts_with("z.txt\t1 bytes"));
+}
+
+#[test]
+fn house_prompt_lists_detected_clis() {
+    let clis = tools::available_clis();
+    let prompt = tools::house_prompt(
+        std::path::Path::new("/tmp/aria"),
+        std::path::Path::new("/tmp/aria/system"),
+    );
+    for (name, _) in clis {
+        assert!(prompt.contains(&format!("`{name}`")), "{name} missing");
+    }
+    if clis.is_empty() {
+        assert!(prompt.contains("No extra command-line tools"));
+    }
 }
 
 #[tokio::test]

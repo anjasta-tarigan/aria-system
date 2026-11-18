@@ -3,6 +3,10 @@
 //! [`Blobs`], so journaling cannot be skipped.
 
 
+use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
 use serde::Deserialize;
 
 use super::{
@@ -18,28 +22,57 @@ pub struct ReadFileArgs {
     pub max_bytes: Option<usize>,
 }
 
+fn invalid_utf8(path: &str) -> ToolError {
+    let lower = path.to_ascii_lowercase();
+    let is_image = ["png", "jpg", "jpeg", "webp", "gif", "bmp"]
+        .iter()
+        .any(|e| lower.ends_with(&format!(".{e}")));
+    if is_image {
+        ToolError::Args(format!(
+            "'{path}' is a binary image file. Use the 'view_image' tool to inspect and analyze it."
+        ))
+    } else {
+        ToolError::Args(format!("{path} is not valid UTF-8"))
+    }
+}
+
 pub fn read_file(ctx: &ToolContext, args: ReadFileArgs) -> Result<String> {
     let resolved = ctx.scope.resolve_read(&args.path)?;
     if resolved.is_dir() {
         return Err(ToolError::Args(format!("{} is a directory", args.path)));
     }
-    let bytes = std::fs::read(&resolved)?;
     let max = default_limit(args.max_bytes, 200_000);
-    let text = String::from_utf8(bytes).map_err(|_| {
-        let lower = args.path.to_ascii_lowercase();
-        let is_image = ["png", "jpg", "jpeg", "webp", "gif", "bmp"]
-            .iter()
-            .any(|e| lower.ends_with(&format!(".{e}")));
-        if is_image {
-            ToolError::Args(format!(
-                "'{}' is a binary image file. Use the 'view_image' tool to inspect and analyze it.",
-                args.path
-            ))
-        } else {
-            ToolError::Args(format!("{} is not valid UTF-8", args.path))
+    let mut file = std::fs::File::open(&resolved)?;
+    let size = file.metadata()?.len();
+    // Read only what can be shown, plus enough to finish a multi-byte char.
+    let mut bytes = Vec::new();
+    file.by_ref().take(max as u64 + 4).read_to_end(&mut bytes)?;
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(e) => {
+            let bytes = e.into_bytes();
+            let valid = std::str::from_utf8(&bytes)
+                .map(str::len)
+                .unwrap_or_else(|e| e.valid_up_to());
+            // Being cut mid-character past `max` is fine; invalid bytes inside
+            // the part we would show are not.
+            if size <= max as u64 || valid < max {
+                return Err(invalid_utf8(&args.path));
+            }
+            String::from_utf8(bytes[..valid].to_vec()).expect("validated UTF-8 prefix")
         }
-    })?;
-    Ok(truncate(text, max))
+    };
+    if size <= max as u64 {
+        return Ok(text);
+    }
+    let mut cut = max.min(text.len());
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    Ok(format!(
+        "{}\n… [truncated {cut} of {size} bytes shown]",
+        &text[..cut]
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +129,80 @@ pub struct SearchArgs {
 // shortcut: fixed 20k-file walk cap; make it time-based if large repos suffer.
 const MAX_SCAN: usize = 20_000;
 
+/// Search with ripgrep when it is installed. Returns `None` when `rg` is
+/// missing, cannot start, or fails, so the caller falls back to the walker.
+fn search_with_rg(
+    pattern: &str,
+    glob: Option<&str>,
+    bases: &[PathBuf],
+    display_root: Option<&Path>,
+    max: usize,
+) -> Option<String> {
+    if bases.is_empty() {
+        return None;
+    }
+    let mut command = Command::new("rg");
+    command.args([
+        "--line-number",
+        "--no-heading",
+        "--color",
+        "never",
+        "--null",
+        "--no-messages",
+    ]);
+    if let Some(glob) = glob {
+        command.arg("--glob").arg(glob);
+    }
+    command.arg("-e").arg(pattern).arg("--").args(bases);
+    command
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .stdout(Stdio::piped());
+
+    let mut child = command.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let mut reader = BufReader::new(stdout);
+    let mut line = Vec::new();
+    let mut hits = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line).ok()? == 0 {
+            break;
+        }
+        let entry = String::from_utf8_lossy(&line);
+        let entry = entry.trim_end_matches(['\n', '\r']);
+        // `--null` prints `path\0line:text`.
+        let Some((path, rest)) = entry.split_once('\0') else {
+            continue;
+        };
+        let shown = display_root
+            .and_then(|root| Path::new(path).strip_prefix(root).ok())
+            .unwrap_or_else(|| Path::new(path));
+        let (number, text) = rest.split_once(':').unwrap_or(("?", rest));
+        hits.push(format!(
+            "{}:{}: {}",
+            shown.display(),
+            number,
+            truncate(text.to_string(), 400)
+        ));
+        if hits.len() >= max {
+            let _ = child.kill();
+            break;
+        }
+    }
+    let status = child.wait().ok()?;
+    // Exit code 2 is an rg error (bad glob, unreadable root): let the walker
+    // report the real thing instead of claiming there were no matches.
+    if status.code() == Some(2) {
+        return None;
+    }
+    if hits.is_empty() {
+        Some("no matches".to_string())
+    } else {
+        Some(hits.join("\n"))
+    }
+}
+
 pub fn search_files(ctx: &ToolContext, args: SearchArgs) -> Result<String> {
     let scope = &ctx.scope;
     let re = regex::Regex::new(&args.pattern)
@@ -117,6 +224,16 @@ pub fn search_files(ctx: &ToolContext, args: SearchArgs) -> Result<String> {
     // One base: show paths relative to the conversation root, even when a
     // subdirectory was named, so hits stay identifiable.
     let display_root = if multi { None } else { scope.root() };
+
+    if let Some(text) = search_with_rg(
+        &args.pattern,
+        args.glob.as_deref(),
+        &bases,
+        display_root.as_deref(),
+        max,
+    ) {
+        return Ok(text);
+    }
 
     let mut hits = Vec::new();
     let mut scanned = 0usize;

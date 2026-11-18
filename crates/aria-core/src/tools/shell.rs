@@ -18,8 +18,9 @@ use super::{Result, ToolContext, ToolError};
 /// one of these — a single simple command, no chaining or redirection — runs
 /// without asking. Everything else still asks.
 const READ_ONLY: &[&str] = &[
-    "cat", "date", "df", "du", "echo", "file", "grep", "head", "id", "ls", "pwd", "rg", "stat",
-    "tail", "tree", "uname", "wc", "whoami",
+    "ast-grep", "bat", "batcat", "cat", "date", "df", "du", "echo", "fd", "fdfind", "file",
+    "grep", "head", "id", "jq", "ls", "pwd", "rg", "stat", "tail", "tree", "uname", "wc",
+    "whoami", "zoxide",
 ];
 
 /// Shell syntax that can chain, redirect, or substitute another command, so the
@@ -45,10 +46,32 @@ fn is_read_only_command(program: &str, argv: &[&str]) -> bool {
             argv,
             &["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fls", "-fprintf"],
         ),
+        // `sg` is absent on purpose: shadow-utils' `sg` runs a command.
+        "fd" | "fdfind" => !argv.iter().any(|a| {
+            a.starts_with("-x") || a.starts_with("-X") || a.starts_with("--exec")
+        }),
+        "ast-grep" => !argv.iter().any(|a| {
+            a.starts_with("-r")
+                || a.starts_with("--rewrite")
+                || *a == "-U"
+                || a.starts_with("--update-all")
+                || a.starts_with("--fix")
+        }),
+        "zoxide" => matches!(argv.get(1).copied(), Some("query" | "list")),
+        "jq" => !has_option(argv, &["-i", "--inplace"]),
         "git" => {
             matches!(
                 argv.get(1).copied(),
-                Some("status" | "diff" | "log" | "show" | "rev-parse" | "ls-files")
+                Some(
+                    "status"
+                        | "diff"
+                        | "log"
+                        | "show"
+                        | "rev-parse"
+                        | "ls-files"
+                        | "grep"
+                        | "blame"
+                )
             ) && !has_option(
                 argv,
                 &["-c", "--ext-diff", "--textconv", "--exec", "--output", "--upload-pack"],
@@ -330,6 +353,14 @@ mod tests {
             "echo hello",
             "/bin/ls /tmp",
             "  wc -l file.txt  ",
+            "fd -e rs .",
+            "fdfind -t f .",
+            "ast-grep run -p foo src",
+            "jq .name package.json",
+            "bat README.md",
+            "zoxide query proj",
+            "zoxide list",
+            "git grep TODO",
         ] {
             assert!(is_safe_command(cmd), "{cmd}");
         }
@@ -359,6 +390,16 @@ mod tests {
             "date -s tomorrow",
             "sudo ls",
             "sh -c 'echo hi'",
+            "fd -x rm",
+            "fd --exec rm",
+            "fd -X rm",
+            "ast-grep run -p foo -r bar",
+            "ast-grep run -p foo --rewrite=bar",
+            "ast-grep run --update-all -p foo",
+            "ast-grep scan --fix",
+            "sg group -c id",
+            "jq -i . f.json",
+            "zoxide add /tmp",
         ] {
             assert!(!is_safe_command(cmd), "{cmd}");
         }

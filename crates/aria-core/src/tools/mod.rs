@@ -6,7 +6,7 @@
 //! to run one (issue 07).
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -214,6 +214,52 @@ You are in Creative mode: you help the user build and customize Aria itself.
   from the Main System chat.
 - Outside the user's request, leave Aria's files alone.";
 
+/// External command-line tools worth naming to the model: aliases to probe and
+/// a hint for when to reach for them. A program that shadows one of these names
+/// with different behavior is still just a read-only shell command to us.
+const CLIS: &[(&[&str], &str)] = &[
+    (&["rg"], "fast regex content search (`rg -n PATTERN PATH`)"),
+    (&["fd", "fdfind"], "fast file-name search (`fd PATTERN PATH`)"),
+    (
+        &["ast-grep"],
+        "AST/structural code search (`ast-grep run -p PATTERN PATH`)",
+    ),
+    (&["jq"], "JSON query"),
+    (&["bat", "batcat"], "syntax-highlighted file preview"),
+    (
+        &["fzf"],
+        "interactive fuzzy picker; needs a terminal, so mostly unusable from run_shell",
+    ),
+    (&["zoxide"], "directory history (`zoxide query NAME`)"),
+    (&["git"], "version control"),
+];
+
+fn on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        dir.join(name).is_file() || (cfg!(windows) && dir.join(format!("{name}.exe")).is_file())
+    })
+}
+
+/// The CLIs from [`CLIS`] present on `PATH`, as (command to call, hint). Probed
+/// once per process so the house prompt can point at faster tools than our own
+/// walkers when the device has them.
+pub fn available_clis() -> &'static [(&'static str, &'static str)] {
+    static FOUND: OnceLock<Vec<(&'static str, &'static str)>> = OnceLock::new();
+    FOUND.get_or_init(|| {
+        CLIS.iter()
+            .filter_map(|(names, hint)| {
+                names
+                    .iter()
+                    .find(|name| on_path(name))
+                    .map(|name| (*name, *hint))
+            })
+            .collect()
+    })
+}
+
 /// The app's own version, data directory and (in a dev checkout) source root,
 /// so the model can answer questions about Aria instead of guessing.
 pub fn house_prompt(config_dir: &Path, system_dir: &Path) -> String {
@@ -231,6 +277,20 @@ pub fn house_prompt(config_dir: &Path, system_dir: &Path) -> String {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(|h| h.to_string_lossy().into_owned())
         .unwrap_or_else(|| "unknown".to_string());
+    let clis = available_clis();
+    let cli_line = if clis.is_empty() {
+        "- No extra command-line tools detected on PATH.".to_string()
+    } else {
+        let list = clis
+            .iter()
+            .map(|(name, hint)| format!("`{name}` ({hint})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "- Available on PATH (use via `run_shell` instead of hand-rolling the \
+             equivalent): {list}."
+        )
+    };
     format!(
         "\n\nAbout Aria, the app you run inside:\
         \n- Version {}, a local desktop assistant (Rust core, Tauri host, TypeScript UI).\
@@ -241,6 +301,7 @@ pub fn house_prompt(config_dir: &Path, system_dir: &Path) -> String {
         \n- Settings: {}/settings.json\
         \n- Database: {}/aria.db\
         \n{source}\
+        \n{cli_line}\
         \n- Project docs, when a checkout exists: GLOSSARY.md, AGENTS.md, docs/adr.\
         \nWhen the user asks about Aria itself, read these paths instead of guessing. In a folder-scoped conversation you cannot read them; answer from these facts and point to the Main System chat for live detail.",
         env!("CARGO_PKG_VERSION"),
