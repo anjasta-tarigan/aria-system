@@ -92,7 +92,7 @@ _Avoid_: backend, LLM service, model (the model is one of the Provider's setting
 
 ## Background Task
 
-A shell command started with `run_background` that runs detached, beyond a single Run and past the normal shell timeout, then is watched with `poll_task` and can be killed. It streams output to a temp log (finalized as a blob on completion) and is confined to the Workspace root like any other shell Tool. On startup, any task still `running` is reaped as `killed` because its process died with the previous app instance.
+A shell command started with `run_background` that runs detached, beyond a single Run and past the normal shell timeout, then is watched with `poll_task` and can be killed. It streams output to a temp log (finalized as a blob on completion) and runs under the conversation's scope, like any other shell Tool: from the Workspace root in a folder chat, or from Aria's home directory in Main System. On startup, any task still `running` is reaped as `killed` because its process died with the previous app instance.
 
 _Avoid_: job, daemon, service, long-running shell.
 

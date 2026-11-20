@@ -19,8 +19,10 @@ row plus a tail of the log; `kill` reaps the whole process group. The same
 capability is exposed as Tauri commands (`start/poll/list/kill_background`)
 and a UI "Background tasks" panel that auto-polls while any task runs.
 
-Scope is confined to the Workspace root (refused for `None`/`MainSystem`),
-kill reuses `shell::kill_group` (negative-pid, so grandchildren die), and a
+Scope follows the conversation: a Workspace task runs from the folder root and
+a Main System task from Aria's home directory, under the same scope rules as
+`run_shell` (refused only when the conversation has no filesystem access).
+Kill reuses `shell::kill_group` (negative-pid, so grandchildren die), and a
 runtime cap (8h, `shortcut:`-noted) reaps runaway tasks. On startup, any
 task still `running` is reaped as `killed` — its process died with the
 previous instance — and its partial log is preserved as a blob.
