@@ -15,6 +15,7 @@ import {
   type ConversationDetail,
   type ConversationView,
   type ConversationMode,
+  type DatabaseInfo,
   type EmbeddingConfig,
   type EmbeddingTestResult,
   type FetchModelsResult,
@@ -688,6 +689,44 @@ const handlers: Record<string, Handler> = {
     schemaVersion: 6,
     version: "0.0.0-mock",
   }),
+  get_database_info: (): DatabaseInfo => ({
+    path: "/home/you/.local/share/dev.aria.app/aria.db",
+    sizeBytes: 196608,
+    walBytes: 32768,
+    modifiedAt: now(),
+    schemaVersion: 11,
+    sqliteVersion: "3.46.0",
+    journalMode: "wal",
+    pageSize: 4096,
+    tables: [
+      { name: "workspaces", rows: workspaces.size },
+      { name: "conversations", rows: conversations.size },
+      { name: "main_system_paths", rows: mainPaths.size },
+      {
+        name: "messages",
+        rows: [...conversations.values()].reduce((n, d) => n + d.messages.length, 0),
+      },
+      { name: "runs", rows: 4 },
+      { name: "tool_calls", rows: 6 },
+      { name: "approvals", rows: 3 },
+      { name: "todos", rows: 3 },
+      { name: "memories", rows: 2 },
+      { name: "background_task", rows: backgroundTasks.size },
+      { name: "edit_journal", rows: changed.size },
+    ],
+    blobsDir: "/home/you/.local/share/dev.aria.app/blobs",
+    blobs: 4,
+    blobsBytes: 8192,
+    backupsDir: "/home/you/.local/share/dev.aria.app/backups",
+  }),
+  backup_database: () => undefined,
+  import_database: () => handlers.get_database_info({}),
+  reset_database: () => {
+    conversations.clear();
+    changed.clear();
+    mainPaths.clear();
+    return handlers.get_database_info({});
+  },
   set_main_system_scope: (a) => {
     const d = conversations.get(String(a.conversationId));
     if (!d) throw new Error("no such conversation");

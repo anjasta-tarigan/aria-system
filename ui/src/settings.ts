@@ -18,12 +18,14 @@ import {
   validateProviderForm,
   type AIProvider,
   type BuiltInTool,
+  type DatabaseInfo,
   type EmbeddingConfig,
   type EmbeddingIndexInfo,
   type Settings,
   type SettingsView,
   type WebSearchConfig,
 } from "./api";
+import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import { focusables, h } from "./dom";
 import type { Ipc } from "./app";
 
@@ -51,6 +53,7 @@ const STR = {
     reranker: "Reranker",
     tools: "Built-in Tools",
     web: "Web Configuration",
+    database: "Database",
   },
   groups: { settings: "Settings", ai: "AI Configuration", tools: "Tools" },
   general: {
@@ -260,15 +263,59 @@ const STR = {
     invalidBaseUrl: "Enter a valid URL for your SearXNG instance (http://localhost or https://).",
     requiredKey: "Paste your API key first.",
   },
+  database: {
+    intro:
+      "Everything Aria remembers lives in one SQLite file: chats, runs, memories and the list of Undo steps. Undo also keeps the old file contents in a separate folder, which a backup file does not include.",
+    location: "File",
+    size: "Size",
+    modified: "Last changed",
+    schema: "Schema",
+    engine: "Engine",
+    blobs: "Undo history",
+    backups: "Automatic copies",
+    contents: "Contents",
+    tables: {
+      workspaces: "Folders",
+      conversations: "Chats",
+      main_system_paths: "Main System path rules",
+      messages: "Messages",
+      runs: "Runs",
+      tool_calls: "Tool calls",
+      approvals: "Approvals",
+      todos: "Plan items",
+      memories: "Memories",
+      background_task: "Background tasks",
+      edit_journal: "Edits kept for Undo",
+    } as Record<string, string>,
+    backup: "Backup…",
+    backupHelp: "Save a consistent copy of the whole database to a file you choose.",
+    import: "Import…",
+    importHelp: "Replace the whole database with a backup file.",
+    reset: "Reset database",
+    resetHelp: "Delete every chat, run, memory and Undo step. Settings stay.",
+    refresh: "Refresh",
+    backupDone: (path: string) => `Backup saved to ${path}`,
+    importTitle: "Import a backup?",
+    importBody:
+      "Every chat, run, memory and Undo step is replaced by the file you pick. A copy of the current database is saved in the automatic-copies folder first.",
+    importConfirm: "Import backup",
+    importDone: "Database imported",
+    resetTitle: "Reset the database?",
+    resetBody:
+      "Every chat, run, memory and Undo step is deleted. Settings are kept. A copy of the current database is saved in the automatic-copies folder first.",
+    resetConfirm: "Delete everything",
+    resetDone: "Database reset",
+    failed: "That did not work",
+  },
   errorTitle: "Could not load settings",
   errorBody: "The backend did not respond. Check that Aria is running, then retry.",
   offline: "You are offline. Provider tests and key verification need a connection; saved settings still work.",
 } as const;
 
-type SectionId = "general" | "ai" | "embedding" | "reranker" | "tools" | "web";
+type SectionId = "general" | "database" | "ai" | "embedding" | "reranker" | "tools" | "web";
 
 const SECTIONS: { group: keyof typeof STR.groups; items: { id: SectionId }[] }[] = [
-  { group: "settings", items: [{ id: "general" }] },
+  { group: "settings", items: [{ id: "general" }, { id: "database" }] },
   { group: "ai", items: [{ id: "ai" }, { id: "embedding" }, { id: "reranker" }] },
   { group: "tools", items: [{ id: "tools" }, { id: "web" }] },
 ];
@@ -310,7 +357,7 @@ const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
  * Open the Settings modal. `ipc` is the app's invoke adapter so the same code
  * runs against the real backend and the in-browser mock.
  */
-export function openSettings(ipc: Ipc): void {
+export function openSettings(ipc: Ipc, onDatabaseReplaced?: () => void): void {
   // One dialog at a time; re-opening would stack duplicate focus traps.
   const prevBackdrop = document.querySelector(".settings-backdrop") as (HTMLElement & { _close?: () => void }) | null;
   prevBackdrop?._close?.();
@@ -335,6 +382,7 @@ export function openSettings(ipc: Ipc): void {
     tools: [],
     web: null,
     webForm: null,
+    database: null,
   };
 
   const overlay = h("div", {
@@ -444,13 +492,14 @@ export function openSettings(ipc: Ipc): void {
     state.providersError = false;
     render();
     try {
-      const [view, providers, embedding, tools, web, indexInfo] = await Promise.all([
+      const [view, providers, embedding, tools, web, indexInfo, database] = await Promise.all([
         ipc.invoke<SettingsView>("get_settings"),
         ipc.invoke<AIProvider[]>("list_ai_providers"),
         ipc.invoke<EmbeddingConfig>("get_embedding_config"),
         ipc.invoke<BuiltInTool[]>("list_built_in_tools"),
         ipc.invoke<WebSearchConfig | null>("get_web_search_config"),
         ipc.invoke<EmbeddingIndexInfo>("get_embedding_index_info"),
+        ipc.invoke<DatabaseInfo>("get_database_info"),
       ]);
       state.general = generalFrom(view);
       state.generalBaseline = generalFrom(view);
@@ -460,6 +509,7 @@ export function openSettings(ipc: Ipc): void {
       state.tools = tools;
       state.web = web;
       state.indexInfo = indexInfo;
+      state.database = database;
       state.loading = false;
       state.providersLoading = false;
     } catch {
@@ -953,6 +1003,8 @@ export function openSettings(ipc: Ipc): void {
         return toolsPanel();
       case "web":
         return webPanel();
+      case "database":
+        return databasePanel();
     }
   }
 
@@ -1980,6 +2032,127 @@ export function openSettings(ipc: Ipc): void {
     );
   }
 
+  // ---------------------------------------------------------------- database
+
+  const bytes = (n: number): string => {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  async function refreshDatabase() {
+    try {
+      state.database = await ipc.invoke<DatabaseInfo>("get_database_info");
+      render();
+    } catch (e) {
+      toast(`${STR.database.failed}: ${errorText(e)}`, "bad");
+    }
+  }
+
+  async function backupDatabase() {
+    try {
+      const dest = await saveFileDialog({
+        title: "Backup database",
+        defaultPath: `aria-backup-${new Date().toISOString().slice(0, 10)}.db`,
+        filters: [{ name: "SQLite database", extensions: ["db"] }],
+      });
+      if (typeof dest !== "string") return;
+      await ipc.invoke("backup_database", { dest });
+      toast(STR.database.backupDone(dest));
+    } catch (e) {
+      toast(`${STR.database.failed}: ${errorText(e)}`, "bad");
+    }
+  }
+
+  async function importDatabase() {
+    try {
+      const path = await openFileDialog({
+        title: "Import database",
+        multiple: false,
+        directory: false,
+        filters: [{ name: "SQLite database", extensions: ["db"] }],
+      });
+      if (typeof path !== "string") return;
+      const ok = await confirmDialog(
+        STR.database.importTitle,
+        STR.database.importBody,
+        STR.database.importConfirm,
+        true,
+      );
+      if (!ok) return;
+      state.database = await ipc.invoke<DatabaseInfo>("import_database", { path });
+      onDatabaseReplaced?.();
+      toast(STR.database.importDone);
+      render();
+    } catch (e) {
+      toast(`${STR.database.failed}: ${errorText(e)}`, "bad");
+    }
+  }
+
+  async function resetDatabase() {
+    try {
+      const ok = await confirmDialog(
+        STR.database.resetTitle,
+        STR.database.resetBody,
+        STR.database.resetConfirm,
+        true,
+      );
+      if (!ok) return;
+      state.database = await ipc.invoke<DatabaseInfo>("reset_database");
+      onDatabaseReplaced?.();
+      toast(STR.database.resetDone);
+      render();
+    } catch (e) {
+      toast(`${STR.database.failed}: ${errorText(e)}`, "bad");
+    }
+  }
+
+  function databasePanel(): HTMLElement {
+    const db = state.database;
+    if (!db) return panel("database", loadingPanel());
+    const d = STR.database;
+    const row = (label: string, value: string) => [h("dt", {}, label), h("dd", {}, value)];
+    return panel(
+      "database",
+      h("h3", { class: "settings-section-title" }, STR.sections.database),
+      h("p", { class: "settings-intro" }, d.intro),
+      h(
+        "dl",
+        { class: "db-grid" },
+        ...row(d.location, db.path),
+        ...row(
+          d.size,
+          db.walBytes > 0
+            ? `${bytes(db.sizeBytes)} + ${bytes(db.walBytes)} log`
+            : bytes(db.sizeBytes),
+        ),
+        ...row(d.modified, db.modifiedAt ? fmtTime(db.modifiedAt) : "—"),
+        ...row(
+          d.engine,
+          `SQLite ${db.sqliteVersion} · ${db.journalMode} · ${bytes(db.pageSize)} pages`,
+        ),
+        ...row(d.schema, String(db.schemaVersion)),
+        ...row(d.blobs, `${db.blobs} · ${bytes(db.blobsBytes)} · ${db.blobsDir}`),
+        ...row(d.backups, db.backupsDir),
+      ),
+      h("h4", { class: "db-subtitle" }, d.contents),
+      h(
+        "dl",
+        { class: "db-grid" },
+        ...db.tables.flatMap((t) => row(d.tables[t.name] ?? t.name, String(t.rows))),
+      ),
+      h(
+        "div",
+        { class: "db-actions" },
+        h("button", { class: "primary", onclick: () => void backupDatabase() }, d.backup),
+        h("button", { class: "ghost", onclick: () => void importDatabase() }, d.import),
+        h("button", { class: "ghost", onclick: () => void refreshDatabase() }, d.refresh),
+        h("button", { class: "danger", onclick: () => void resetDatabase() }, d.reset),
+      ),
+      h("p", { class: "field-help" }, `${d.backupHelp} ${d.importHelp} ${d.resetHelp}`),
+    );
+  }
+
   // --------------------------------------------------------------------- web
 
   function webPanel(): HTMLElement {
@@ -2300,6 +2473,7 @@ interface State {
   tools: BuiltInTool[];
   web: WebSearchConfig | null;
   webForm: WebFormState | null;
+  database: DatabaseInfo | null;
   webErrors?: Record<string, string>;
   webAdvanced?: boolean;
   /// Tab to focus after the next render (keyboard navigation).

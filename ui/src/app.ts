@@ -1725,7 +1725,22 @@ async function jumpToHit(hit: MessageHit) {
 }
 
 async function openSettings() {
-  openSettingsModal(call);
+  openSettingsModal(call, () => void reloadAfterDatabaseChange());
+}
+
+/// A reset or import replaced every row: drop the open chat and start over on
+/// the new database (creating the default Main System chat when it is empty).
+async function reloadAfterDatabaseChange() {
+  ui.detail = null;
+  ui.search = [];
+  ui.changed = [];
+  ui.bgTasks = [];
+  ui.memories = [];
+  ui.notice = null;
+  ui.streaming = null;
+  ui.toolOutput = {};
+  await refreshConversations();
+  await selectFirst();
 }
 
 async function openMemories(workspaceId: string | null) {

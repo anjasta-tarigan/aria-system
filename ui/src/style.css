@@ -1513,6 +1513,46 @@ button.send {
   color: var(--bad);
 }
 
+/* Settings › Database: read-only facts in a compact two-column grid. */
+.db-grid {
+  display: grid;
+  grid-template-columns: minmax(9rem, 15rem) 1fr;
+  gap: var(--sp-2) var(--sp-4);
+  margin: 0 0 var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.db-grid dt {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+
+.db-grid dd {
+  margin: 0;
+  font-family: var(--mono, monospace);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+
+.db-subtitle {
+  margin: var(--sp-5) 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.db-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+}
+
 input.invalid,
 input[aria-invalid="true"],
 select[aria-invalid="true"] {

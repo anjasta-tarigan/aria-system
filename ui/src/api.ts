@@ -314,6 +314,29 @@ export interface HealthView {
   version: string;
 }
 
+/// One table counted in Settings › Database.
+export interface TableCount {
+  name: string;
+  rows: number;
+}
+
+/// Where the database lives and what it holds (Settings › Database).
+export interface DatabaseInfo {
+  path: string;
+  sizeBytes: number;
+  walBytes: number;
+  modifiedAt: number | null;
+  schemaVersion: number;
+  sqliteVersion: string;
+  journalMode: string;
+  pageSize: number;
+  tables: TableCount[];
+  blobsDir: string;
+  blobs: number;
+  blobsBytes: number;
+  backupsDir: string;
+}
+
 export interface Memory {
   id: string;
   workspace_id: string | null;

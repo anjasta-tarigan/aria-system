@@ -110,9 +110,15 @@ _Avoid_: note, knowledge base.
 
 ## Settings section
 
-One panel inside the Settings dialog (General, AI Provider, Embedding Provider, Built-in Tools, Web Configuration). Sections other than General persist the moment the user acts on them; General is the only form with an explicit Save and a dirty state.
+One panel inside the Settings dialog (General, Database, AI Provider, Embedding Provider, Built-in Tools, Web Configuration). Sections other than General persist the moment the user acts on them; General is the only form with an explicit Save and a dirty state.
 
 _Avoid_: settings tab, page.
+
+## Database
+
+The single SQLite file (`aria.db` in the app data directory) that is the transcript of record: chats, Runs, Tool Calls, Memories and the Edit journal. Settings and API keys live in `settings.json` and the secret store, so resetting or importing the Database leaves them untouched. A backup is a copy of that file, taken with `VACUUM INTO`; a reset empties it in place. Both write an automatic copy into `<app data>/backups` first, and import drops Undo steps whose saved file content (the separate blob store) is missing.
+
+_Avoid_: store, data folder.
 
 ## AI Provider (saved)
 

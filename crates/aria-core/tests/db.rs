@@ -610,3 +610,67 @@ fn main_system_path_must_be_absolute() {
     let err = db.call(|c| db::set_conversation_scope(c, &conv, true, &["relative/path".to_string()]));
     assert!(err.is_err());
 }
+
+// ------------------------------------------------------- backup and restore
+
+/// A backup is a plain SQLite file: it restores every row, and reset leaves a
+/// working empty schema behind.
+#[test]
+fn backup_restores_and_reset_empties() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(&dir.path().join("aria.db")).unwrap();
+    let (_ws, conv) = seed(&db);
+    db.call(|c| db::insert_message(c, &conv, None, Role::User, "before the backup"))
+        .unwrap();
+
+    let backup = dir.path().join("backup.db");
+    db.call(|c| {
+        c.execute("VACUUM INTO ?1", [backup.to_string_lossy().to_string()])?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(db::validate_backup(&backup).unwrap(), db.schema_version().unwrap());
+
+    // Change the live database, then go back to the backup.
+    db.call(|c| db::insert_conversation(c, None, "after the backup"))
+        .unwrap();
+    db.restore(&backup).unwrap();
+    assert_eq!(db.call(|c| db::list_conversations(c)).unwrap().len(), 1);
+    assert_eq!(
+        db.call(|c| db::search_messages(c, "backup", None, 10)).unwrap().len(),
+        1
+    );
+
+    // Reset keeps the schema and drops every row, FTS included.
+    db.reset().unwrap();
+    assert!(db.call(|c| db::list_conversations(c)).unwrap().is_empty());
+    assert!(db.call(|c| db::search_messages(c, "backup", None, 10)).unwrap().is_empty());
+    assert_eq!(db.schema_version().unwrap(), 11);
+    db.call(|c| db::insert_conversation(c, None, "fresh")).unwrap();
+}
+
+#[test]
+fn validate_backup_rejects_foreign_and_newer_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let not_db = dir.path().join("notes.txt");
+    std::fs::write(&not_db, "hello").unwrap();
+    assert!(db::validate_backup(&not_db).is_err());
+
+    let db = Db::open(&dir.path().join("aria.db")).unwrap();
+    seed(&db);
+    let backup = dir.path().join("backup.db");
+    db.call(|c| {
+        c.execute("VACUUM INTO ?1", [backup.to_string_lossy().to_string()])?;
+        Ok(())
+    })
+    .unwrap();
+
+    // A file from a newer build must be refused, not downgraded in place.
+    let newer = dir.path().join("newer.db");
+    std::fs::copy(&backup, &newer).unwrap();
+    rusqlite::Connection::open(&newer)
+        .unwrap()
+        .pragma_update(None, "user_version", 99)
+        .unwrap();
+    assert!(db::validate_backup(&newer).is_err());
+}

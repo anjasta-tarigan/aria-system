@@ -77,6 +77,66 @@ impl Db {
     pub fn schema_version(&self) -> Result<i64> {
         self.call(user_version)
     }
+
+    /// Replace the whole database with a backup file, then migrate it to this
+    /// build's schema. The caller must make sure no Run is live.
+    pub fn restore(&self, path: &Path) -> Result<()> {
+        let mut conn = self.guard();
+        conn.restore(
+            rusqlite::MAIN_DB,
+            path,
+            None::<fn(rusqlite::backup::Progress)>,
+        )?;
+        migrate(&conn)
+    }
+
+    /// Empty the database, keeping the schema: chats, Runs and file history
+    /// go; Settings (a file, not a row) stay. A fresh in-memory database is
+    /// the source, so FTS and every index come back empty and current.
+    pub fn reset(&self) -> Result<()> {
+        let empty = Self::open_in_memory()?;
+        let from = empty.guard();
+        let mut to = self.guard();
+        rusqlite::backup::Backup::new(&from, &mut to)?.run_to_completion(
+            100,
+            std::time::Duration::from_millis(1),
+            None,
+        )?;
+        Ok(())
+    }
+}
+
+/// Check that `path` is an Aria database this build can import, returning its
+/// schema version. Read-only, so a foreign file is never migrated in place.
+pub fn validate_backup(path: &Path) -> Result<i64> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let version = user_version(&conn)?;
+    let invalid = |value: String| DbError::InvalidValue {
+        field: "backup",
+        value,
+    };
+    if version < 1 {
+        return Err(invalid("not an Aria database".into()));
+    }
+    if version > SCHEMA_VERSION {
+        return Err(invalid(format!(
+            "schema version {version}, this build understands {SCHEMA_VERSION}"
+        )));
+    }
+    let integrity: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+    if integrity != "ok" {
+        return Err(invalid(format!("damaged database ({integrity})")));
+    }
+    let tables: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'
+             AND name IN ('conversations', 'messages', 'runs')",
+        [],
+        |r| r.get(0),
+    )?;
+    if tables != 3 {
+        return Err(invalid("not an Aria database".into()));
+    }
+    Ok(version)
 }
 
 fn user_version(conn: &Connection) -> Result<i64> {

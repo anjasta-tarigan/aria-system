@@ -5,7 +5,7 @@
 //! single Tauri event name.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use aria_core::agent::{Agent, PendingApproval, ProviderSource, RunEvent, RunHandle};
@@ -181,6 +181,36 @@ pub struct HealthView {
     pub model: String,
     pub schema_version: i64,
     pub version: String,
+}
+
+/// One table listed in Settings › Database.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableCount {
+    pub name: String,
+    pub rows: i64,
+}
+
+/// What Settings › Database shows: where the database lives, how big it is,
+/// and what it holds.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseInfo {
+    pub path: String,
+    pub size_bytes: u64,
+    /// Write-ahead log sitting next to the database; folded in on next checkpoint.
+    pub wal_bytes: u64,
+    /// Last write to the database file, in ms since the epoch.
+    pub modified_at: Option<i64>,
+    pub schema_version: i64,
+    pub sqlite_version: String,
+    pub journal_mode: String,
+    pub page_size: i64,
+    pub tables: Vec<TableCount>,
+    pub blobs_dir: String,
+    pub blobs: i64,
+    pub blobs_bytes: u64,
+    pub backups_dir: String,
 }
 
 // ------------------------------------------------ settings-domain view types
@@ -1104,6 +1134,215 @@ async fn health(state: State<'_, App>) -> CmdResult<HealthView> {
     })
 }
 
+// ------------------------------------------------------------ database tools
+
+/// Tables Settings › Database counts, in display order.
+const COUNTED_TABLES: &[&str] = &[
+    "workspaces",
+    "conversations",
+    "main_system_paths",
+    "messages",
+    "runs",
+    "tool_calls",
+    "approvals",
+    "todos",
+    "memories",
+    "background_task",
+    "edit_journal",
+];
+
+fn file_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Automatic copies written before a reset or import, so a destructive click
+/// never loses the only copy of the data.
+fn backups_dir() -> CmdResult<PathBuf> {
+    let dir = data_dir()?.join("backups");
+    std::fs::create_dir_all(&dir).map_err(err)?;
+    Ok(dir)
+}
+
+/// Write a consistent copy of the live database into the backups folder.
+fn auto_snapshot(inner: &Inner, label: &str) -> CmdResult<()> {
+    let dest = backups_dir()?.join(format!("{label}-{}.db", db::now_ms()));
+    let sql = dest.to_string_lossy().to_string();
+    inner
+        .db
+        .call(|c| {
+            c.execute("VACUUM INTO ?1", [sql.as_str()])?;
+            Ok(())
+        })
+        .map_err(err)
+}
+
+/// Reset and import replace every row; a live Run or task would keep writing
+/// to a database it no longer owns.
+fn ensure_idle(inner: &Inner) -> CmdResult<()> {
+    let busy = inner
+        .db
+        .call(|c| {
+            let runs: i64 = c.query_row(
+                "SELECT COUNT(*) FROM runs WHERE state IN ('running', 'awaiting_approval')",
+                [],
+                |r| r.get(0),
+            )?;
+            let tasks: i64 = c.query_row(
+                "SELECT COUNT(*) FROM background_task WHERE status = 'running'",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(runs + tasks)
+        })
+        .map_err(err)?;
+    if busy > 0 {
+        return Err("A run or background task is still active. Finish or cancel it first.".into());
+    }
+    Ok(())
+}
+
+fn database_info(inner: &Inner) -> CmdResult<DatabaseInfo> {
+    let dir = data_dir()?;
+    let path = dir.join("aria.db");
+    let (schema_version, sqlite_version, journal_mode, page_size, tables) = inner
+        .db
+        .call(|c| {
+            let mut tables = Vec::with_capacity(COUNTED_TABLES.len());
+            for name in COUNTED_TABLES {
+                let rows = c.query_row(&format!("SELECT COUNT(*) FROM {name}"), [], |r| r.get(0))?;
+                tables.push(TableCount {
+                    name: name.to_string(),
+                    rows,
+                });
+            }
+            Ok((
+                c.query_row("PRAGMA user_version", [], |r| r.get(0))?,
+                c.query_row("SELECT sqlite_version()", [], |r| r.get(0))?,
+                c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?,
+                c.query_row("PRAGMA page_size", [], |r| r.get(0))?,
+                tables,
+            ))
+        })
+        .map_err(err)?;
+    let (blobs, blobs_bytes) = std::fs::read_dir(inner.blobs.dir())
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|e| e.metadata().ok())
+                .filter(|m| m.is_file())
+                .fold((0i64, 0u64), |(n, bytes), m| (n + 1, bytes + m.len()))
+        })
+        .unwrap_or((0, 0));
+    let modified_at = std::fs::metadata(&path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64);
+    Ok(DatabaseInfo {
+        path: path.to_string_lossy().to_string(),
+        size_bytes: file_len(&path),
+        wal_bytes: file_len(&dir.join("aria.db-wal")),
+        modified_at,
+        schema_version,
+        sqlite_version,
+        journal_mode,
+        page_size,
+        tables,
+        blobs_dir: inner.blobs.dir().to_string_lossy().to_string(),
+        blobs,
+        blobs_bytes,
+        backups_dir: backups_dir()?.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+fn get_database_info(state: State<'_, App>) -> CmdResult<DatabaseInfo> {
+    database_info(&state.inner)
+}
+
+/// Save a consistent copy of the whole database to `dest` (a file the user
+/// picked). Blobs (Undo history) are a separate store and are not included.
+#[tauri::command]
+fn backup_database(state: State<'_, App>, dest: String) -> CmdResult<()> {
+    let path = PathBuf::from(&dest);
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(err)?;
+    }
+    // The save dialog already confirmed the overwrite; VACUUM INTO refuses an
+    // existing file.
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(err)?;
+    }
+    state
+        .inner
+        .db
+        .call(|c| {
+            c.execute("VACUUM INTO ?1", [dest.as_str()])?;
+            Ok(())
+        })
+        .map_err(err)
+}
+
+/// Replace the whole database with a backup file. The current data is copied
+/// into the backups folder first.
+#[tauri::command]
+fn import_database(state: State<'_, App>, path: String) -> CmdResult<DatabaseInfo> {
+    let inner = &state.inner;
+    ensure_idle(inner)?;
+    let src = PathBuf::from(&path);
+    db::validate_backup(&src).map_err(err)?;
+    auto_snapshot(inner, "before-import")?;
+    inner.db.restore(&src).map_err(err)?;
+    // A backup file carries no blob store. Drop Undo steps whose saved content
+    // is missing here, so the panel never offers a restore that cannot work.
+    for hash in inner
+        .db
+        .call(db::referenced_blobs)
+        .map_err(err)?
+        .into_iter()
+        .filter(|h| !h.is_empty())
+    {
+        if !inner.blobs.dir().join(&hash).exists() {
+            inner
+                .db
+                .call(|c| {
+                    c.execute("DELETE FROM edit_journal WHERE blob_hash = ?1", [hash.as_str()])?;
+                    Ok(())
+                })
+                .map_err(err)?;
+        }
+    }
+    // A backup taken mid-Run remembers a Run nothing is driving now.
+    inner
+        .db
+        .call(|c| {
+            c.execute(
+                "UPDATE runs SET state = 'errored', stop_reason = 'interrupted',
+                     ended_at = ?1 WHERE state IN ('running', 'awaiting_approval')",
+                [db::now_ms()],
+            )?;
+            Ok(())
+        })
+        .map_err(err)?;
+    let _ = inner.blobs.prune();
+    database_info(inner)
+}
+
+/// Delete every chat, Run, memory and journal entry. Settings stay (they are
+/// a file, not a row). The current data is copied into the backups folder
+/// first.
+#[tauri::command]
+fn reset_database(state: State<'_, App>) -> CmdResult<DatabaseInfo> {
+    let inner = &state.inner;
+    ensure_idle(inner)?;
+    auto_snapshot(inner, "before-reset")?;
+    inner.db.reset().map_err(err)?;
+    let _ = inner.blobs.prune();
+    database_info(inner)
+}
+
 #[tauri::command]
 fn set_settings(state: State<'_, App>, input: SettingsInput) -> CmdResult<SettingsView> {
     let config = &state.inner.config;
@@ -1912,6 +2151,10 @@ pub fn run() {
             list_background,
             kill_background,
             health,
+            get_database_info,
+            backup_database,
+            import_database,
+            reset_database,
             list_ai_providers,
             get_ai_provider,
             create_ai_provider,

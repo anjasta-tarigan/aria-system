@@ -10,7 +10,7 @@ mod schema;
 pub use models::*;
 pub use repo::*;
 pub use rusqlite::Connection;
-pub use schema::Db;
+pub use schema::{validate_backup, Db};
 
 
 pub type Result<T> = std::result::Result<T, DbError>;
