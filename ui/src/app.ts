@@ -21,6 +21,7 @@ import {
   type Todo,
   type ToolCall,
 } from "./api";
+import { api } from "./api";
 import { mockFaults, mockInvoke, mockListen, seed } from "./mock";
 import { h } from "./dom";
 import { openSettings as openSettingsModal } from "./settings";
@@ -139,53 +140,17 @@ interface Ui {
   lightbox: { src: string; name: string } | null;
 }
 
-/// Persist side-panel open/dismissed state plus the user's chosen size and
-/// tab so the panel configuration survives an app restart
-/// (stopping and rerunning `pnpm tauri dev`).
-const SIDE_PANEL_STORAGE_KEY = "aria:side-panel";
+/// Side panel UI state. Defaults are applied here; persisted values are
+/// loaded from the backend `settings.json` SSoT in `start()` so an explicit
+/// dismissal (or size/tab choice) survives an app restart.
+const SIDE_PANEL_DEFAULT_WIDTH = 440;
 
-type SidePanelState = {
-  open: boolean;
-  dismissed: boolean;
-  width: number;
-  tab: "artifacts" | "files";
+const panelState = {
+  open: true,
+  dismissed: false,
+  width: SIDE_PANEL_DEFAULT_WIDTH,
+  tab: "artifacts" as const,
 };
-
-function loadSidePanelState(): SidePanelState {
-  try {
-    const raw = localStorage.getItem(SIDE_PANEL_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      return {
-        open: typeof parsed.open === "boolean" ? parsed.open : true,
-        dismissed: typeof parsed.dismissed === "boolean" ? parsed.dismissed : false,
-        width:
-          typeof parsed.width === "number" && parsed.width > 0
-            ? parsed.width
-            : 440,
-        tab: parsed.tab === "files" ? "files" : "artifacts",
-      };
-    }
-  } catch {
-    // localStorage may be unavailable or unreadable; fall back to defaults.
-  }
-  return { open: true, dismissed: false, width: 440, tab: "artifacts" };
-}
-
-function saveSidePanelState(state: Partial<SidePanelState>) {
-  try {
-    const raw = localStorage.getItem(SIDE_PANEL_STORAGE_KEY);
-    const current: SidePanelState = raw ? JSON.parse(raw) : panelState;
-    localStorage.setItem(
-      SIDE_PANEL_STORAGE_KEY,
-      JSON.stringify({ ...current, ...state }),
-    );
-  } catch {
-    // localStorage may be unavailable or unwritable; best effort only.
-  }
-}
-
-const panelState = loadSidePanelState();
 
 const ui: Ui = {
   conversations: [],
@@ -304,10 +269,10 @@ function render() {
       ui.sidePanelOpen = true;
       ui.sidePanelTab = "artifacts";
       ui.sidePanelDismissed = false;
-      saveSidePanelState({
-        open: ui.sidePanelOpen,
-        dismissed: ui.sidePanelDismissed,
-        tab: ui.sidePanelTab,
+      void api.setSettings({
+        side_panel_open: ui.sidePanelOpen,
+        side_panel_dismissed: ui.sidePanelDismissed,
+        side_panel_tab: ui.sidePanelTab,
       });
       if (latestArt.isStreaming) {
         streamingArtifactActive = true;
@@ -421,7 +386,7 @@ function onResizerMouseMove(e: MouseEvent) {
 
 function onResizerMouseUp() {
   resizing = false;
-  saveSidePanelState({ width: ui.sidePanelWidth });
+  void api.setSettings({ side_panel_width: ui.sidePanelWidth });
 }
 
 // --------------------------------------------------------------- sidebar
@@ -1051,7 +1016,7 @@ function conversationPane(
             title: `${runningBg.length} background task running`,
             onclick: () => {
               ui.sidePanelTab = "files";
-              saveSidePanelState({ tab: ui.sidePanelTab });
+              void api.setSettings({ side_panel_tab: ui.sidePanelTab });
               render();
             },
           },
@@ -1070,10 +1035,10 @@ function conversationPane(
         // Remember an explicit dismiss so auto-open doesn't reopen the panel
         // on the next message; clearing it when the user re-opens.
         ui.sidePanelDismissed = !ui.sidePanelOpen;
-        saveSidePanelState({
-          open: ui.sidePanelOpen,
-          dismissed: ui.sidePanelDismissed,
-          tab: ui.sidePanelTab,
+        void api.setSettings({
+          side_panel_open: ui.sidePanelOpen,
+          side_panel_dismissed: ui.sidePanelDismissed,
+          side_panel_tab: ui.sidePanelTab,
         });
         render();
       },
@@ -1349,10 +1314,10 @@ function messageNode(
             ui.sidePanelOpen = true;
             ui.sidePanelTab = "artifacts";
             ui.sidePanelDismissed = false;
-            saveSidePanelState({
-              open: ui.sidePanelOpen,
-              dismissed: ui.sidePanelDismissed,
-              tab: ui.sidePanelTab,
+            void api.setSettings({
+              side_panel_open: ui.sidePanelOpen,
+              side_panel_dismissed: ui.sidePanelDismissed,
+              side_panel_tab: ui.sidePanelTab,
             });
             render();
           });
@@ -1683,10 +1648,10 @@ function streamingNode(artifactsIndex?: ConversationArtifactIndex | null): HTMLE
             ui.sidePanelOpen = true;
             ui.sidePanelTab = "artifacts";
             ui.sidePanelDismissed = false;
-            saveSidePanelState({
-              open: ui.sidePanelOpen,
-              dismissed: ui.sidePanelDismissed,
-              tab: ui.sidePanelTab,
+            void api.setSettings({
+              side_panel_open: ui.sidePanelOpen,
+              side_panel_dismissed: ui.sidePanelDismissed,
+              side_panel_tab: ui.sidePanelTab,
             });
             render();
           });
@@ -2211,7 +2176,7 @@ function renderSidePanelArtifacts(
             class: `side-panel-tab ${active ? "active" : ""}`,
             onclick: () => {
               ui.sidePanelTab = "artifacts";
-              saveSidePanelState({ tab: ui.sidePanelTab });
+              void api.setSettings({ side_panel_tab: ui.sidePanelTab });
               render();
             },
           },
@@ -2223,7 +2188,7 @@ function renderSidePanelArtifacts(
             class: `side-panel-tab ${!active ? "active" : ""}`,
             onclick: () => {
               ui.sidePanelTab = "files";
-              saveSidePanelState({ tab: ui.sidePanelTab });
+              void api.setSettings({ side_panel_tab: ui.sidePanelTab });
               render();
             },
           },
@@ -2306,10 +2271,10 @@ function renderSidePanelFiles(conv: ConversationView): HTMLElement {
           onclick: () => {
             ui.sidePanelOpen = false;
             ui.sidePanelDismissed = true;
-            saveSidePanelState({
-              open: ui.sidePanelOpen,
-              dismissed: ui.sidePanelDismissed,
-              tab: ui.sidePanelTab,
+            void api.setSettings({
+              side_panel_open: ui.sidePanelOpen,
+              side_panel_dismissed: ui.sidePanelDismissed,
+              side_panel_tab: ui.sidePanelTab,
             });
             render();
           },
@@ -2362,7 +2327,7 @@ function sidePanelNode(
       (tab) => {
         ui.artifactTab = tab;
         ui.sidePanelTab = "artifacts";
-        saveSidePanelState({ tab: ui.sidePanelTab });
+        void api.setSettings({ side_panel_tab: ui.sidePanelTab });
         render();
       },
       (ver) => {
@@ -2799,6 +2764,17 @@ export async function start(initialId?: string) {
     return;
   }
   unsubscribe = unsub;
+  // Load persisted side-panel UI state from the backend SSoT (settings.json)
+  // so an explicit dismissal/size/tab choice survives an app restart.
+  try {
+    const view = await api.getSettings();
+    ui.sidePanelOpen = view.settings.side_panel_open;
+    ui.sidePanelDismissed = view.settings.side_panel_dismissed;
+    ui.sidePanelWidth = view.settings.side_panel_width;
+    ui.sidePanelTab = view.settings.side_panel_tab === "files" ? "files" : "artifacts";
+  } catch {
+    // Settings unavailable (first run, backend not ready): keep defaults.
+  }
   startHealthPoll();
   window.addEventListener("mousemove", onResizerMouseMove);
   window.addEventListener("mouseup", onResizerMouseUp);

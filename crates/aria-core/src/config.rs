@@ -297,6 +297,16 @@ pub struct Settings {
     /// the tool registry stays the source of truth for the tool list.
     #[serde(default)]
     pub disabled_tools: Vec<String>,
+    /// Side panel UI state, persisted so a user's layout choice survives
+    /// app restarts.
+    #[serde(default)]
+    pub side_panel_open: bool,
+    #[serde(default)]
+    pub side_panel_dismissed: bool,
+    #[serde(default)]
+    pub side_panel_width: u32,
+    #[serde(default)]
+    pub side_panel_tab: String,
 }
 
 impl Default for Settings {
@@ -315,6 +325,10 @@ impl Default for Settings {
             web_search_config: None,
             reranker_config: RerankerConfig::default(),
             disabled_tools: Vec::new(),
+            side_panel_open: true,
+            side_panel_dismissed: false,
+            side_panel_width: 440,
+            side_panel_tab: "artifacts".to_string(),
         }
     }
 }

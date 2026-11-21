@@ -129,6 +129,10 @@ export interface Settings {
   search_provider: string | null;
   search_base_url: string | null;
   approval_policy: string;
+  side_panel_open: boolean;
+  side_panel_dismissed: boolean;
+  side_panel_width: number;
+  side_panel_tab: string;
 }
 
 export interface SettingsView {
@@ -215,8 +219,8 @@ export const api = {
   // Settings must be written somewhere private; the Rust side decides where.
   getSettings: () => invoke<SettingsView>("get_settings"),
   setSettings: (input: {
-    base_url: string;
-    model: string;
+    base_url?: string;
+    model?: string;
     embedding_base_url?: string | null;
     embedding_model?: string | null;
     search_provider?: string | null;
@@ -224,6 +228,10 @@ export const api = {
     search_api_key?: string | null;
     api_key?: string | null;
     approval_policy?: string | null;
+    side_panel_open?: boolean;
+    side_panel_dismissed?: boolean;
+    side_panel_width?: number;
+    side_panel_tab?: string;
   }) => invoke<SettingsView>("set_settings", { input }),
   listMemories: (workspaceId?: string | null) =>
     invoke<Memory[]>("list_memories", { workspaceId: workspaceId ?? null }),

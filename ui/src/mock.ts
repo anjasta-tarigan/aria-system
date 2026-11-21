@@ -76,6 +76,10 @@ const settings: SettingsView = {
     search_provider: null,
     search_base_url: null,
     approval_policy: "always_ask",
+    side_panel_open: true,
+    side_panel_dismissed: false,
+    side_panel_width: 440,
+    side_panel_tab: "artifacts",
   },
   has_key: true,
   key_backend: "keyring",
@@ -682,6 +686,18 @@ const handlers: Record<string, Handler> = {
       search_provider: (input.search_provider as string) ?? null,
       search_base_url: (input.search_base_url as string) ?? null,
       approval_policy: (input.approval_policy as string) ?? "always_ask",
+      side_panel_open: input.side_panel_open === undefined
+        ? settings.settings.side_panel_open
+        : Boolean(input.side_panel_open),
+      side_panel_dismissed: input.side_panel_dismissed === undefined
+        ? settings.settings.side_panel_dismissed
+        : Boolean(input.side_panel_dismissed),
+      side_panel_width: input.side_panel_width === undefined
+        ? settings.settings.side_panel_width
+        : Number(input.side_panel_width),
+      side_panel_tab: input.side_panel_tab === undefined
+        ? settings.settings.side_panel_tab
+        : String(input.side_panel_tab),
     };
     if (input.api_key) settings.has_key = true;
     return settings;

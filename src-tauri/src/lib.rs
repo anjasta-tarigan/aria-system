@@ -342,8 +342,8 @@ fn provider_view(config: &Config, p: &AIProvider) -> AIProviderView {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SettingsInput {
-    pub base_url: String,
-    pub model: String,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
     /// Optional OpenAI-compatible embeddings endpoint override.
     pub embedding_base_url: Option<String>,
     /// Optional embeddings model id; defaults to `text-embedding-3-small`.
@@ -355,6 +355,11 @@ pub struct SettingsInput {
     pub search_api_key: Option<String>,
     /// Approval policy: "always_ask" (default) or "auto_approve_safe".
     pub approval_policy: Option<String>,
+    /// Side panel UI state.
+    pub side_panel_open: Option<bool>,
+    pub side_panel_dismissed: Option<bool>,
+    pub side_panel_width: Option<u32>,
+    pub side_panel_tab: Option<String>,
 }
 
 // ------------------------------------------------------------------ assembly
@@ -1470,8 +1475,12 @@ fn set_settings(state: State<'_, App>, input: SettingsInput) -> CmdResult<Settin
     // Load first so the new settings-domain fields (providers, embedding,
     // web search, disabled tools) are preserved rather than reset.
     let mut settings = config.load().map_err(err)?;
-    settings.base_url = input.base_url.trim().to_string();
-    settings.model = input.model.trim().to_string();
+    if let Some(url) = input.base_url {
+        settings.base_url = url.trim().to_string();
+    }
+    if let Some(model) = input.model {
+        settings.model = model.trim().to_string();
+    }
     // A General save does not carry embedding fields; keep the last
     // embedding setup instead of clearing the model and endpoint.
     if let Some(url) = input
@@ -1502,6 +1511,19 @@ fn set_settings(state: State<'_, App>, input: SettingsInput) -> CmdResult<Settin
         "auto_approve_safe" => aria_core::config::ApprovalPolicy::AutoApproveSafe,
         _ => aria_core::config::ApprovalPolicy::AlwaysAsk,
     };
+    if let Some(open) = input.side_panel_open {
+        settings.side_panel_open = open;
+    }
+    if let Some(dismissed) = input.side_panel_dismissed {
+        settings.side_panel_dismissed = dismissed;
+    }
+    if let Some(width) = input.side_panel_width {
+        settings.side_panel_width = width;
+    }
+    if let Some(tab) = input.side_panel_tab {
+        let tab = if tab == "files" { "files" } else { "artifacts" };
+        settings.side_panel_tab = tab.to_string();
+    }
     if settings.model.is_empty() {
         return Err("a model name is required".into());
     }
