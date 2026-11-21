@@ -58,7 +58,9 @@ pub async fn remember(ctx: &ToolContext, args: RememberArgs) -> Result<String> {
             key,
             &args.content,
             embedding.as_deref(),
-            None, // encryption_key_id: key management is out of scope for now
+            None, // shortcut: encryption_key_id is NULL — content is stored plaintext.
+                  // Key generation/wrapping (true at-rest encryption) is deferred;
+                  // the column exists so it can be wired later without migration.
         )?;
         // Keep the pre-normalized ANN index in sync for semantic recall.
         db::upsert_memory_vector_index(c, &m.id, embedding.as_deref())?;
@@ -113,13 +115,15 @@ pub async fn recall(ctx: &ToolContext, args: RecallArgs) -> Result<String> {
     };
     let query_str = query.map(|q| q.to_string()).unwrap_or_default();
 
-    // Phase 2 (sync): hybrid candidates + access control.
-    let candidates: Vec<db::Memory> = ctx.db.call(|c| {
+    // Phase 2 (sync): hybrid candidates + access control. Keeps the hybrid
+    // score so a reranker failure can fall back to it instead of poisoning the
+    // result with 0.0.
+    let candidates: Vec<(db::Memory, f32)> = ctx.db.call(|c| {
         if query_str.is_empty() {
-            let mut out: Vec<db::Memory> = Vec::new();
+            let mut out: Vec<(db::Memory, f32)> = Vec::new();
             for m in db::list_memories(c, workspace_id)? {
                 if db::memory_can_read(c, "user", &m) {
-                    out.push(m);
+                    out.push((m, 0.0));
                 }
             }
             out.truncate(limit);
@@ -156,17 +160,22 @@ pub async fn recall(ctx: &ToolContext, args: RecallArgs) -> Result<String> {
                     .filter(|(m, _)| db::memory_can_read(c, "user", m))
                     .collect()
             };
-            Ok(accessible.into_iter().map(|(m, _)| m).collect())
+            Ok(accessible)
         }
     })?;
 
     // Phase 3 (async): rerank candidates when a reranker is configured.
+    // On reranker failure the existing hybrid score is kept so a failed model
+    // doesn't silently bury every candidate at 0.0.
     let ranked: Vec<db::Memory> = if let Some(reranker) = &ctx.reranker {
         // Only the top_k candidates go to the (costly) reranker.
         let top_k = ctx.reranker_top_k;
         let mut scored: Vec<(db::Memory, f32)> = Vec::new();
-        for m in candidates.into_iter().take(top_k) {
-            let score = reranker.rerank(&query_str, &m.content).await.unwrap_or(0.0);
+        for (m, hybrid_score) in candidates.into_iter().take(top_k) {
+            let score = reranker
+                .rerank(&query_str, &m.content)
+                .await
+                .unwrap_or(hybrid_score);
             scored.push((m, score));
         }
         scored.sort_by(|a, b| {
@@ -174,7 +183,11 @@ pub async fn recall(ctx: &ToolContext, args: RecallArgs) -> Result<String> {
         });
         scored.into_iter().map(|(m, _)| m).collect()
     } else {
-        candidates.into_iter().take(limit).collect()
+        candidates
+            .into_iter()
+            .take(limit)
+            .map(|(m, _)| m)
+            .collect()
     };
 
     // Phase 4 (sync): audit trail.
