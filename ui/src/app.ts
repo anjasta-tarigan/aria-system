@@ -127,6 +127,8 @@ interface Ui {
   sidePanelTab: "artifacts" | "files";
   /// Whether the side panel is open.
   sidePanelOpen: boolean;
+  /// User-set width of the side panel (px), adjusted by dragging its left border.
+  sidePanelWidth: number;
   /// Identifier@version of the last auto-opened artifact.
   autoOpenedArtifactId: string | null;
   /// Currently open image lightbox: src data URL + file name.
@@ -157,6 +159,7 @@ const ui: Ui = {
   artifactTab: "preview",
   sidePanelTab: "artifacts",
   sidePanelOpen: true,
+  sidePanelWidth: 440,
   autoOpenedArtifactId: null,
   lightbox: null,
 };
@@ -269,7 +272,10 @@ function render() {
 
   const body = h(
     "div",
-    { class: `app-body ${showArtifact && ui.sidePanelOpen ? "has-artifact" : ""}${!ui.sidePanelOpen ? " side-panel-closed" : ""}` },
+    {
+      class: `app-body ${showArtifact && ui.sidePanelOpen ? "has-artifact" : ""}${!ui.sidePanelOpen ? " side-panel-closed" : ""}`,
+      style: `--side-panel-width: ${ui.sidePanelWidth}px`,
+    },
     sidebar(),
     h("main", { class: "pane" }, detail ? conversationPane(detail, artifactsIndex) : emptyPane()),
     sidePanelNode(activeArtVersion, allVersionsForActive),
@@ -311,6 +317,36 @@ function scheduleRender() {
     renderFrame = null;
     render();
   });
+}
+
+// ----------------------------------------------------------------- side panel resize
+
+/// Drag state for the side-panel resizer handle.
+let resizing = false;
+let resizerStartX = 0;
+let resizerStartWidth = 0;
+
+function onResizerMouseDown(e: MouseEvent) {
+  resizing = true;
+  resizerStartX = e.clientX;
+  resizerStartWidth = ui.sidePanelWidth;
+  e.preventDefault();
+}
+
+function onResizerMouseMove(e: MouseEvent) {
+  if (!resizing) return;
+  const dx = e.clientX - resizerStartX;
+  let newWidth = resizerStartWidth + dx;
+  const maxWidth = Math.floor(window.innerWidth * 0.8);
+  newWidth = Math.max(250, Math.min(newWidth, maxWidth));
+  if (newWidth !== ui.sidePanelWidth) {
+    ui.sidePanelWidth = newWidth;
+    scheduleRender();
+  }
+}
+
+function onResizerMouseUp() {
+  resizing = false;
 }
 
 // --------------------------------------------------------------- sidebar
@@ -2066,42 +2102,47 @@ function renderSidePanelArtifacts(
   return h(
     "aside",
     { class: `side-panel ${sidePanelTab}` },
+    h("div", { class: "side-panel-resizer", onmousedown: onResizerMouseDown }),
     h(
       "div",
-      { class: "side-panel-tabs" },
+      { class: "side-panel-content" },
       h(
-        "button",
-        {
-          class: `side-panel-tab ${active ? "active" : ""}`,
-          onclick: () => {
-            ui.sidePanelTab = "artifacts";
-            render();
+        "div",
+        { class: "side-panel-tabs" },
+        h(
+          "button",
+          {
+            class: `side-panel-tab ${active ? "active" : ""}`,
+            onclick: () => {
+              ui.sidePanelTab = "artifacts";
+              render();
+            },
           },
-        },
-        "Artifacts",
-      ),
-      h(
-        "button",
-        {
-          class: `side-panel-tab ${!active ? "active" : ""}`,
-          onclick: () => {
-            ui.sidePanelTab = "files";
-            render();
+          "Artifacts",
+        ),
+        h(
+          "button",
+          {
+            class: `side-panel-tab ${!active ? "active" : ""}`,
+            onclick: () => {
+              ui.sidePanelTab = "files";
+              render();
+            },
           },
-        },
-        "Files",
+          "Files",
+        ),
       ),
+      active
+        ? renderArtifactPanel(
+            art,
+            allVersions,
+            artifactTab,
+            onTabChange,
+            onVersionChange,
+            onClose,
+          )
+        : null,
     ),
-    active
-      ? renderArtifactPanel(
-          art,
-          allVersions,
-          artifactTab,
-          onTabChange,
-          onVersionChange,
-          onClose,
-        )
-      : null,
   );
 }
 
@@ -2229,10 +2270,25 @@ function sidePanelNode(
       },
     );
   }
-  if (ui.sidePanelTab === "files") return renderSidePanelFiles(detail.conversation);
-  if (detail.todos.length > 0) return todoPanel(detail);
+  if (ui.sidePanelTab === "files") {
+    return sidePanelWrapper("files", renderSidePanelFiles(detail.conversation));
+  }
+  if (detail.todos.length > 0) {
+    return sidePanelWrapper("todos", todoPanel(detail));
+  }
   // Default: show files view when panel is open but no artifact/todos yet.
-  return renderSidePanelFiles(detail.conversation);
+  return sidePanelWrapper("files", renderSidePanelFiles(detail.conversation));
+}
+
+/// Wrap side panel content (files / todos views) in the .side-panel shell
+/// with the resizer handle. renderSidePanelArtifacts() builds its own shell.
+function sidePanelWrapper(tab: string, content: HTMLElement): HTMLElement {
+  return h(
+    "div",
+    { class: `side-panel ${tab}` },
+    h("div", { class: "side-panel-resizer", onmousedown: onResizerMouseDown }),
+    h("div", { class: "side-panel-content" }, content),
+  );
 }
 
 // ---------------------------------------------------------------- behaviour
@@ -2633,6 +2689,8 @@ export async function start(initialId?: string) {
   }
   unsubscribe = unsub;
   startHealthPoll();
+  window.addEventListener("mousemove", onResizerMouseMove);
+  window.addEventListener("mouseup", onResizerMouseUp);
   await refreshConversations();
   // The default main session is the conversation with no folder. Create one on
   // first launch so the user can talk immediately; afterwards reuse the one we
@@ -2655,6 +2713,8 @@ export function stop() {
   disposed = true;
   unsubscribe?.();
   unsubscribe = null;
+  window.removeEventListener("mousemove", onResizerMouseMove);
+  window.removeEventListener("mouseup", onResizerMouseUp);
   // A leaked interval would double-poll after a hot reload; the guard in
   // startHealthPoll() lets the next boot recreate it cleanly.
   if (healthPoll) {

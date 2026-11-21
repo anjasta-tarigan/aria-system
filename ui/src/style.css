@@ -131,7 +131,7 @@ pre {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 264px 1fr auto;
+  grid-template-columns: 264px 1fr var(--side-panel-width, 440px);
 }
 
 /* ---------------------------------------------------------------- footer */
@@ -729,7 +729,42 @@ button.icon:hover {
   min-width: 0;
   background: var(--side-panel);
   border-left: 1px solid var(--line);
+  position: relative;
   overflow: hidden;
+}
+
+/* Resizer handle on the left border of the side panel. Drag to change width. */
+.side-panel-resizer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  z-index: 1;
+  user-select: none;
+}
+.side-panel-resizer::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--line);
+  transition: width 0.1s ease, background 0.1s ease;
+}
+.side-panel-resizer:hover::before {
+  background: var(--accent);
+  width: 3px;
+}
+
+/* Inner scrolling wrapper for side panel content (keeps resizer visible). */
+.side-panel-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* Side panel tabs (Artifacts | Files). */
