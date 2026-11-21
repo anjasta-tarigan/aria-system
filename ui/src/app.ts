@@ -1458,7 +1458,7 @@ function composerNode(
     oninput: (e: Event) => {
       const t = e.target as HTMLTextAreaElement;
       t.style.height = "auto";
-      t.style.height = `${Math.min(t.scrollHeight, 160)}px`;
+      t.style.height = `${Math.min(t.scrollHeight, 200)}px`;
     },
     onkeydown: (e: KeyboardEvent) => {
       if (e.key === "Enter" && !e.shiftKey) {
@@ -1467,14 +1467,35 @@ function composerNode(
       }
       if (e.key === "Escape") (e.target as HTMLElement).blur();
     },
+    // Forward focus to card so the focus ring appears on the card.
+    onfocus: (e: Event) => {
+      (e.target as HTMLElement).closest(".composer-card")?.classList.add("focused");
+    },
+    onblur: (e: Event) => {
+      (e.target as HTMLElement).closest(".composer-card")?.classList.remove("focused");
+    },
   });
   input.dataset.role = "composer";
 
-  // Mode select (Normal / Creative) — moved from header.
+  // SVG send arrow — same style as Claude/ChatGPT icon button.
+  const sendIcon = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <path d="M2 8L14 8M14 8L9 3M14 8L9 13" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`;
+
+  const sendBtn = h("button", {
+    class: `composer-send${busy ? " disabled" : ""}`,
+    disabled: busy,
+    title: "Send (Enter)",
+    "aria-label": "Send message",
+    html: sendIcon,
+    onclick: () => void send(),
+  });
+
+  // Mode pill chip.
   const modeSelect = h(
     "select",
     {
-      class: "composer-select",
+      class: "composer-chip",
       title: "Creative mode helps build or change Aria itself.",
       "aria-label": "Conversation mode",
       onchange: async (e: Event) => {
@@ -1497,13 +1518,12 @@ function composerNode(
   ) as HTMLSelectElement;
   modeSelect.value = conv.mode;
 
-  // Approval select — moved from header.
+  // Approval pill chip.
   const approvalSelect = h(
     "select",
     {
-      class: "composer-select",
-      title:
-        "When Aria must ask before running a tool. Only risky: reads run silently.",
+      class: "composer-chip",
+      title: "When Aria must ask before running a tool. Only risky: reads run silently.",
       "aria-label": "Approval policy for this chat",
       onchange: async (e: Event) => {
         const value = (e.target as HTMLSelectElement).value;
@@ -1520,32 +1540,26 @@ function composerNode(
         }
       },
     },
-    h("option", { value: "" }, "Approval: Default"),
-    h("option", { value: "always_ask" }, "Approval: Always"),
-    h("option", { value: "auto_approve_safe" }, "Approval: Only risky"),
+    h("option", { value: "" }, "Default approval"),
+    h("option", { value: "always_ask" }, "Always ask"),
+    h("option", { value: "auto_approve_safe" }, "Only risky"),
   ) as HTMLSelectElement;
   approvalSelect.value = conv.approval_policy ?? "";
 
-  return h(
+  // The card: textarea on top, toolbar with chips + send button on bottom.
+  const card = h(
     "div",
-    { class: "composer" },
-    h("div", { class: "composer-toolbar" }, modeSelect, approvalSelect),
+    { class: "composer-card" },
+    input,
     h(
       "div",
-      { class: "composer-row" },
-      input,
-      h(
-        "button",
-        {
-          class: "primary send",
-          disabled: busy,
-          title: "Send (Enter)",
-          onclick: () => void send(),
-        },
-        "Send",
-      ),
+      { class: "composer-footer" },
+      h("div", { class: "composer-chips" }, modeSelect, approvalSelect),
+      sendBtn,
     ),
   );
+
+  return h("div", { class: "composer" }, card);
 }
 
 function todoPanel(detail: ConversationDetail): HTMLElement {
