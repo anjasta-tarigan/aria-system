@@ -1397,7 +1397,44 @@ function messageNode(
       h("time", { class: "when" }, fmt(m.created_at)),
     ),
     ...bodyNodes,
+    ...(m.reasoning ? [reasoningNode(m)] : []),
     ...m.tool_calls.map(toolCard),
+  );
+}
+
+/// Collapsed-by-default reasoning block explaining the model's thought process
+/// ahead of its tool calls or final answer. Toggled like tool-call cards.
+function reasoningNode(m: MessageView): HTMLElement {
+  const key = `reasoning-${m.id}`;
+  const expanded = ui.expanded.has(key);
+  return h(
+    "div",
+    { class: `reasoning-block ${expanded ? "expanded" : ""}` },
+    h(
+      "button",
+      {
+        class: "reasoning-head",
+        onclick: () => {
+          if (expanded) ui.expanded.delete(key);
+          else ui.expanded.add(key);
+          render();
+        },
+        onkeydown: (e: KeyboardEvent) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            if (expanded) ui.expanded.delete(key);
+            else ui.expanded.add(key);
+            render();
+          }
+        },
+      },
+      h("span", { class: "reasoning-toggle" }, expanded ? "▼" : "▶"),
+      h("span", { class: "reasoning-label" }, "Reasoning"),
+      h("span", { class: "reasoning-hint" }, expanded ? "Hide" : "Show"),
+    ),
+    expanded
+      ? h("div", { class: "reasoning-body markdown", html: renderMarkdown(m.reasoning ?? "") })
+      : null,
   );
 }
 

@@ -1097,6 +1097,7 @@ export function seed(): void {
 
 You can interact with it in the Preview pane, view the code, or download it.`,
         created_at: now() - 60_000,
+        reasoning: "The user wants a self-contained, interactive counter widget with a visible metrics display. I'll wrap it in a single HTML artifact with inline CSS and JavaScript so it runs entirely in the preview pane without external dependencies or build steps.",
         tool_calls: [],
       },
       {
@@ -1170,6 +1171,7 @@ You can interact with it in the Preview pane, view the code, or download it.`,
 
 I updated the widget with an automated increment timer. Use the version switcher at the top to toggle between v1 and v2!`,
         created_at: now() - 10_000,
+        reasoning: "The user asked to add auto-increment speed controls, so this is a v2 update of the same artifact (reusing identifier metrics-counter). I kept the existing counter UI and added an interval-driven auto-increment toggle. Reusing the identifier lets the version switcher surface both v1 and v2.",
         tool_calls: [],
       },
     );

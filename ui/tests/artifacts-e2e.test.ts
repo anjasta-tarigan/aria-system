@@ -35,6 +35,34 @@ async function main() {
   console.log("Card 1 text:", card1Text.replace(/\n/g, " | "));
   console.log("Card 2 text:", card2Text.replace(/\n/g, " | "));
 
+  // Verify collapsed reasoning blocks on assistant messages
+  const reasoningBlocks = page.locator(".reasoning-block");
+  const rbCount = await reasoningBlocks.count();
+  console.log(`Found ${rbCount} reasoning block(s).`);
+  if (rbCount < 1) {
+    throw new Error("Expected at least one reasoning block");
+  }
+  const firstReasoning = reasoningBlocks.first();
+  await firstReasoning.waitFor({ state: "visible" });
+  // Collapsed by default: no .reasoning-body
+  const bodyCount = await firstReasoning.locator(".reasoning-body").count();
+  console.log("Reasoning body visible (collapsed state):", bodyCount === 0 ? "no (correct)" : "yes (wrong)");
+  if (bodyCount !== 0) throw new Error("Reasoning should start collapsed");
+
+  // Toggle open
+  await firstReasoning.locator(".reasoning-head").click();
+  await page.waitForTimeout(200);
+  const bodyCountOpen = await firstReasoning.locator(".reasoning-body").count();
+  console.log("Reasoning body visible (expanded state):", bodyCountOpen === 1 ? "yes (correct)" : "no (wrong)");
+  if (bodyCountOpen !== 1) throw new Error("Reasoning should expand on click");
+
+  // Toggle closed again
+  await firstReasoning.locator(".reasoning-head").click();
+  await page.waitForTimeout(200);
+  const bodyCountClosed = await firstReasoning.locator(".reasoning-body").count();
+  if (bodyCountClosed !== 0) throw new Error("Reasoning should collapse on second click");
+  console.log("Reasoning block toggle works!");
+
   // Verify artifact side panel
   const panel = page.locator(".artifact-panel");
   await panel.waitFor({ state: "visible", timeout: 5000 });

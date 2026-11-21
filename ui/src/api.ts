@@ -52,6 +52,10 @@ export interface MessageView {
   id: string;
   role: Role;
   content: string;
+  /// Optional chain-of-thought / reasoning the model produced before tool calls
+  /// or the final answer. Rendered collapsed by default; the backend does not
+  /// populate this yet — it's a UI seam ready for provider reasoning fields.
+  reasoning?: string;
   created_at: number;
   tool_calls: ToolCall[];
 }
