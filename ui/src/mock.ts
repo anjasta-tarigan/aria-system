@@ -8,6 +8,7 @@
 import {
   KNOWN_EMBEDDING_MODELS,
   type AIProvider,
+  type ProviderModel,
   type ApprovalClass,
   type BackgroundTask,
   type BuiltInTool,
@@ -674,7 +675,7 @@ const handlers: Record<string, Handler> = {
     detail: null,
     providerReachable: true,
     apiKeyPresent: true,
-    model: "mock-model",
+    model: settings.settings.model || "mock-model",
     schemaVersion: 6,
     version: "0.0.0-mock",
   }),
@@ -747,13 +748,18 @@ const handlers: Record<string, Handler> = {
     return structuredClone(p);
   },
   create_ai_provider: (a): AIProvider => {
-    const modelIds = (a.modelIds as string[]) ?? [];
+    let models = (a.models as ProviderModel[]) ?? [];
+    if (!models.length && a.modelIds) {
+      models = (a.modelIds as string[]).map((id) => ({ id, name: id }));
+    }
+    const modelIds = models.map((m) => m.id);
     const p: AIProvider = {
       id: id("prov"),
       name: String(a.name),
       type: "openai-compatible",
       endpointUrl: String(a.endpointUrl),
       apiKeyMasked: "sk••••" + String(a.apiKey).slice(-4),
+      models,
       modelIds,
       defaultModelId: String(a.defaultModelId || modelIds[0] || ""),
       isDefault: aiProviders.length === 0,
@@ -768,9 +774,27 @@ const handlers: Record<string, Handler> = {
     if (a.name !== undefined) p.name = String(a.name);
     if (a.endpointUrl !== undefined) p.endpointUrl = String(a.endpointUrl);
     if (a.apiKey) p.apiKeyMasked = "sk••••" + String(a.apiKey).slice(-4);
-    if (a.modelIds !== undefined) p.modelIds = a.modelIds as string[];
+    if (a.models !== undefined) {
+      p.models = a.models as ProviderModel[];
+      p.modelIds = p.models.map((m) => m.id);
+    } else if (a.modelIds !== undefined) {
+      p.modelIds = a.modelIds as string[];
+      p.models = p.modelIds.map((id) => ({ id, name: id }));
+    }
     if (a.defaultModelId !== undefined) p.defaultModelId = String(a.defaultModelId);
     return structuredClone(p);
+  },
+  select_model: (a): HealthView => {
+    const modelId = String(a.modelId || "");
+    const providerId = a.providerId ? String(a.providerId) : null;
+    if (providerId) {
+      for (const p of aiProviders) {
+        p.isDefault = p.id === providerId;
+        if (p.id === providerId) p.defaultModelId = modelId;
+      }
+    }
+    settings.settings.model = modelId;
+    return handlers.health({}) as HealthView;
   },
   delete_ai_provider: (a) => {
     const i = aiProviders.findIndex((p) => p.id === a.id);
@@ -947,4 +971,42 @@ export function seed(): void {
     rootPath: "/home/anjasta/Projects/sample-app",
   }) as ConversationView;
   handlers.new_session({ workspaceId: sample.workspace_id });
+
+  if (aiProviders.length === 0) {
+    aiProviders.push(
+      {
+        id: "prov-openai",
+        name: "OpenAI",
+        type: "openai-compatible",
+        endpointUrl: "https://api.openai.com/v1",
+        apiKeyMasked: "sk••••abcd",
+        models: [
+          { id: "gpt-4o", name: "GPT-4o" },
+          { id: "gpt-4o-mini", name: "GPT-4o mini" },
+        ],
+        modelIds: ["gpt-4o", "gpt-4o-mini"],
+        defaultModelId: "gpt-4o",
+        isDefault: true,
+        status: "active",
+        lastTestedAt: Date.now() - 3600_000,
+      },
+      {
+        id: "prov-anthropic",
+        name: "Anthropic (OpenRouter)",
+        type: "openai-compatible",
+        endpointUrl: "https://openrouter.ai/api/v1",
+        apiKeyMasked: "sk••••efgh",
+        models: [
+          { id: "anthropic/claude-3.5-sonnet", name: "Claude 3.5 Sonnet" },
+          { id: "anthropic/claude-3.5-haiku", name: "Claude 3.5 Haiku" },
+        ],
+        modelIds: ["anthropic/claude-3.5-sonnet", "anthropic/claude-3.5-haiku"],
+        defaultModelId: "anthropic/claude-3.5-sonnet",
+        isDefault: false,
+        status: "active",
+        lastTestedAt: Date.now() - 7200_000,
+      },
+    );
+    settings.settings.model = "gpt-4o";
+  }
 }

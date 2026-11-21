@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 const KEYRING_SERVICE: &str = "dev.aria.app";
 const KEYRING_USER: &str = "provider-api-key";
@@ -87,6 +87,71 @@ impl ApprovalPolicy {
     }
 }
 
+/// A model available on an AI provider, with its technical API ID and user display name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderModel {
+    pub id: String,
+    pub name: String,
+}
+
+impl ProviderModel {
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+        let id = id.into().trim().to_string();
+        let n = name.into().trim().to_string();
+        let name = if n.is_empty() { id.clone() } else { n };
+        Self { id, name }
+    }
+}
+
+impl From<&str> for ProviderModel {
+    fn from(s: &str) -> Self {
+        Self::new(s, s)
+    }
+}
+
+impl From<String> for ProviderModel {
+    fn from(s: String) -> Self {
+        Self::new(s.clone(), s)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderModel {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Helper {
+            Str(String),
+            Obj {
+                id: String,
+                #[serde(default)]
+                name: Option<String>,
+            },
+        }
+
+        match Helper::deserialize(deserializer)? {
+            Helper::Str(s) => {
+                let id = s.trim().to_string();
+                Ok(ProviderModel {
+                    name: id.clone(),
+                    id,
+                })
+            }
+            Helper::Obj { id, name } => {
+                let id = id.trim().to_string();
+                let name = match name {
+                    Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+                    _ => id.clone(),
+                };
+                Ok(ProviderModel { id, name })
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AIProvider {
@@ -95,13 +160,20 @@ pub struct AIProvider {
     #[serde(rename = "type", default = "openai_type")]
     pub provider_type: String,
     pub endpoint_url: String,
-    pub model_ids: Vec<String>,
+    #[serde(default, alias = "model_ids", alias = "modelIds")]
+    pub models: Vec<ProviderModel>,
     pub default_model_id: String,
     #[serde(default)]
     pub is_default: bool,
     #[serde(default)]
     pub status: ProviderStatus,
     pub last_tested_at: Option<i64>,
+}
+
+impl AIProvider {
+    pub fn model_ids(&self) -> Vec<String> {
+        self.models.iter().map(|m| m.id.clone()).collect()
+    }
 }
 
 fn openai_type() -> String {
@@ -233,7 +305,7 @@ impl Settings {
         };
         let base_url = p.endpoint_url.clone();
         let model = if p.default_model_id.is_empty() {
-            p.model_ids.first().cloned().unwrap_or_default()
+            p.models.first().map(|m| m.id.clone()).unwrap_or_default()
         } else {
             p.default_model_id.clone()
         };

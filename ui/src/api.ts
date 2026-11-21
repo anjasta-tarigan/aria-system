@@ -249,18 +249,22 @@ export const api = {
     name: string;
     endpointUrl: string;
     apiKey: string;
-    modelIds: string[];
+    models?: ProviderModel[];
+    modelIds?: string[];
     defaultModelId: string;
   }) => invoke<AIProvider>("create_ai_provider", p),
   updateAiProvider: (id: string, p: {
     name?: string;
     endpointUrl?: string;
     apiKey?: string; // omit to keep current
+    models?: ProviderModel[];
     modelIds?: string[];
     defaultModelId?: string;
   }) => invoke<AIProvider>("update_ai_provider", { id, ...p }),
   deleteAiProvider: (id: string) => invoke<void>("delete_ai_provider", { id }),
   setDefaultAiProvider: (id: string) => invoke<void>("set_default_ai_provider", { id }),
+  selectModel: (providerId: string | null, modelId: string) =>
+    invoke<HealthView>("select_model", { providerId, modelId }),
   /// Test a saved provider, or the unsaved Add/Edit form (no id). A blank
   /// apiKey on the draft falls back to the stored key.
   testAiProvider: (p: {
@@ -344,12 +348,18 @@ export interface Memory {
 
 export type ProviderType = "openai-compatible";
 
+export interface ProviderModel {
+  id: string;
+  name: string;
+}
+
 export interface AIProvider {
   id: string;
   name: string;
   type: ProviderType;
   endpointUrl: string; // base URL, e.g. https://api.openai.com/v1
   apiKeyMasked: string; // server returns masked only
+  models?: ProviderModel[];
   modelIds: string[];
   defaultModelId: string;
   isDefault: boolean;
@@ -468,6 +478,20 @@ export function maskKey(key: string): string {
   return `${k.slice(0, 2)}${"•".repeat(4)}${k.slice(-4)}`;
 }
 
+/** Dedupe a list of ProviderModels case-sensitively by ID, trim, drop empties. */
+export function dedupeModels(models: ProviderModel[]): ProviderModel[] {
+  const seen = new Set<string>();
+  const out: ProviderModel[] = [];
+  for (const m of models) {
+    const id = m.id.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const name = m.name?.trim() || id;
+    out.push({ id, name });
+  }
+  return out;
+}
+
 /** Dedupe a list of model ids case-sensitively, trim, drop empties. */
 export function dedupeModelIds(ids: string[]): string[] {
   const seen = new Set<string>();
@@ -495,7 +519,8 @@ export function validateProviderForm(f: {
   name: string;
   endpointUrl: string;
   apiKey: string; // "" on edit means "keep current"
-  modelIds: string[];
+  models?: ProviderModel[];
+  modelIds?: string[];
 }): Record<string, string> {
   const errors: Record<string, string> = {};
   const name = f.name.trim();
@@ -504,8 +529,9 @@ export function validateProviderForm(f: {
   if (!f.endpointUrl.trim()) errors.endpointUrl = "Enter the endpoint base URL.";
   else if (!isValidEndpoint(f.endpointUrl))
     errors.endpointUrl = "Enter a valid URL starting with https:// (http://localhost allowed).";
-  if (f.modelIds.length === 0) errors.modelIds = "Add at least one model id.";
-  if (f.modelIds.length > 50) errors.modelIds = "A provider can have at most 50 models.";
+  const count = f.models !== undefined ? f.models.length : (f.modelIds?.length ?? 0);
+  if (count === 0) errors.modelIds = "Add at least one model id.";
+  if (count > 50) errors.modelIds = "A provider can have at most 50 models.";
   return errors;
 }
 

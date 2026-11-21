@@ -2,6 +2,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
+  type AIProvider,
   type ApprovalClass,
   type BackgroundTask,
   type ChangedFile,
@@ -106,6 +107,8 @@ interface Ui {
   systemAccessId: string | null;
   /// Latest system health snapshot for the footer (polled in the background).
   health: HealthView | null;
+  /// Available AI providers (polled or fetched for model selection).
+  providers: AIProvider[];
   /// Whether the Files panel is visible (user can dismiss it).
   filesVisible: boolean;
   /// Whether the Background Tasks panel is visible (user can dismiss it).
@@ -131,6 +134,7 @@ const ui: Ui = {
   systemAccessId: null,
   /// Latest system health snapshot for the footer (polled in the background).
   health: null as HealthView | null,
+  providers: [] as AIProvider[],
   filesVisible: true,
   bgVisible: true,
 };
@@ -166,6 +170,11 @@ async function pollHealth() {
     ui.health = await call.invoke<HealthView>("health");
   } catch {
     ui.health = null;
+  }
+  try {
+    ui.providers = await call.invoke<AIProvider[]>("list_ai_providers");
+  } catch {
+    // Keep current providers
   }
   if (ui.health) renderFooterOnly();
 }
@@ -713,7 +722,9 @@ function positionMenu() {
   const r = menuAnchor.getBoundingClientRect();
   const mw = menuEl.offsetWidth;
   const mh = menuEl.offsetHeight;
-  let left = Math.min(r.right - mw, window.innerWidth - mw - 8);
+  let left = menuEl.classList.contains("model-tree-popover")
+    ? Math.min(r.left, window.innerWidth - mw - 8)
+    : Math.min(r.right - mw, window.innerWidth - mw - 8);
   let top = r.bottom + 4;
   if (top + mh > window.innerHeight - 8) top = r.top - mh - 4;
   menuEl.style.left = `${Math.max(8, left)}px`;
@@ -1553,18 +1564,21 @@ function composerNode(
 
   // ── bottom toolbar chips ──────────────────────────────────────────────────
 
-  // Model chip: shows truncated model from health, clicking opens inline edit.
+  // Model chip: shows model display name, clicking opens tree popover.
   const currentModel = ui.health?.model ?? "";
-  const modelLabel = currentModel
-    ? (currentModel.includes("/") ? currentModel.split("/").pop()! : currentModel)
-    : "No model";
+  const modelLabel = getModelDisplayName(currentModel, ui.providers);
+  const modelTitle = currentModel
+    ? (modelLabel !== currentModel
+        ? `Model: ${modelLabel} (${currentModel})\nClick to change`
+        : `Model: ${currentModel}\nClick to change`)
+    : "No model configured — click to set";
   const modelChip = h("button", {
     class: `composer-chip model-chip${!currentModel ? " model-unset" : ""}`,
-    title: currentModel ? `Model: ${currentModel}\nClick to change` : "No model configured — click to set",
+    title: modelTitle,
     "aria-label": "Change model",
     onclick: (e: MouseEvent) => {
       e.stopPropagation();
-      openModelEditor(e.currentTarget as HTMLElement, currentModel);
+      void openModelSelector(e.currentTarget as HTMLElement, currentModel);
     },
   },
     h("span", { class: "model-chip-icon", "aria-hidden": "true" }, "◈"),
@@ -1644,31 +1658,133 @@ function composerNode(
   return h("div", { class: "composer" }, card);
 }
 
-// Inline model editor: a small popover anchored to the model chip.
-function openModelEditor(anchor: HTMLElement, current: string) {
-  // Reuse the existing context-menu infrastructure for positioning.
+function getModelDisplayName(modelId: string, providers: AIProvider[]): string {
+  if (!modelId) return "No model";
+  for (const p of providers) {
+    const m = p.models?.find((x) => x.id === modelId);
+    if (m && m.name) return m.name;
+  }
+  return modelId.includes("/") ? modelId.split("/").pop()! : modelId;
+}
+
+// Tree-style model selector dropdown grouped by provider.
+async function openModelSelector(anchor: HTMLElement, current: string) {
   closeMenu();
+  try {
+    ui.providers = await call.invoke<AIProvider[]>("list_ai_providers");
+  } catch {
+    // Keep cached providers
+  }
+
   const container = document.createElement("div");
-  container.className = "model-editor ctx-menu";
+  container.className = "model-tree-popover ctx-menu";
 
-  const inp = document.createElement("input");
-  inp.type = "text";
-  inp.value = current;
-  inp.placeholder = "e.g. openai/gpt-4o";
-  inp.className = "model-editor-input";
-  inp.spellcheck = false;
+  const totalModels = ui.providers.reduce(
+    (acc, p) => acc + (p.models?.length || p.modelIds?.length || 0),
+    0,
+  );
 
-  const save = async () => {
-    const model = inp.value.trim();
-    if (!model || model === current) { closeMenu(); return; }
+  const header = h(
+    "div",
+    { class: "model-tree-header" },
+    h("span", {}, "Select Model"),
+    h("span", { class: "small muted" }, `${totalModels} available`),
+  );
+
+  const scroll = h("div", { class: "model-tree-scroll" });
+
+  let hasModels = false;
+  for (const p of ui.providers) {
+    const models = p.models?.length
+      ? p.models
+      : (p.modelIds || []).map((id) => ({ id, name: id }));
+    if (!models.length) continue;
+    hasModels = true;
+
+    const group = h(
+      "div",
+      { class: "model-tree-group" },
+      h(
+        "div",
+        { class: "model-tree-provider-label" },
+        h("span", { class: "model-tree-provider-icon", "aria-hidden": "true" }, "⬡"),
+        h("span", {}, p.name),
+        p.isDefault ? h("span", { class: "model-tree-provider-badge" }, "Default") : null,
+      ),
+      h(
+        "div",
+        { class: "model-tree-items" },
+        ...models.map((m) => {
+          const isActive = m.id === current;
+          return h(
+            "button",
+            {
+              type: "button",
+              class: `model-tree-item${isActive ? " is-active" : ""}`,
+              title: `${m.name} (${m.id})`,
+              onclick: async () => {
+                try {
+                  ui.health = await call.invoke<HealthView>("select_model", {
+                    providerId: p.id,
+                    modelId: m.id,
+                  });
+                  ui.providers = await call.invoke<AIProvider[]>("list_ai_providers");
+                  closeMenu();
+                  render();
+                } catch (e) {
+                  ui.notice = String(e);
+                  closeMenu();
+                  render();
+                }
+              },
+            },
+            h(
+              "div",
+              { class: "model-tree-item-info" },
+              h("span", { class: "model-tree-item-name" }, m.name),
+              m.name !== m.id ? h("span", { class: "model-tree-item-id" }, m.id) : null,
+            ),
+            isActive ? h("span", { class: "model-tree-item-check", "aria-hidden": "true" }, "✓") : null,
+          );
+        }),
+      ),
+    );
+    scroll.appendChild(group);
+  }
+
+  if (!hasModels) {
+    scroll.appendChild(
+      h("div", { class: "model-tree-empty" }, "No models configured in Settings."),
+    );
+  }
+
+  const customInp = h("input", {
+    type: "text",
+    class: "model-tree-custom-input",
+    placeholder: "Custom model ID…",
+    value: current,
+    spellcheck: "false",
+    onkeydown: (e: KeyboardEvent) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        void applyCustom();
+      }
+      if (e.key === "Escape") closeMenu();
+    },
+  }) as HTMLInputElement;
+
+  const applyCustom = async () => {
+    const model = customInp.value.trim();
+    if (!model || model === current) {
+      closeMenu();
+      return;
+    }
     try {
-      // Load current settings, patch model, save back.
-      const sv = await call.invoke<{ settings: { base_url: string; model: string; embedding_base_url: string | null; embedding_model: string | null; search_provider: string | null; search_base_url: string | null; approval_policy: string } }>("get_settings");
-      await call.invoke("set_settings", {
-        input: { ...sv.settings, model },
+      ui.health = await call.invoke<HealthView>("select_model", {
+        providerId: null,
+        modelId: model,
       });
-      // Health poll will pick it up; force one now.
-      ui.health = await call.invoke("health");
+      ui.providers = await call.invoke<AIProvider[]>("list_ai_providers");
       closeMenu();
       render();
     } catch (e) {
@@ -1678,24 +1794,42 @@ function openModelEditor(anchor: HTMLElement, current: string) {
     }
   };
 
-  inp.onkeydown = (e) => {
-    if (e.key === "Enter") { e.preventDefault(); void save(); }
-    if (e.key === "Escape") closeMenu();
-  };
+  const applyBtn = h(
+    "button",
+    {
+      type: "button",
+      class: "primary model-tree-custom-btn",
+      onclick: () => void applyCustom(),
+    },
+    "Set",
+  );
 
-  const btn = document.createElement("button");
-  btn.textContent = "Apply";
-  btn.className = "primary";
-  btn.onclick = () => void save();
+  const settingsLink = h(
+    "button",
+    {
+      type: "button",
+      class: "model-tree-settings-link",
+      onclick: () => {
+        closeMenu();
+        void openSettings();
+      },
+    },
+    "⚙ Manage AI providers in Settings",
+  );
 
-  container.append(inp, btn);
+  const footer = h(
+    "div",
+    { class: "model-tree-footer" },
+    h("div", { class: "model-tree-custom-row" }, customInp, applyBtn),
+    settingsLink,
+  );
+
+  container.append(header, scroll, footer);
   document.body.appendChild(container);
   menuEl = container as HTMLDivElement;
   menuAnchor = anchor;
   positionMenu();
   setTimeout(() => {
-    inp.focus();
-    inp.select();
     window.addEventListener("click", onMenuOutside, true);
     window.addEventListener("keydown", onMenuKey, true);
   }, 0);
@@ -1902,7 +2036,13 @@ async function jumpToHit(hit: MessageHit) {
 }
 
 async function openSettings() {
-  openSettingsModal(call, () => void reloadAfterDatabaseChange());
+  openSettingsModal(
+    call,
+    () => void reloadAfterDatabaseChange(),
+    () => {
+      void pollHealth().then(() => render());
+    },
+  );
 }
 
 /// A reset or import replaced every row: drop the open chat and start over on

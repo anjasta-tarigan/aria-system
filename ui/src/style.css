@@ -1473,17 +1473,174 @@ button.approval-locked:hover {
   color: var(--warn) !important;
 }
 
-/* Inline model editor popover. */
-.model-editor {
+/* Composer tree-style model popover */
+.model-tree-popover {
+  width: 320px;
+  max-height: 420px;
   display: flex;
-  gap: var(--sp-2);
-  padding: var(--sp-2);
-  min-width: 260px;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
 }
 
-.model-editor-input {
+.model-tree-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--panel);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.model-tree-scroll {
+  overflow-y: auto;
   flex: 1;
-  font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  padding: var(--sp-1) 0;
+}
+
+.model-tree-group {
+  margin-bottom: var(--sp-1);
+}
+
+.model-tree-group:last-child {
+  margin-bottom: 0;
+}
+
+.model-tree-provider-label {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 6px var(--sp-3) 4px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+.model-tree-provider-icon {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.model-tree-provider-badge {
+  font-size: 9px;
+  font-weight: 500;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--accent);
+  margin-left: auto;
+}
+
+.model-tree-items {
+  display: flex;
+  flex-direction: column;
+}
+
+.model-tree-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 6px var(--sp-3) 6px calc(var(--sp-3) + 14px);
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  position: relative;
+  transition: background 0.1s;
+}
+
+.model-tree-item::before {
+  content: "├─";
+  position: absolute;
+  left: var(--sp-3);
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.model-tree-items .model-tree-item:last-child::before {
+  content: "└─";
+}
+
+.model-tree-item:hover {
+  background: var(--panel);
+}
+
+.model-tree-item.is-active {
+  background: var(--panel);
+  color: var(--accent);
+}
+
+.model-tree-item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.model-tree-item-name {
+  font-weight: 500;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-tree-item.is-active .model-tree-item-name {
+  color: var(--accent);
+}
+
+.model-tree-item-id {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  font-family: ui-monospace, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-tree-item-check {
+  font-size: var(--fs-sm);
+  color: var(--accent);
+  margin-left: var(--sp-2);
+  flex: none;
+}
+
+.model-tree-empty {
+  padding: var(--sp-4) var(--sp-3);
+  text-align: center;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+
+.model-tree-footer {
+  border-top: 1px solid var(--line);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.model-tree-custom-row {
+  display: flex;
+  gap: var(--sp-1);
+}
+
+.model-tree-custom-input {
+  flex: 1;
+  font-family: ui-monospace, Menlo, monospace;
   font-size: var(--fs-xs);
   padding: 4px var(--sp-2);
   background: var(--panel-2);
@@ -1492,10 +1649,33 @@ button.approval-locked:hover {
   color: var(--text);
 }
 
-.model-editor button {
-  padding: 3px var(--sp-3);
+.model-tree-custom-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.model-tree-custom-btn {
+  padding: 3px var(--sp-2);
   font-size: var(--fs-xs);
   flex: none;
+}
+
+.model-tree-settings-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.model-tree-settings-link:hover {
+  color: var(--text);
 }
 
 /* Attachment row inside the card, above the textarea. */
@@ -2135,6 +2315,106 @@ button.primary.danger {
 
 .tag-remove:hover {
   color: var(--bad);
+}
+
+/* ---- settings: model manager (id & display name) ---- */
+
+.model-manager-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  max-height: 160px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  padding: var(--sp-1);
+}
+
+.model-manager-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 4px var(--sp-2);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.model-manager-id-wrap {
+  flex: 0 0 160px;
+  overflow: hidden;
+}
+
+.model-manager-id {
+  display: inline-block;
+  max-width: 100%;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: var(--fs-xs);
+  color: var(--accent);
+  background: var(--panel);
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-manager-name-input {
+  flex: 1;
+  font-size: var(--fs-xs);
+  padding: 4px var(--sp-2);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+}
+
+.model-manager-name-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.models-empty-hint {
+  padding: var(--sp-3);
+  text-align: center;
+}
+
+.add-model-row {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+}
+
+.add-model-input {
+  font-size: var(--fs-xs);
+  padding: 5px var(--sp-2);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+}
+
+.add-model-input.id-input {
+  flex: 0 0 160px;
+  font-family: ui-monospace, Menlo, monospace;
+}
+
+.add-model-input.name-input {
+  flex: 1;
+}
+
+.add-model-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.add-model-btn {
+  flex: none;
+  font-size: var(--fs-xs);
+  padding: 5px var(--sp-3);
+  white-space: nowrap;
 }
 
 /* ---- inline results, callouts ---- */

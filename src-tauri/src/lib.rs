@@ -225,6 +225,7 @@ pub struct AIProviderView {
     pub provider_type: String,
     pub endpoint_url: String,
     pub api_key_masked: String,
+    pub models: Vec<aria_core::config::ProviderModel>,
     pub model_ids: Vec<String>,
     pub default_model_id: String,
     pub is_default: bool,
@@ -309,7 +310,8 @@ fn provider_view(config: &Config, p: &AIProvider) -> AIProviderView {
         provider_type: p.provider_type.clone(),
         endpoint_url: p.endpoint_url.clone(),
         api_key_masked: masked,
-        model_ids: p.model_ids.clone(),
+        models: p.models.clone(),
+        model_ids: p.model_ids(),
         default_model_id: p.default_model_id.clone(),
         is_default: p.is_default,
         status: p.status,
@@ -1443,20 +1445,28 @@ fn create_ai_provider(
     name: String,
     endpoint_url: String,
     api_key: String,
-    model_ids: Vec<String>,
+    models: Option<Vec<aria_core::config::ProviderModel>>,
+    model_ids: Option<Vec<String>>,
     default_model_id: String,
 ) -> CmdResult<AIProviderView> {
     use aria_core::settings::{self, SettingsError};
     let config = &state.inner.config;
     let mut s = config.load().map_err(err)?;
 
-    let model_ids = settings::dedupe_models(&model_ids);
+    let raw_models = models.unwrap_or_else(|| {
+        model_ids
+            .unwrap_or_default()
+            .into_iter()
+            .map(|id| aria_core::config::ProviderModel::new(id.clone(), id))
+            .collect()
+    });
+    let models = settings::dedupe_models(&raw_models);
     let default_model_id = if default_model_id.trim().is_empty() {
-        model_ids.first().cloned().unwrap_or_default()
+        models.first().map(|m| m.id.clone()).unwrap_or_default()
     } else {
         default_model_id.trim().to_string()
     };
-    settings::validate_provider(&s, None, &name, &endpoint_url, &model_ids, &default_model_id, &api_key)
+    settings::validate_provider(&s, None, &name, &endpoint_url, &models, &default_model_id, &api_key)
         .map_err(|e: SettingsError| e.to_string())?;
 
     let id = aria_core::db::uuid_v7();
@@ -1470,7 +1480,7 @@ fn create_ai_provider(
         name: name.trim().to_string(),
         provider_type: "openai-compatible".to_string(),
         endpoint_url,
-        model_ids,
+        models,
         default_model_id,
         // The first provider becomes the default automatically.
         is_default: s.ai_providers.is_empty(),
@@ -1493,6 +1503,7 @@ fn update_ai_provider(
     name: Option<String>,
     endpoint_url: Option<String>,
     api_key: Option<String>,
+    models: Option<Vec<aria_core::config::ProviderModel>>,
     model_ids: Option<Vec<String>>,
     default_model_id: Option<String>,
 ) -> CmdResult<AIProviderView> {
@@ -1511,9 +1522,17 @@ fn update_ai_provider(
     let endpoint_url = endpoint_url
         .map(|e| e.trim().to_string())
         .unwrap_or_else(|| s.ai_providers[idx].endpoint_url.clone());
-    let model_ids = model_ids
-        .map(|m| settings::dedupe_models(&m))
-        .unwrap_or_else(|| s.ai_providers[idx].model_ids.clone());
+    let models = if let Some(m) = models {
+        settings::dedupe_models(&m)
+    } else if let Some(m) = model_ids {
+        let converted: Vec<aria_core::config::ProviderModel> = m
+            .into_iter()
+            .map(|id| aria_core::config::ProviderModel::new(id.clone(), id))
+            .collect();
+        settings::dedupe_models(&converted)
+    } else {
+        s.ai_providers[idx].models.clone()
+    };
     let default_model_id = default_model_id
         .map(|d| d.trim().to_string())
         .filter(|d| !d.is_empty())
@@ -1525,7 +1544,7 @@ fn update_ai_provider(
         Some(&id),
         &name,
         &endpoint_url,
-        &model_ids,
+        &models,
         &default_model_id,
         // Only require a key when none is stored yet.
         if config.provider_api_key(&id).ok().flatten().is_some() {
@@ -1544,7 +1563,7 @@ fn update_ai_provider(
     let p = &mut s.ai_providers[idx];
     p.name = name;
     p.endpoint_url = endpoint_url;
-    p.model_ids = model_ids;
+    p.models = models;
     p.default_model_id = default_model_id;
     let view = provider_view(config, p);
     s.sync_runtime_endpoint();
@@ -1589,6 +1608,42 @@ fn set_default_ai_provider(state: State<'_, App>, id: String) -> CmdResult<()> {
     s.sync_runtime_endpoint();
     config.save(&s).map_err(err)?;
     Ok(())
+}
+
+/// Select the active model (and optionally its provider) from the composer model selector.
+#[tauri::command]
+async fn select_model(
+    state: State<'_, App>,
+    provider_id: Option<String>,
+    model_id: String,
+) -> CmdResult<HealthView> {
+    let config = &state.inner.config;
+    let mut s = config.load().map_err(err)?;
+
+    let model_id = model_id.trim().to_string();
+    if model_id.is_empty() {
+        return Err("a model name is required".into());
+    }
+
+    if let Some(pid) = provider_id {
+        let mut endpoint = None;
+        for prov in &mut s.ai_providers {
+            if prov.id == pid {
+                prov.is_default = true;
+                prov.default_model_id = model_id.clone();
+                endpoint = Some(prov.endpoint_url.clone());
+            } else {
+                prov.is_default = false;
+            }
+        }
+        if let Some(ep) = endpoint {
+            s.default_ai_provider_id = Some(pid);
+            s.base_url = ep;
+        }
+    }
+    s.model = model_id;
+    config.save(&s).map_err(err)?;
+    health(state).await
 }
 
 #[tauri::command]
@@ -2163,6 +2218,7 @@ pub fn run() {
             update_ai_provider,
             delete_ai_provider,
             set_default_ai_provider,
+            select_model,
             test_ai_provider,
             fetch_ai_provider_models,
             get_embedding_config,

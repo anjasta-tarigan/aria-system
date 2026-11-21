@@ -8,6 +8,7 @@ import {
   isValidEndpoint,
   maskKey,
   dedupeModelIds,
+  dedupeModels,
   parseModelList,
   validateProviderForm,
   validateEmbeddingForm,
@@ -77,6 +78,25 @@ describe("maskKey", () => {
   });
   it("trims input", () => {
     assert.equal(maskKey("  sk-1234567890abcdef  "), "sk••••cdef");
+  });
+});
+
+describe("dedupeModels", () => {
+  it("removes duplicates case-sensitively by ID and trims", () => {
+    assert.deepEqual(
+      dedupeModels([
+        { id: " a ", name: " Model A " },
+        { id: "a", name: "Another A" },
+        { id: "A", name: "Uppercase A" },
+        { id: "", name: "empty" },
+        { id: "b", name: "" },
+      ]),
+      [
+        { id: "a", name: "Model A" },
+        { id: "A", name: "Uppercase A" },
+        { id: "b", name: "b" },
+      ],
+    );
   });
 });
 

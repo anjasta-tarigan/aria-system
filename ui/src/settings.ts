@@ -11,12 +11,14 @@ import {
   AI_PROVIDERS_KEY,
   KNOWN_EMBEDDING_MODELS,
   dedupeModelIds,
+  dedupeModels,
   isValidEndpoint,
   normalizeEndpoint,
   parseModelList,
   validateEmbeddingForm,
   validateProviderForm,
   type AIProvider,
+  type ProviderModel,
   type BuiltInTool,
   type DatabaseInfo,
   type EmbeddingConfig,
@@ -340,7 +342,11 @@ const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
  * Open the Settings modal. `ipc` is the app's invoke adapter so the same code
  * runs against the real backend and the in-browser mock.
  */
-export function openSettings(ipc: Ipc, onDatabaseReplaced?: () => void): void {
+export function openSettings(
+  ipc: Ipc,
+  onDatabaseReplaced?: () => void,
+  onClose?: () => void,
+): void {
   // One dialog at a time; re-opening would stack duplicate focus traps.
   const prevBackdrop = document.querySelector(".settings-backdrop") as (HTMLElement & { _close?: () => void }) | null;
   prevBackdrop?._close?.();
@@ -400,6 +406,7 @@ export function openSettings(ipc: Ipc, onDatabaseReplaced?: () => void): void {
     window.removeEventListener("offline", onOnline);
     overlay.remove();
     returnFocus?.focus?.();
+    onClose?.();
   };
 
   const hasUnsaved = () =>
@@ -560,6 +567,8 @@ export function openSettings(ipc: Ipc, onDatabaseReplaced?: () => void): void {
     render();
     try {
       const endpointUrl = normalizeEndpoint(f.endpointUrl);
+      const models = dedupeModels(f.models);
+      const modelIds = models.map((m) => m.id);
       if (f.id) {
         await ipc.invoke("update_ai_provider", {
           id: f.id,
@@ -567,7 +576,8 @@ export function openSettings(ipc: Ipc, onDatabaseReplaced?: () => void): void {
           endpointUrl,
           // Blank means "keep the stored key"; never send an empty override.
           ...(f.apiKey.trim() ? { apiKey: f.apiKey.trim() } : {}),
-          modelIds: dedupeModelIds(f.modelIds),
+          models,
+          modelIds,
           defaultModelId: f.defaultModelId,
         });
       } else {
@@ -575,7 +585,8 @@ export function openSettings(ipc: Ipc, onDatabaseReplaced?: () => void): void {
           name: f.name.trim(),
           endpointUrl,
           apiKey: f.apiKey.trim(),
-          modelIds: dedupeModelIds(f.modelIds),
+          models,
+          modelIds,
           defaultModelId: f.defaultModelId,
         });
       }
@@ -1218,19 +1229,27 @@ export function openSettings(ipc: Ipc, onDatabaseReplaced?: () => void): void {
           p.lastTestedAt ? STR.ai.testedAt(fmtTime(p.lastTestedAt)) : STR.ai.neverTested,
         ),
       ),
-      p.modelIds.length
-        ? h(
-            "div",
-            { class: "model-chips" },
-            ...p.modelIds.map((m) =>
-              h(
-                "span",
-                { class: `model-chip ${m === p.defaultModelId ? "is-default" : ""}`, title: m },
-                m,
+      (() => {
+        const models = p.models?.length
+          ? p.models
+          : (p.modelIds || []).map((id) => ({ id, name: id }));
+        return models.length
+          ? h(
+              "div",
+              { class: "model-chips" },
+              ...models.map((m) =>
+                h(
+                  "span",
+                  {
+                    class: `model-chip ${m.id === p.defaultModelId ? "is-default" : ""}`,
+                    title: m.name !== m.id ? `${m.name} (${m.id})` : m.id,
+                  },
+                  m.name || m.id,
+                ),
               ),
-            ),
-          )
-        : null,
+            )
+          : null;
+      })(),
       test
         ? h(
             "p",
@@ -1316,8 +1335,8 @@ export function openSettings(ipc: Ipc, onDatabaseReplaced?: () => void): void {
       f.showKey ? STR.ai.hide : STR.ai.show,
     );
 
-    // Tag input: chips live in the DOM; the form state is the source of truth.
-    const chips = h("div", { class: "tag-chips" });
+    // Model manager: list of models with ID and Display Name, plus Add row.
+    const modelsList = h("div", { class: "model-manager-list" });
     const defaultSelect = h("select", {
       id: "provider-default-model",
       onchange: (e: Event) => {
@@ -1329,90 +1348,159 @@ export function openSettings(ipc: Ipc, onDatabaseReplaced?: () => void): void {
       },
     }) as HTMLSelectElement;
 
-    const redrawChips = () => {
-      const ids = state.form!.modelIds;
-      chips.replaceChildren(
-        ...ids.map((m) =>
-          h(
-            "span",
-            { class: "tag" },
-            h("span", { class: "tag-label" }, m),
-            h(
-              "button",
-              {
-                type: "button",
-                class: "tag-remove",
-                "aria-label": STR.ai.removeModel(m),
-                onclick: () => {
-                  const next = state.form!.modelIds.filter((x) => x !== m);
-                  const keepDefault = next.includes(state.form!.defaultModelId)
-                    ? state.form!.defaultModelId
-                    : (next[0] ?? "");
-                  state.form = { ...state.form!, modelIds: next, defaultModelId: keepDefault };
-                  redrawChips();
-                  refreshProviderFooter();
-                },
-              },
-              "×",
-            ),
-          ),
-        ),
-      );
-      // Keep the default-model select in sync with the chips.
+    const syncDefaultSelect = () => {
+      const models = state.form!.models || [];
       defaultSelect.replaceChildren(
-        ...(ids.length
-          ? ids.map((m) => h("option", { value: m }, m))
+        ...(models.length
+          ? models.map((m) =>
+              h(
+                "option",
+                { value: m.id },
+                m.name && m.name !== m.id ? `${m.name} (${m.id})` : m.id,
+              ),
+            )
           : [h("option", { value: "" }, STR.ai.defaultModelHint)]),
       );
-      if (ids.includes(state.form!.defaultModelId)) {
+      if (models.some((m) => m.id === state.form!.defaultModelId)) {
         defaultSelect.value = state.form!.defaultModelId;
-      } else if (ids[0]) {
-        state.form!.defaultModelId = ids[0];
-        defaultSelect.value = ids[0];
+      } else if (models[0]) {
+        state.form!.defaultModelId = models[0].id;
+        defaultSelect.value = models[0].id;
       }
     };
 
-    const addModels = (raw: string[]) => {
-      const next = dedupeModelIds([...state.form!.modelIds, ...raw]).slice(0, 50);
-      const keepDefault = next.includes(state.form!.defaultModelId)
+    const redrawModels = () => {
+      const models = state.form!.models || [];
+      if (!models.length) {
+        modelsList.replaceChildren(
+          h("div", { class: "models-empty-hint small muted" }, "No models added yet. Add at least one model below."),
+        );
+      } else {
+        modelsList.replaceChildren(
+          ...models.map((m) =>
+            h(
+              "div",
+              { class: "model-manager-row" },
+              h("div", { class: "model-manager-id-wrap" },
+                h("span", { class: "model-manager-id", title: m.id }, m.id),
+              ),
+              h("input", {
+                type: "text",
+                class: "model-manager-name-input",
+                value: m.name,
+                placeholder: "Display name (e.g. GPT-4o)",
+                title: "Display name (shown in model selector)",
+                oninput: (e: Event) => {
+                  m.name = (e.target as HTMLInputElement).value;
+                  state.form = { ...state.form! };
+                  syncDefaultSelect();
+                  refreshProviderFooter();
+                },
+              }),
+              h(
+                "button",
+                {
+                  type: "button",
+                  class: "tag-remove",
+                  title: `Remove ${m.name || m.id}`,
+                  "aria-label": `Remove ${m.name || m.id}`,
+                  onclick: () => {
+                    const next = state.form!.models.filter((x) => x.id !== m.id);
+                    const keepDefault = next.some((x) => x.id === state.form!.defaultModelId)
+                      ? state.form!.defaultModelId
+                      : (next[0]?.id ?? "");
+                    state.form = {
+                      ...state.form!,
+                      models: next,
+                      modelIds: next.map((x) => x.id),
+                      defaultModelId: keepDefault,
+                    };
+                    redrawModels();
+                    refreshProviderFooter();
+                  },
+                },
+                "×",
+              ),
+            ),
+          ),
+        );
+      }
+      syncDefaultSelect();
+    };
+
+    const addModels = (newModels: ProviderModel[]) => {
+      const existing = state.form!.models || [];
+      const next = dedupeModels([...existing, ...newModels]).slice(0, 50);
+      const keepDefault = next.some((m) => m.id === state.form!.defaultModelId)
         ? state.form!.defaultModelId
-        : (next[0] ?? "");
-      state.form = { ...state.form!, modelIds: next, defaultModelId: keepDefault, errors: {} };
-      redrawChips();
+        : (next[0]?.id ?? "");
+      state.form = {
+        ...state.form!,
+        models: next,
+        modelIds: next.map((m) => m.id),
+        defaultModelId: keepDefault,
+        errors: {},
+      };
+      redrawModels();
       refreshProviderFooter();
     };
 
-    const tagInput = h("input", {
-      id: "provider-model-input",
+    const newModelIdInput = h("input", {
+      id: "provider-model-id-input",
       type: "text",
-      class: "tag-input",
-      placeholder: STR.ai.modelsPlaceholder,
+      class: "add-model-input id-input",
+      placeholder: "Model ID (e.g. gpt-4o)",
       autocomplete: "off",
       spellcheck: "false",
-      "aria-describedby": errors.modelIds ? "provider-models-error" : "provider-models-help",
       onkeydown: (e: KeyboardEvent) => {
-        if (e.key === "Enter" || e.key === ",") {
+        if (e.key === "Enter") {
           e.preventDefault();
-          const input = e.target as HTMLInputElement;
-          addModels(parseModelList(input.value));
-          input.value = "";
-        } else if (e.key === "Backspace" && !(e.target as HTMLInputElement).value) {
-          const ids = state.form!.modelIds;
-          if (ids.length) {
-            state.form = { ...state.form!, modelIds: ids.slice(0, -1) };
-            redrawChips();
-            refreshProviderFooter();
-          }
+          commitNewModel();
         }
       },
-      onpaste: (e: ClipboardEvent) => {
-        const text = e.clipboardData?.getData("text") ?? "";
-        if (!/[,;\n]/.test(text)) return;
-        e.preventDefault();
-        addModels(parseModelList(text));
-        (e.target as HTMLInputElement).value = "";
+    }) as HTMLInputElement;
+
+    const newModelNameInput = h("input", {
+      id: "provider-model-name-input",
+      type: "text",
+      class: "add-model-input name-input",
+      placeholder: "Display Name (optional)",
+      autocomplete: "off",
+      spellcheck: "false",
+      onkeydown: (e: KeyboardEvent) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commitNewModel();
+        }
       },
     }) as HTMLInputElement;
+
+    const commitNewModel = () => {
+      const idVal = newModelIdInput.value.trim();
+      if (!idVal) return;
+      const nameVal = newModelNameInput.value.trim();
+      if (/[,;\n]/.test(idVal)) {
+        const ids = parseModelList(idVal);
+        addModels(ids.map((id) => ({ id, name: id })));
+      } else {
+        addModels([{ id: idVal, name: nameVal || idVal }]);
+      }
+      newModelIdInput.value = "";
+      newModelNameInput.value = "";
+      newModelIdInput.focus();
+    };
+
+    const addModelBtn = h(
+      "button",
+      {
+        type: "button",
+        class: "ghost add-model-btn",
+        onclick: () => commitNewModel(),
+      },
+      "+ Add",
+    );
+
+    const addModelRow = h("div", { class: "add-model-row" }, newModelIdInput, newModelNameInput, addModelBtn);
 
     const testResult = h("p", { class: "inline-result", role: "status" });
     const testButton = h(
@@ -1543,7 +1631,7 @@ export function openSettings(ipc: Ipc, onDatabaseReplaced?: () => void): void {
       }
     };
 
-    redrawChips();
+    redrawModels();
 
     return panel(
       "ai",
@@ -1590,11 +1678,12 @@ export function openSettings(ipc: Ipc, onDatabaseReplaced?: () => void): void {
       h(
         "div",
         { class: "field" },
-        h("label", { for: "provider-model-input" }, STR.ai.modelsLabel),
-        h("div", { class: "tag-field" }, chips, tagInput),
+        h("label", {}, "Models (ID & Display Name)"),
+        modelsList,
+        addModelRow,
         errors.modelIds
           ? h("p", { class: "field-error", id: "provider-models-error", role: "alert" }, errors.modelIds)
-          : h("p", { class: "field-help", id: "provider-models-help" }, STR.ai.modelsHelp),
+          : h("p", { class: "field-help", id: "provider-models-help" }, "Configure technical model IDs and friendly display names for the composer selector."),
       ),
       h(
         "div",
@@ -2335,6 +2424,7 @@ interface ProviderFormState {
   name: string;
   endpointUrl: string;
   apiKey: string;
+  models: ProviderModel[];
   modelIds: string[];
   defaultModelId: string;
   showKey: boolean;
@@ -2413,6 +2503,7 @@ function blankForm(): ProviderFormState {
     name: "",
     endpointUrl: "",
     apiKey: "",
+    models: [],
     modelIds: [],
     defaultModelId: "",
     showKey: false,
@@ -2425,13 +2516,17 @@ function blankForm(): ProviderFormState {
 }
 
 function formFrom(p: AIProvider): ProviderFormState {
+  const models: ProviderModel[] = p.models?.length
+    ? p.models.map((m) => ({ id: m.id, name: m.name || m.id }))
+    : (p.modelIds || []).map((id) => ({ id, name: id }));
   const f: ProviderFormState = {
     id: p.id,
     name: p.name,
     endpointUrl: p.endpointUrl,
     // Never prefill a key: the backend only ever returns the mask.
     apiKey: "",
-    modelIds: [...p.modelIds],
+    models,
+    modelIds: models.map((m) => m.id),
     defaultModelId: p.defaultModelId,
     showKey: false,
     saving: false,
@@ -2448,7 +2543,7 @@ function formSnapshot(f: ProviderFormState): string {
     name: f.name,
     endpointUrl: f.endpointUrl,
     apiKey: f.apiKey,
-    modelIds: f.modelIds,
+    models: f.models,
     defaultModelId: f.defaultModelId,
   });
 }
@@ -2469,13 +2564,14 @@ function providerErrors(
   f: ProviderFormState,
   providers: AIProvider[],
 ): Record<string, string> {
-  // The shared validator covers name/endpoint/modelIds; the duplicate check
+  // The shared validator covers name/endpoint/models; the duplicate check
   // needs the provider list, which it does not have.
   const base = validateProviderForm({
     name: f.name,
     endpointUrl: f.endpointUrl,
     apiKey: f.id ? "present" : f.apiKey,
-    modelIds: f.modelIds,
+    models: f.models,
+    modelIds: f.models.map((m) => m.id),
   });
   const errors: Record<string, string> = { ...base };
   const duplicate = providers.some(

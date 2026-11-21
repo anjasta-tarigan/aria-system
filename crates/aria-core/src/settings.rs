@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 use crate::config::{
-    AIProvider, ProviderStatus, Settings, WebSearchConfig, WebSearchStatus,
+    AIProvider, ProviderModel, ProviderStatus, Settings, WebSearchConfig, WebSearchStatus,
 };
 use crate::provider::{OpenAiProvider, ProviderError};
 
@@ -135,7 +135,7 @@ pub fn validate_provider(
     editing_id: Option<&str>,
     name: &str,
     endpoint: &str,
-    model_ids: &[String],
+    models: &[ProviderModel],
     default_model_id: &str,
     api_key: &str,
 ) -> Result<()> {
@@ -155,15 +155,15 @@ pub fn validate_provider(
         ));
     }
     normalize_endpoint(endpoint)?;
-    if model_ids.is_empty() {
+    if models.is_empty() {
         return Err(SettingsError::Invalid("Add at least one model id.".into()));
     }
-    if model_ids.len() > 50 {
+    if models.len() > 50 {
         return Err(SettingsError::Invalid(
             "A provider can have at most 50 models.".into(),
         ));
     }
-    if model_ids.len() > 1 && !model_ids.iter().any(|m| m == default_model_id) {
+    if models.len() > 1 && !models.iter().any(|m| m.id == default_model_id) {
         return Err(SettingsError::Invalid(
             "Choose a default model from the model list.".into(),
         ));
@@ -174,20 +174,33 @@ pub fn validate_provider(
     Ok(())
 }
 
-/// Trim, dedupe (case-sensitive), drop empties, and cap at 50.
-pub fn dedupe_models(ids: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for raw in ids {
-        let t = raw.trim();
-        if t.is_empty() || out.iter().any(|m| m == t) {
+/// Trim, dedupe by model id (case-sensitive), drop empties, and cap at 50.
+pub fn dedupe_models(models: &[ProviderModel]) -> Vec<ProviderModel> {
+    let mut out: Vec<ProviderModel> = Vec::new();
+    for m in models {
+        let id = m.id.trim();
+        if id.is_empty() || out.iter().any(|existing| existing.id == id) {
             continue;
         }
-        out.push(t.to_string());
+        let name = if m.name.trim().is_empty() {
+            id.to_string()
+        } else {
+            m.name.trim().to_string()
+        };
+        out.push(ProviderModel {
+            id: id.to_string(),
+            name,
+        });
         if out.len() == 50 {
             break;
         }
     }
     out
+}
+
+pub fn dedupe_model_ids(ids: &[String]) -> Vec<String> {
+    let models: Vec<ProviderModel> = ids.iter().map(|id| ProviderModel::new(id, id)).collect();
+    dedupe_models(&models).into_iter().map(|m| m.id).collect()
 }
 
 /// Result of a provider connectivity probe.
@@ -524,19 +537,26 @@ mod tests {
     #[test]
     fn dedupe_models_is_case_sensitive_and_trims() {
         let out = dedupe_models(&[
-            " a ".into(),
-            "a".into(),
-            "A".into(),
-            "".into(),
-            "b".into(),
+            ProviderModel::new(" a ", " A Model "),
+            ProviderModel::new("a", "a"),
+            ProviderModel::new("A", "A"),
+            ProviderModel::new("", ""),
+            ProviderModel::new("b", "B"),
         ]);
-        assert_eq!(out, vec!["a", "A", "b"]);
+        assert_eq!(
+            out,
+            vec![
+                ProviderModel::new("a", "A Model"),
+                ProviderModel::new("A", "A"),
+                ProviderModel::new("b", "B")
+            ]
+        );
     }
 
     #[test]
     fn provider_validation_rejects_bad_forms() {
         let s = base_settings();
-        let models = vec!["m1".to_string()];
+        let models = vec![ProviderModel::new("m1", "Model 1")];
         assert!(validate_provider(&s, None, "a", "https://x.test", &models, "m1", "k").is_err());
         assert!(validate_provider(&s, None, "Good", "http://x.test", &models, "m1", "k").is_err());
         assert!(validate_provider(&s, None, "Good", "https://x.test", &[], "", "k").is_err());
@@ -577,7 +597,10 @@ mod tests {
             name: "P".into(),
             provider_type: "openai-compatible".into(),
             endpoint_url: "https://api.example.com/v1".into(),
-            model_ids: vec!["m1".into(), "m2".into()],
+            models: vec![
+                ProviderModel::new("m1", "Model 1"),
+                ProviderModel::new("m2", "Model 2"),
+            ],
             default_model_id: "m2".into(),
             is_default: true,
             status: ProviderStatus::Untested,
@@ -587,5 +610,42 @@ mod tests {
         s.sync_runtime_endpoint();
         assert_eq!(s.base_url, "https://api.example.com/v1");
         assert_eq!(s.model, "m2");
+    }
+
+    #[test]
+    fn provider_model_deserialization_compatibility() {
+        // 1. Deserializing legacy model_ids as strings
+        let json_legacy = r#"{
+            "id": "p1",
+            "name": "Legacy",
+            "endpointUrl": "https://api.openai.com/v1",
+            "model_ids": ["gpt-4o", "gpt-4o-mini"],
+            "defaultModelId": "gpt-4o"
+        }"#;
+        let p: AIProvider = serde_json::from_str(json_legacy).unwrap();
+        assert_eq!(p.models.len(), 2);
+        assert_eq!(p.models[0].id, "gpt-4o");
+        assert_eq!(p.models[0].name, "gpt-4o");
+        assert_eq!(p.models[1].id, "gpt-4o-mini");
+
+        // 2. Deserializing new models array with id and name
+        let json_new = r#"{
+            "id": "p2",
+            "name": "New",
+            "endpointUrl": "https://api.openai.com/v1",
+            "models": [
+                {"id": "gpt-4o", "name": "GPT-4o Omnimodel"},
+                {"id": "gpt-4o-mini", "name": "GPT-4o Mini"}
+            ],
+            "defaultModelId": "gpt-4o"
+        }"#;
+        let p2: AIProvider = serde_json::from_str(json_new).unwrap();
+        assert_eq!(p2.models[0].id, "gpt-4o");
+        assert_eq!(p2.models[0].name, "GPT-4o Omnimodel");
+        assert_eq!(p2.models[1].name, "GPT-4o Mini");
+
+        // 3. Roundtrip preserves display name
+        let serialized = serde_json::to_string(&p2).unwrap();
+        assert!(serialized.contains("GPT-4o Omnimodel"));
     }
 }
