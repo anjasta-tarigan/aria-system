@@ -25,6 +25,7 @@ import { api } from "./api";
 import { mockFaults, mockInvoke, mockListen, seed } from "./mock";
 import { h } from "./dom";
 import { openSettings as openSettingsModal } from "./settings";
+import { openExtensions } from "./extensions";
 import { renderMarkdown } from "./format";
 import {
   type ArtifactVersion,
@@ -505,7 +506,7 @@ function sidebar(): HTMLElement {
     { class: "sidebar-menu" },
     h(
       "button",
-      { class: "menu-item", title: "Extensions", onclick: () => {} },
+      { class: "menu-item", title: "Extensions", onclick: () => void openExtensions(call) },
       h("span", { class: "menu-icon" }, "🧩"),
       h("span", { class: "menu-label" }, "Extensions"),
     ),
