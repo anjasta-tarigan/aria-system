@@ -23,7 +23,7 @@ use crate::db::{
     ToolCallState,
 };
 use crate::journal::Blobs;
-use crate::provider::{ChatMessage, Provider, ProviderEvent, ToolCallRequest};
+use crate::provider::{ChatMessage, ContentPart, Provider, ProviderEvent, ToolCallRequest};
 use crate::tools::{self, BackgroundTasks, ToolContext, ToolOutcome, ToolRegistry};
 use crate::tools::search::{SearchConfig, SearchProvider};
 use crate::workspace::{Scope, WorkspaceRoot};
@@ -49,6 +49,9 @@ const MAX_CONTEXT_CHARS: usize = 300_000;
 /// Input describing one file to attach to the user's message. The caller
 /// (Tauri layer) reads the file and stores its bytes in the blob store;
 /// `blob_hash` is the content-addressed key returned by [`Blobs::put`].
+/// `data_url` is set for images (base64 data URL) so the provider can render
+/// them inline. `extracted_text` is set for documents (PDF, docx, txt) so the
+/// text can be included in the user message.
 #[derive(Debug, Clone)]
 pub struct AttachmentInput {
     pub name: String,
@@ -56,6 +59,10 @@ pub struct AttachmentInput {
     pub mime_type: String,
     pub size: i64,
     pub blob_hash: String,
+    /// Base64 data URL for images (e.g. `data:image/png;base64,...`).
+    pub data_url: Option<String>,
+    /// Extracted text for documents (PDF, docx, plain text).
+    pub extracted_text: Option<String>,
 }
 
 /// Floor for the context retry: about 4k tokens, small enough for the
@@ -262,6 +269,12 @@ impl Agent {
     }
 
     /// Append the user's message and start a Run for it.
+    ///
+    /// Image attachments with a `data_url` are sent to the model as multimodal
+    /// `image_url` content parts. Document attachments with `extracted_text`
+    /// have that text appended to the user message. The first user message is
+    /// passed to [`spawn_loop`] so the multimodal parts survive the DB reload
+    /// in [`request_messages`].
     pub async fn start(
         &self,
         conversation_id: &str,
@@ -282,7 +295,22 @@ impl Agent {
                         value: format!("{} is still {}", run.id, run.state),
                     });
                 }
-                let msg = db::insert_message(c, &conv, None, Role::User, &text, None)?;
+                // Build multimodal content: append extracted text from document
+                // attachments to the user text, collect image data URLs.
+                let mut full_text = text;
+                let mut image_urls = Vec::new();
+                for a in &atts {
+                    if let Some(extracted) = &a.extracted_text {
+                        full_text.push_str(&format!("\n\n--- {}\n{}", a.name, extracted));
+                    }
+                    if a.mime_type.starts_with("image/") {
+                        if let Some(url) = &a.data_url {
+                            image_urls.push(url.clone());
+                        }
+                    }
+                }
+                let first_user = ChatMessage::user_with_images(full_text.clone(), image_urls);
+                let msg = db::insert_message(c, &conv, None, Role::User, &full_text, None)?;
                 for a in &atts {
                     db::insert_attachment(
                         c,
@@ -294,11 +322,13 @@ impl Agent {
                         &a.blob_hash,
                     )?;
                 }
-                db::insert_run(c, &conv)
+                let run = db::insert_run(c, &conv)?;
+                Ok((run, msg.id, first_user))
             })
         })
         .await?;
-        self.spawn_loop(run.id)
+        let (run, msg_id, first_user) = run;
+        self.spawn_loop(run.id, Some((msg_id, first_user)))
     }
 
     /// Reopen a `budget_exhausted` Run and keep going.
@@ -322,7 +352,7 @@ impl Agent {
         if run.state == RunState::BudgetExhausted {
             return Err(AgentError::NotResumable(run.id, run.state));
         }
-        self.spawn_loop(run.id)
+        self.spawn_loop(run.id, None)
     }
 
     /// Take over a Run that a previous process left `running` or
@@ -345,7 +375,7 @@ impl Agent {
             })
         })
         .await?;
-        self.spawn_loop(run.id)
+        self.spawn_loop(run.id, None)
     }
 
     /// Persist a decision on a pending Approval. The loop picks it up within
@@ -378,7 +408,11 @@ impl Agent {
         Ok(RunSnapshot { run, pending, todos })
     }
 
-    fn spawn_loop(&self, run_id: String) -> Result<RunHandle> {
+    fn spawn_loop(
+        &self,
+        run_id: String,
+        first_user_message: Option<(String, ChatMessage)>,
+    ) -> Result<RunHandle> {
         let (events, _) = broadcast::channel(1024);
         let handle = RunHandle {
             run_id: run_id.clone(),
@@ -450,6 +484,7 @@ impl Agent {
             conversation_id: conversation.id.clone(),
             conversation_policy: conversation.approval_policy,
             auto_approve_run: false,
+            first_user_message,
             reasoning_so_far: String::new(),
         };
         tokio::spawn(ctx.run_to_end());
@@ -584,6 +619,11 @@ struct LoopCtx {
     conversation_policy: Option<ApprovalPolicy>,
     /// Set by "Allow all this run"; suppresses every further approval in it.
     auto_approve_run: bool,
+    /// The first user message of this Run, including multimodal content parts.
+    /// `request_messages` uses it instead of reconstructing from the DB row,
+    /// which only stores plain text. Carries the message id so it can be
+    /// matched against the history row.
+    first_user_message: Option<(String, ChatMessage)>,
     /// Reasoning accumulated for the current Turn, reset at Turn start.
     reasoning_so_far: String,
 }
@@ -1397,7 +1437,15 @@ impl LoopCtx {
 
         for msg in history {
             match msg.role {
-                Role::User => messages.push(ChatMessage::user(msg.content)),
+                Role::User => {
+                    if let Some((id, first)) = &self.first_user_message
+                        && msg.id == *id
+                    {
+                        messages.push(first.clone());
+                    } else {
+                        messages.push(ChatMessage::user(msg.content));
+                    }
+                }
                 Role::Tool => {}
                 Role::Assistant => {
                     let requests = turn_of_message
@@ -1462,19 +1510,21 @@ fn message_chars(message: &ChatMessage) -> usize {
         ChatMessage::System { content } => content.len(),
         ChatMessage::User {
             content,
+            content_parts,
             tool_calls,
             tool_call_id,
-            ..
         } => content.len()
+            + content_parts.iter().map(part_chars).sum::<usize>()
             + calls(tool_calls)
             + tool_call_id.as_ref().map_or(0, String::len),
         ChatMessage::Assistant {
             content,
+            content_parts,
             tool_calls,
             tool_call_id,
             reasoning,
-            ..
         } => content.len()
+            + content_parts.iter().map(part_chars).sum::<usize>()
             + calls(tool_calls)
             + tool_call_id.as_ref().map_or(0, String::len)
             + reasoning.as_ref().map_or(0, String::len),
@@ -1482,6 +1532,14 @@ fn message_chars(message: &ChatMessage) -> usize {
             content,
             tool_call_id,
         } => content.len() + tool_call_id.as_ref().map_or(0, String::len),
+    }
+}
+
+/// Characters contributed by one [`ContentPart`] toward the context budget.
+fn part_chars(part: &ContentPart) -> usize {
+    match part {
+        ContentPart::Text { text } => text.len(),
+        ContentPart::ImageUrl { image_url } => image_url.url.len(),
     }
 }
 
@@ -1507,6 +1565,7 @@ mod tests {
     fn tool_call_arguments_count_toward_the_context() {
         let message = ChatMessage::Assistant {
             content: String::new(),
+            content_parts: Vec::new(),
             tool_calls: vec![ToolCallRequest {
                 id: "call-1".to_string(),
                 function: FunctionCall {

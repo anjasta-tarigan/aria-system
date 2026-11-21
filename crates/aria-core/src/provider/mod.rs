@@ -89,6 +89,11 @@ pub enum ChatMessage {
     },
     User {
         content: String,
+        /// Multimodal content parts (text + images). When non-empty, the
+        /// provider serializes `content` as an array of parts instead of a
+        /// plain string.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        content_parts: Vec<ContentPart>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<ToolCallRequest>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,6 +106,9 @@ pub enum ChatMessage {
         /// support it (e.g. OpenAI o1) can see their own prior reasoning.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning: Option<String>,
+        /// Multimodal content parts (text + images).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        content_parts: Vec<ContentPart>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<ToolCallRequest>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -113,6 +121,22 @@ pub enum ChatMessage {
     },
 }
 
+/// One part of a multimodal message content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrl },
+}
+
+/// An image URL part, matching the OpenAI `image_url` object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageUrl {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
         Self::System {
@@ -123,6 +147,7 @@ impl ChatMessage {
     pub fn user(content: impl Into<String>) -> Self {
         Self::User {
             content: content.into(),
+            content_parts: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
         }
@@ -131,6 +156,7 @@ impl ChatMessage {
     pub fn assistant(content: impl Into<String>, tool_calls: Vec<ToolCallRequest>) -> Self {
         Self::Assistant {
             content: content.into(),
+            content_parts: Vec::new(),
             reasoning: None,
             tool_calls,
             tool_call_id: None,
@@ -145,6 +171,7 @@ impl ChatMessage {
     ) -> Self {
         Self::Assistant {
             content: content.into(),
+            content_parts: Vec::new(),
             reasoning: Some(reasoning.into()),
             tool_calls,
             tool_call_id: None,
@@ -155,6 +182,125 @@ impl ChatMessage {
         Self::Tool {
             content: content.into(),
             tool_call_id: Some(call_id.into()),
+        }
+    }
+
+    /// User message with text plus image attachments (data URLs).
+    pub fn user_with_images(
+        content: impl Into<String>,
+        images: Vec<String>,
+    ) -> Self {
+        let mut parts: Vec<ContentPart> = Vec::new();
+        let text = content.into();
+        if !text.is_empty() {
+            parts.push(ContentPart::Text { text: text.clone() });
+        }
+        for url in images {
+            parts.push(ContentPart::ImageUrl {
+                image_url: ImageUrl { url, detail: None },
+            });
+        }
+        Self::User {
+            content: text,
+            content_parts: parts,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
+    /// Convert to a `serde_json::Value` suitable for the OpenAI chat/completions
+    /// body. When `content_parts` is non-empty, `content` is serialized as an
+    /// array of parts; otherwise as a plain string (backward compatible).
+    pub fn to_openai_value(&self) -> serde_json::Value {
+        match self {
+            ChatMessage::System { content } => {
+                serde_json::json!({ "role": "system", "content": content })
+            }
+            ChatMessage::User {
+                content,
+                content_parts,
+                tool_calls,
+                tool_call_id,
+                ..
+            } => {
+                let mut map = serde_json::Map::new();
+                map.insert("role".into(), serde_json::Value::String("user".into()));
+                if !content_parts.is_empty() {
+                    map.insert(
+                        "content".into(),
+                        serde_json::to_value(content_parts).unwrap_or(serde_json::Value::String(
+                            content.clone(),
+                        )),
+                    );
+                } else {
+                    map.insert("content".into(), serde_json::Value::String(content.clone()));
+                }
+                if !tool_calls.is_empty() {
+                    map.insert(
+                        "tool_calls".into(),
+                        serde_json::to_value(tool_calls).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+                if let Some(id) = tool_call_id {
+                    map.insert(
+                        "tool_call_id".into(),
+                        serde_json::Value::String(id.clone()),
+                    );
+                }
+                serde_json::Value::Object(map)
+            }
+            ChatMessage::Assistant {
+                content,
+                reasoning,
+                content_parts,
+                tool_calls,
+                tool_call_id,
+                ..
+            } => {
+                let mut map = serde_json::Map::new();
+                map.insert("role".into(), serde_json::Value::String("assistant".into()));
+                if !content_parts.is_empty() {
+                    map.insert(
+                        "content".into(),
+                        serde_json::to_value(content_parts).unwrap_or(serde_json::Value::String(
+                            content.clone(),
+                        )),
+                    );
+                } else {
+                    map.insert("content".into(), serde_json::Value::String(content.clone()));
+                }
+                if let Some(r) = reasoning {
+                    map.insert("reasoning".into(), serde_json::Value::String(r.clone()));
+                }
+                if !tool_calls.is_empty() {
+                    map.insert(
+                        "tool_calls".into(),
+                        serde_json::to_value(tool_calls).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+                if let Some(id) = tool_call_id {
+                    map.insert(
+                        "tool_call_id".into(),
+                        serde_json::Value::String(id.clone()),
+                    );
+                }
+                serde_json::Value::Object(map)
+            }
+            ChatMessage::Tool {
+                content,
+                tool_call_id,
+            } => {
+                let mut map = serde_json::Map::new();
+                map.insert("role".into(), serde_json::Value::String("tool".into()));
+                map.insert("content".into(), serde_json::Value::String(content.clone()));
+                if let Some(id) = tool_call_id {
+                    map.insert(
+                        "tool_call_id".into(),
+                        serde_json::Value::String(id.clone()),
+                    );
+                }
+                serde_json::Value::Object(map)
+            }
         }
     }
 }
@@ -333,9 +479,11 @@ impl OpenAiProvider {
     }
 
     fn body(&self, messages: &[ChatMessage], tools: &[ToolSpec]) -> serde_json::Value {
+        let msgs: Vec<serde_json::Value> =
+            messages.iter().map(ChatMessage::to_openai_value).collect();
         let mut body = serde_json::json!({
             "model": self.settings.model,
-            "messages": messages,
+            "messages": msgs,
             "stream": true,
             "stream_options": { "include_usage": true },
         });

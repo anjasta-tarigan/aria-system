@@ -129,6 +129,8 @@ interface Ui {
   sidePanelOpen: boolean;
   /// Identifier@version of the last auto-opened artifact.
   autoOpenedArtifactId: string | null;
+  /// Currently open image lightbox: src data URL + file name.
+  lightbox: { src: string; name: string } | null;
 }
 
 const ui: Ui = {
@@ -156,6 +158,7 @@ const ui: Ui = {
   sidePanelTab: "artifacts",
   sidePanelOpen: true,
   autoOpenedArtifactId: null,
+  lightbox: null,
 };
 
 const root = document.querySelector<HTMLElement>("#app")!;
@@ -274,6 +277,7 @@ function render() {
     shell,
     ...(ui.memoriesOpen ? [memoriesModal()] : []),
     ...(ui.systemAccessId ? [systemAccessModal(ui.systemAccessId)] : []),
+    ...(ui.lightbox ? [lightboxNode()!] : []),
   );
   if (ui.jumpTo) {
     const el = document.getElementById(`msg-${ui.jumpTo}`);
@@ -1183,7 +1187,7 @@ function messageNode(
   let bodyNodes: (HTMLElement | null)[] = [];
 
   if (isUser) {
-    bodyNodes = m.content ? [h("div", { class: "msg-body" }, m.content)] : [];
+    bodyNodes = m.content ? userContentNodes(m.content) : [];
   } else if (m.content) {
     if (
       artifactsIndex &&
@@ -1232,6 +1236,80 @@ function messageNode(
 
 /// Render one attachment beneath a message. Images become inline thumbnails
 /// (fetched as data URLs from the blob store); other files become named links.
+/// Format bytes as a human-readable size.
+function fmtSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/// Parse user message content for inline image markdown (`![alt](url)`) and
+/// return a list of text nodes and image nodes. User text is otherwise shown
+/// verbatim (no markdown), so only image syntax is treated specially.
+function userContentNodes(content: string): (HTMLElement | null)[] {
+  const nodes: (HTMLElement | null)[] = [];
+  const imageRe = /!\[([^\]]*)\]\(([^)]+)\)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = imageRe.exec(content)) !== null) {
+    if (match.index > lastIndex) {
+      nodes.push(
+        h("div", { class: "msg-body" }, content.slice(lastIndex, match.index)),
+      );
+    }
+    const alt = match[1];
+    const url = match[2];
+    nodes.push(
+      h("img", {
+        class: "user-image-inline",
+        alt,
+        src: url,
+        title: alt,
+        loading: "lazy",
+        style: "max-width: 100%; height: auto; border-radius: var(--radius-sm); margin: var(--sp-1) 0;",
+      }),
+    );
+    lastIndex = imageRe.lastIndex;
+  }
+  if (lastIndex < content.length) {
+    nodes.push(h("div", { class: "msg-body" }, content.slice(lastIndex)));
+  }
+  if (nodes.length === 0) {
+    nodes.push(h("div", { class: "msg-body" }, content));
+  }
+  return nodes;
+}
+
+/// Return an emoji icon for a MIME type so document attachments are
+/// visually distinct in the transcript.
+function mimeIcon(mime_type: string): string {
+  if (mime_type.startsWith("image/")) return "🖼️";
+  if (mime_type === "application/pdf") return "📄";
+  if (mime_type.startsWith("text/")) return "📝";
+  if (
+    mime_type === "application/msword" ||
+    mime_type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  )
+    return "📝";
+  if (
+    mime_type === "application/vnd.ms-excel" ||
+    mime_type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  )
+    return "📊";
+  if (
+    mime_type === "application/vnd.ms-powerpoint" ||
+    mime_type === "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+  )
+    return "📽️";
+  if (mime_type === "application/zip" || mime_type === "application/x-tar") return "📦";
+  if (mime_type.startsWith("audio/")) return "🎵";
+  if (mime_type.startsWith("video/")) return "🎬";
+  return "📄";
+}
+
+/// Render one attachment beneath a message. Images become inline thumbnails
+/// (fetched as data URLs from the blob store); other files become named links.
+/// Clicking an image opens the lightbox.
 function attachmentNode(a: AttachmentView): HTMLElement {
   const isImage = a.mime_type.startsWith("image/");
   const img = h("img", {
@@ -1239,6 +1317,12 @@ function attachmentNode(a: AttachmentView): HTMLElement {
     alt: a.name,
     title: `${a.name} (${fmtSize(a.size)})`,
     loading: "lazy",
+    onclick: () => {
+      void call.invoke<string>("read_attachment", { blob_hash: a.blob_hash }).then((url) => {
+        ui.lightbox = { src: url, name: a.name };
+        render();
+      });
+    },
   });
   if (isImage) {
     void call.invoke<string>("read_attachment", { blob_hash: a.blob_hash }).then((url) => {
@@ -1250,7 +1334,7 @@ function attachmentNode(a: AttachmentView): HTMLElement {
     { class: `attachment ${isImage ? "attachment-image" : "attachment-file"}` },
     isImage
       ? img
-      : h("span", { class: "attachment-icon", "aria-hidden": "true" }, "📄"),
+      : h("span", { class: "attachment-icon", "aria-hidden": "true" }, mimeIcon(a.mime_type)),
     h(
       "div",
       { class: "attachment-info" },
@@ -1278,11 +1362,30 @@ function attachmentNode(a: AttachmentView): HTMLElement {
   );
 }
 
-/// Format bytes as a human-readable size.
-function fmtSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+/// Full-screen image lightbox. Clicking outside the image or pressing ESC closes it.
+function lightboxNode(): HTMLElement | null {
+  if (!ui.lightbox) return null;
+  return h(
+    "div",
+    { class: "lightbox", onclick: (_e: MouseEvent) => closeLightbox },
+    h("div", { class: "lightbox-backdrop" }),
+    h(
+      "div",
+      { class: "lightbox-panel", onclick: (e: MouseEvent) => e.stopPropagation() },
+      h("button", {
+        class: "lightbox-close",
+        "aria-label": "Close",
+        onclick: closeLightbox,
+      }, "✕"),
+      h("img", { class: "lightbox-image", src: ui.lightbox.src, alt: ui.lightbox.name }),
+      h("div", { class: "lightbox-caption" }, ui.lightbox.name),
+    ),
+  );
+}
+
+function closeLightbox() {
+  ui.lightbox = null;
+  render();
 }
 
 /// Collapsed-by-default reasoning block explaining the model's thought process
