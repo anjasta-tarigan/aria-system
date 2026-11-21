@@ -5,6 +5,7 @@
 pub mod agent;
 pub mod config;
 pub mod db;
+pub mod doc_convert;
 pub mod journal;
 pub mod provider;
 pub mod settings;

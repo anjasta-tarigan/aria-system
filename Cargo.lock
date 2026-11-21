@@ -103,7 +103,6 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tokio",
- "zip",
 ]
 
 [[package]]
@@ -115,6 +114,7 @@ dependencies = [
  "globset",
  "ignore",
  "keyring",
+ "quick-xml",
  "regex",
  "reqwest",
  "rusqlite",
@@ -125,6 +125,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "url",
+ "zip",
 ]
 
 [[package]]

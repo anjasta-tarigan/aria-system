@@ -870,18 +870,14 @@ async fn send_message(
                 None
             };
 
-            // Extracted text for documents (PDF, docx, txt), appended to the
-            // user message so the model can read the file contents.
-            let extracted_text = if mime_type == "application/pdf" {
-                extract_pdf_text(&bytes).ok()
-            } else if mime_type
-                == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            {
-                extract_docx_text(&bytes).ok()
-            } else if mime_type == "text/plain" || a.path.ends_with(".txt") {
-                String::from_utf8(bytes).ok()
-            } else {
-                None
+            // Extracted text for documents (PDF, docx, txt), converted to
+            // structured Markdown and appended to the user message so the
+            // model can read the file contents with preserved headings,
+            // tables and lists. Conversion failures fall back to no extracted
+            // text rather than blocking the message.
+            let extracted_text = match aria_core::doc_convert::convert(&bytes, &mime_type) {
+                Ok(Some(md)) => Some(md),
+                _ => None,
             };
 
             Ok(aria_core::agent::AttachmentInput {
@@ -903,56 +899,6 @@ async fn send_message(
     let run = agent.snapshot(handle.run_id()).map_err(err)?.run;
     pump(app, &state.inner, handle);
     Ok(run)
-}
-
-/// Extract text from a PDF document's bytes by shelling out to `pdftotext`.
-fn extract_pdf_text(bytes: &[u8]) -> Result<String, String> {
-    use std::io::Write;
-    let tmp_path = std::env::temp_dir().join(format!("aria-pdf-{}.pdf", std::process::id()));
-    {
-        let mut file = std::fs::File::create(&tmp_path).map_err(|e| e.to_string())?;
-        file.write_all(bytes).map_err(|e| e.to_string())?;
-    }
-    let output = std::process::Command::new("pdftotext")
-        .arg(&tmp_path)
-        .arg("-")
-        .output()
-        .map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_file(&tmp_path);
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-/// Extract text from a docx document's bytes. A docx is a ZIP archive; the
-/// body text lives in `word/document.xml` inside `<w:t>` elements.
-fn extract_docx_text(bytes: &[u8]) -> Result<String, String> {
-    use std::io::Read;
-    let cursor = std::io::Cursor::new(bytes);
-    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
-    let mut text = String::new();
-    if let Ok(mut file) = archive.by_name("word/document.xml") {
-        let mut contents = String::new();
-        file.read_to_string(&mut contents).map_err(|e| e.to_string())?;
-        let mut pos = 0;
-        while let Some(open) = contents[pos..].find("<w:t") {
-            let after_open = pos + open;
-            let close_gt = contents[after_open..]
-                .find('>')
-                .map(|i| after_open + i + 1)
-                .unwrap_or(after_open);
-            let close_len = contents[close_gt..].find("</w:t>");
-            if let Some(close_len) = close_len {
-                text.push_str(&contents[close_gt..close_gt + close_len]);
-                text.push(' ');
-                pos = close_gt + close_len + 6; // +6 for "</w:t>"
-            } else {
-                pos = close_gt;
-            }
-        }
-    }
-    Ok(text.trim().to_string())
 }
 
 /// Return an attachment's stored bytes as a data URL (mime + base64) so the
