@@ -118,14 +118,12 @@ interface Ui {
   health: HealthView | null;
   /// Available AI providers (polled or fetched for model selection).
   providers: AIProvider[];
-  /// Whether the Files panel is visible (user can dismiss it).
-  filesVisible: boolean;
-  /// Whether the Background Tasks panel is visible (user can dismiss it).
-  bgVisible: boolean;
   /// Active artifact being displayed in the side panel: identifier + version.
   activeArtifact: { identifier: string; version: number } | null;
   /// Tab currently active in the artifact panel: "preview" | "code".
   artifactTab: "preview" | "code";
+  /// Side panel tab: "artifacts" | "files".
+  sidePanelTab: "artifacts" | "files";
   /// Identifier@version of the last auto-opened artifact.
   autoOpenedArtifactId: string | null;
 }
@@ -150,10 +148,9 @@ const ui: Ui = {
   /// Latest system health snapshot for the footer (polled in the background).
   health: null as HealthView | null,
   providers: [] as AIProvider[],
-  filesVisible: true,
-  bgVisible: true,
   activeArtifact: null,
   artifactTab: "preview",
+  sidePanelTab: "artifacts",
   autoOpenedArtifactId: null,
 };
 
@@ -267,12 +264,14 @@ function render() {
     sidebar(),
     h("main", { class: "pane" }, detail ? conversationPane(detail, artifactsIndex) : emptyPane()),
     activeArtVersion
-      ? renderArtifactPanel(
+      ? renderSidePanelArtifacts(
           activeArtVersion,
           allVersionsForActive,
           ui.artifactTab,
+          ui.sidePanelTab,
           (tab) => {
             ui.artifactTab = tab;
+            ui.sidePanelTab = "artifacts";
             render();
           },
           (ver) => {
@@ -284,9 +283,11 @@ function render() {
             render();
           },
         )
-      : detail && detail.todos.length > 0
-        ? todoPanel(detail)
-        : null,
+      : ui.sidePanelTab === "files"
+        ? renderSidePanelFiles(detail!.conversation)
+        : detail && detail.todos.length > 0
+          ? todoPanel(detail)
+          : null,
   );
   const shell = h("div", { class: "app" }, body, footer());
   root.replaceChildren(
@@ -892,6 +893,7 @@ function conversationPane(
   const pending = detail.pending;
   const hasFolder = !!conv.workspace_id;
   const hasFiles = hasFolder || conv.main_system;
+  const runningBg = ui.bgTasks.filter((t) => t.status === "running");
 
   const folderSlot = hasFolder
     ? h("span", { class: "path", title: conv.root_path ?? "" }, conv.root_path)
@@ -927,6 +929,21 @@ function conversationPane(
     busy && run
       ? h("button", { class: "ghost", onclick: () => void cancel(run.id) }, "Cancel")
       : null,
+    runningBg.length > 0
+      ? h(
+          "button",
+          {
+            class: "ghost bg-task-badge",
+            title: `${runningBg.length} background task running`,
+            onclick: () => {
+              ui.sidePanelTab = "files";
+              render();
+            },
+          },
+          h("span", { class: "dot pulse" }),
+          h("span", {}, `${runningBg.length} bg`),
+        )
+      : null,
     run?.state === "budget_exhausted"
       ? h("button", { class: "primary", onclick: () => void resume(run.id) }, "Continue")
       : null,
@@ -943,17 +960,11 @@ function conversationPane(
 
   const composer = composerNode(busy, hasFolder, conv);
 
-  // Reset panel visibility when switching conversations.
-  const filesPanel = hasFiles && ui.filesVisible ? filesPanelNode(conv) : null;
-  const bgPanel = hasFiles && ui.bgVisible ? backgroundTasksNode(conv) : null;
-
   return h(
     "section",
     { class: "conversation" },
     header,
     transcript,
-    filesPanel,
-    bgPanel,
     ui.changed.length
       ? h(
           "div",
@@ -994,181 +1005,6 @@ function conversationPane(
         )
       : null,
   );
-}
-
-// Built-in editor: a workspace file tree + <textarea> read/written through the
-// same scope-contained backend commands the agent uses (no escape hatch to an
-// arbitrary path).
-function filesPanelNode(conv: ConversationView): HTMLElement {
-  const conversationId = conv.id;
-  // A typed path belongs to one conversation; start each chat at its root.
-  if (filesConvId !== conv.id) {
-    filesConvId = conv.id;
-    filesRoot = "";
-    openDirs.clear();
-    openDirs.add("");
-    activeFile = null;
-  }
-  const tree = h("div", { class: "file-tree" });
-  const editor = h("textarea", {
-    class: "editor",
-    rows: "12",
-    placeholder: "Select a file to edit",
-    readonly: activeFile === null,
-  }) as HTMLTextAreaElement;
-  if (activeFile) editor.value = editorBuffer.get(activeFile) ?? "";
-  const saved = h("span", { class: "muted small" });
-
-  const reload = () => void renderFileTree(tree, conversationId, editor, saved);
-
-  const pathInput = h("input", {
-    class: "file-path",
-    type: "text",
-    value: filesRoot,
-    placeholder: "Path (blank = conversation root)",
-    title: "Absolute path, or relative to the conversation root",
-    onchange: (e: Event) => {
-      filesRoot = (e.target as HTMLInputElement).value.trim();
-      openDirs.clear();
-      openDirs.add(filesRoot);
-      activeFile = null;
-      render();
-    },
-  });
-
-  const panel = h(
-    "div",
-    { class: "changed" },
-    h(
-      "div",
-      { class: "section-row" },
-      h(
-        "button",
-        {
-          class: "tree-caret",
-          title: filesOpen ? "Collapse" : "Expand",
-          onclick: () => {
-            filesOpen = !filesOpen;
-            render();
-          },
-        },
-        filesOpen ? "▾" : "▸",
-      ),
-      h("span", { class: "section-title" }, "Files"),
-      h(
-        "button",
-        {
-          class: "icon panel-dismiss",
-          title: "Hide Files panel",
-          onclick: () => {
-            ui.filesVisible = false;
-            render();
-          },
-        },
-        "×",
-      ),
-    ),
-    filesOpen
-      ? h(
-          "div",
-          {},
-          pathInput,
-          tree,
-          activeFile
-            ? h(
-                "div",
-                { class: "section-row" },
-                h("span", { class: "muted small" }, activeFile),
-                h(
-                  "button",
-                  {
-                    class: "primary",
-                    onclick: () => void saveFile(conversationId, editor, saved),
-                  },
-                  "Save",
-                ),
-                saved,
-              )
-            : null,
-          editor,
-        )
-      : null,
-  );
-
-  reload();
-  return panel;
-}
-
-// Background tasks for a workspace conversation: list + poll-to-terminal + kill.
-function backgroundTasksNode(conv: ConversationView): HTMLElement {
-  const conversationId = conv.id;
-  const list = h("div", {});
-
-  const renderList = () => {
-    list.replaceChildren(
-      ...ui.bgTasks.map((t) =>
-        h(
-          "div",
-          { class: "section-row" },
-          h("code", {}, t.cmd),
-          h("span", { class: "muted small" }, t.status),
-          t.status === "running"
-            ? h(
-                "button",
-                {
-                  class: "link",
-                  onclick: async () => {
-                    await call.invoke("kill_background", { id: t.id });
-                    await load();
-                  },
-                },
-                "Kill",
-              )
-            : null,
-        ),
-      ),
-    );
-  };
-
-  // `load` refreshes only this panel's list, never `render()`: calling `render()`
-  // here would rebuild the pane and re-trigger `load`, an infinite re-render
-  // storm that starves the Files panel's own async tree population.
-  const load = async () => {
-    if (disposed) return;
-    ui.bgTasks = await call.invoke<BackgroundTask[]>("list_background", {
-      conversationId,
-    });
-    renderList();
-    if (ui.bgTasks.some((t) => t.status === "running")) {
-      bgPoll = setTimeout(load, 2000);
-    }
-  };
-
-  const panel = h(
-    "div",
-    { class: "changed" },
-    h(
-      "div",
-      { class: "section-row" },
-      h("span", { class: "section-title" }, "Background tasks"),
-      h(
-        "button",
-        {
-          class: "icon panel-dismiss",
-          title: "Hide Background tasks panel",
-          onclick: () => {
-            ui.bgVisible = false;
-            render();
-          },
-        },
-        "×",
-      ),
-    ),
-    list,
-  );
-
-  void load();
-  return panel;
 }
 
 async function renderFileTree(
@@ -2048,6 +1884,157 @@ function todoPanel(detail: ConversationDetail): HTMLElement {
   );
 }
 
+// ---------------------------------------------------------------- side panel
+
+/// Side panel wrapper: tabbed Artifacts | Files. Shows the artifact panel when
+/// an artifact is active, otherwise an empty state.
+function renderSidePanelArtifacts(
+  art: ArtifactVersion,
+  allVersions: ArtifactVersion[],
+  artifactTab: "preview" | "code",
+  sidePanelTab: "artifacts" | "files",
+  onTabChange: (t: "preview" | "code") => void,
+  onVersionChange: (ver: number) => void,
+  onClose: () => void,
+): HTMLElement {
+  const active = sidePanelTab === "artifacts";
+  return h(
+    "aside",
+    { class: `side-panel ${sidePanelTab}` },
+    h(
+      "div",
+      { class: "side-panel-tabs" },
+      h(
+        "button",
+        {
+          class: `side-panel-tab ${active ? "active" : ""}`,
+          onclick: () => {
+            ui.sidePanelTab = "artifacts";
+            render();
+          },
+        },
+        "Artifacts",
+      ),
+      h(
+        "button",
+        {
+          class: `side-panel-tab ${!active ? "active" : ""}`,
+          onclick: () => {
+            ui.sidePanelTab = "files";
+            render();
+          },
+        },
+        "Files",
+      ),
+    ),
+    active
+      ? renderArtifactPanel(
+          art,
+          allVersions,
+          artifactTab,
+          onTabChange,
+          onVersionChange,
+          onClose,
+        )
+      : null,
+  );
+}
+
+/// Side panel Files view: a file tree for the current workspace conversation.
+function renderSidePanelFiles(conv: ConversationView): HTMLElement {
+  const conversationId = conv.id;
+  if (filesConvId !== conv.id) {
+    filesConvId = conv.id;
+    filesRoot = "";
+    openDirs.clear();
+    openDirs.add("");
+    activeFile = null;
+  }
+  const tree = h("div", { class: "file-tree" });
+  const editor = h("textarea", {
+    class: "editor",
+    rows: "12",
+    placeholder: "Select a file to edit",
+    readonly: activeFile === null,
+  }) as HTMLTextAreaElement;
+  if (activeFile) editor.value = editorBuffer.get(activeFile) ?? "";
+  const saved = h("span", { class: "muted small" });
+
+  const pathInput = h("input", {
+    class: "file-path",
+    type: "text",
+    value: filesRoot,
+    placeholder: "Path (blank = conversation root)",
+    title: "Absolute path, or relative to the conversation root",
+    onchange: (e: Event) => {
+      filesRoot = (e.target as HTMLInputElement).value.trim();
+      openDirs.clear();
+      openDirs.add(filesRoot);
+      activeFile = null;
+      render();
+    },
+  });
+
+  const panel = h(
+    "div",
+    { class: "side-panel-files" },
+    h(
+      "div",
+      { class: "section-row" },
+      h(
+        "button",
+        {
+          class: "tree-caret",
+          title: filesOpen ? "Collapse" : "Expand",
+          onclick: () => {
+            filesOpen = !filesOpen;
+            render();
+          },
+        },
+        filesOpen ? "▾" : "▸",
+      ),
+      h("span", { class: "section-title" }, "Files"),
+      h(
+        "button",
+        {
+          class: "icon panel-dismiss",
+          title: "Hide Files panel",
+          onclick: () => {
+            ui.sidePanelTab = "artifacts";
+            render();
+          },
+        },
+        "×",
+      ),
+    ),
+    filesOpen
+      ? h(
+          "div",
+          {},
+          pathInput,
+          tree,
+          activeFile
+            ? h(
+                "div",
+                { class: "section-row" },
+                h("span", { class: "muted small" }, activeFile),
+                h(
+                  "button",
+                  {
+                    class: "primary",
+                    onclick: () => void saveFile(conversationId, editor, saved),
+                  },
+                  "Save",
+                ),
+              )
+            : null,
+        )
+      : null,
+  );
+  renderFileTree(tree, conversationId, editor, saved);
+  return panel;
+}
+
 // ---------------------------------------------------------------- behaviour
 
 async function refreshConversations() {
@@ -2068,13 +2055,24 @@ async function selectConversation(id: string) {
   ui.streaming = null;
   ui.toolOutput = {};
   ui.notice = null;
-  ui.filesVisible = true;
-  ui.bgVisible = true;
   ui.activeArtifact = null;
   ui.autoOpenedArtifactId = null;
   pendingAttachments = [];
   await refreshChanged();
+  await refreshBgTasks();
   render();
+}
+
+async function refreshBgTasks() {
+  const detail = ui.detail;
+  if (!detail) return;
+  try {
+    ui.bgTasks = await call.invoke<BackgroundTask[]>("list_background", {
+      conversationId: detail.conversation.id,
+    });
+  } catch {
+    ui.bgTasks = [];
+  }
 }
 
 async function refreshChanged() {
