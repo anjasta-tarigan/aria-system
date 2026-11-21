@@ -205,70 +205,40 @@ describe("validateEmbeddingForm", () => {
       validateEmbeddingForm({
         model: "text-embedding-3-small",
         dimensions: 1536,
-        batchSize: 64,
-        timeoutSeconds: 30,
       }),
       {},
     );
   });
   it("rejects empty model", () => {
     assert.deepEqual(
-      validateEmbeddingForm({ model: "", batchSize: 64, timeoutSeconds: 30 }),
+      validateEmbeddingForm({ model: "" }),
       { model: "Choose or enter an embedding model." },
     );
   });
   it("rejects dimensions out of range", () => {
     assert.deepEqual(
-      validateEmbeddingForm({ model: "m", dimensions: 63, batchSize: 64, timeoutSeconds: 30 }),
+      validateEmbeddingForm({ model: "m", dimensions: 63 }),
       { dimensions: "Dimensions must be a whole number between 64 and 8192." },
     );
     assert.deepEqual(
-      validateEmbeddingForm({ model: "m", dimensions: 8193, batchSize: 64, timeoutSeconds: 30 }),
+      validateEmbeddingForm({ model: "m", dimensions: 8193 }),
       { dimensions: "Dimensions must be a whole number between 64 and 8192." },
     );
   });
   it("accepts dimensions at boundaries", () => {
     assert.deepEqual(
-      validateEmbeddingForm({ model: "m", dimensions: 64, batchSize: 64, timeoutSeconds: 30 }),
+      validateEmbeddingForm({ model: "m", dimensions: 64 }),
       {},
     );
     assert.deepEqual(
-      validateEmbeddingForm({ model: "m", dimensions: 8192, batchSize: 64, timeoutSeconds: 30 }),
+      validateEmbeddingForm({ model: "m", dimensions: 8192 }),
       {},
     );
   });
   it("rejects non-integer dimensions", () => {
     assert.deepEqual(
-      validateEmbeddingForm({ model: "m", dimensions: 1536.5, batchSize: 64, timeoutSeconds: 30 }),
+      validateEmbeddingForm({ model: "m", dimensions: 1536.5 }),
       { dimensions: "Dimensions must be a whole number between 64 and 8192." },
     );
-  });
-  it("rejects batchSize out of range", () => {
-    assert.deepEqual(
-      validateEmbeddingForm({ model: "m", batchSize: 0, timeoutSeconds: 30 }),
-      { batchSize: "Batch size must be between 1 and 256." },
-    );
-    assert.deepEqual(
-      validateEmbeddingForm({ model: "m", batchSize: 257, timeoutSeconds: 30 }),
-      { batchSize: "Batch size must be between 1 and 256." },
-    );
-  });
-  it("accepts batchSize at boundaries", () => {
-    assert.deepEqual(validateEmbeddingForm({ model: "m", batchSize: 1, timeoutSeconds: 30 }), {});
-    assert.deepEqual(validateEmbeddingForm({ model: "m", batchSize: 256, timeoutSeconds: 30 }), {});
-  });
-  it("rejects timeoutSeconds out of range", () => {
-    assert.deepEqual(
-      validateEmbeddingForm({ model: "m", batchSize: 64, timeoutSeconds: 4 }),
-      { timeoutSeconds: "Timeout must be between 5 and 120 seconds." },
-    );
-    assert.deepEqual(
-      validateEmbeddingForm({ model: "m", batchSize: 64, timeoutSeconds: 121 }),
-      { timeoutSeconds: "Timeout must be between 5 and 120 seconds." },
-    );
-  });
-  it("accepts timeoutSeconds at boundaries", () => {
-    assert.deepEqual(validateEmbeddingForm({ model: "m", batchSize: 64, timeoutSeconds: 5 }), {});
-    assert.deepEqual(validateEmbeddingForm({ model: "m", batchSize: 64, timeoutSeconds: 120 }), {});
   });
 });

@@ -449,12 +449,10 @@ pub fn mask_key(key: &str) -> String {
 }
 
 /// Validate an embedding config against the spec's ranges.
-pub fn validate_embedding(
-    model: &str,
-    dimensions: Option<u32>,
-    batch_size: u32,
-    timeout_seconds: u32,
-) -> Result<()> {
+///
+/// `batch_size` (hardcoded 64) and `timeout_seconds` (hardcoded 30s) are no
+/// longer user-tunable, so only the model and optional dimensions are checked.
+pub fn validate_embedding(model: &str, dimensions: Option<u32>) -> Result<()> {
     if model.trim().is_empty() {
         return Err(SettingsError::Invalid("Choose an embedding model.".into()));
     }
@@ -463,16 +461,6 @@ pub fn validate_embedding(
     {
         return Err(SettingsError::Invalid(
             "Dimensions must be between 64 and 8192.".into(),
-        ));
-    }
-    if !(1..=256).contains(&batch_size) {
-        return Err(SettingsError::Invalid(
-            "Batch size must be between 1 and 256.".into(),
-        ));
-    }
-    if !(5..=120).contains(&timeout_seconds) {
-        return Err(SettingsError::Invalid(
-            "Timeout must be between 5 and 120 seconds.".into(),
         ));
     }
     Ok(())
@@ -567,11 +555,10 @@ mod tests {
 
     #[test]
     fn embedding_validation_ranges() {
-        assert!(validate_embedding("m", Some(1536), 64, 30).is_ok());
-        assert!(validate_embedding("", Some(1536), 64, 30).is_err());
-        assert!(validate_embedding("m", Some(63), 64, 30).is_err());
-        assert!(validate_embedding("m", None, 0, 30).is_err());
-        assert!(validate_embedding("m", None, 64, 4).is_err());
+        assert!(validate_embedding("m", Some(1536)).is_ok());
+        assert!(validate_embedding("m", None).is_ok());
+        assert!(validate_embedding("", Some(1536)).is_err());
+        assert!(validate_embedding("m", Some(63)).is_err());
     }
 
     #[test]

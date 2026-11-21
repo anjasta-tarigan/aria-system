@@ -27,12 +27,12 @@ fn approval_policy_defaults_to_always_ask_and_parses() {
 fn embedding_is_off_until_enabled() {
     assert!(!EmbeddingConfig::default().enabled);
     let cfg: EmbeddingConfig = serde_json::from_str(
-        r#"{"providerId":"default","model":"m","dimensions":null,"batchSize":64,"timeoutSeconds":30}"#,
+        r#"{"providerId":"default","model":"m","dimensions":null}"#,
     )
     .unwrap();
     assert!(!cfg.enabled);
     let cfg: EmbeddingConfig = serde_json::from_str(
-        r#"{"enabled":true,"providerId":"default","model":"m","dimensions":null,"batchSize":64,"timeoutSeconds":30}"#,
+        r#"{"enabled":true,"providerId":"default","model":"m","dimensions":null}"#,
     )
     .unwrap();
     assert!(cfg.enabled);

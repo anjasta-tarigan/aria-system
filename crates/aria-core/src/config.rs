@@ -119,6 +119,13 @@ pub enum ProviderStatus {
 
 /// Embedding (vector search) configuration. Not a provider list: Aria runs one
 /// embedding model against a chosen provider (or the default AI provider).
+/// Embedding (vector search) configuration. Not a provider list: Aria runs one
+/// embedding model against a chosen provider (or the default AI provider).
+///
+/// `dimensions` is left `None` (auto): the provider reports the vector width,
+/// so the user never has to guess it. `batch_size` and `timeout_seconds` were
+/// removed: embeddings use the hardcoded recommended values (batch 64, timeout
+/// 30s) and are not user-tunable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct EmbeddingConfig {
@@ -127,9 +134,8 @@ pub struct EmbeddingConfig {
     pub enabled: bool,
     pub provider_id: String,
     pub model: String,
+    /// `None` = use the model's native vector width (auto).
     pub dimensions: Option<u32>,
-    pub batch_size: u32,
-    pub timeout_seconds: u32,
 }
 
 impl Default for EmbeddingConfig {
@@ -139,8 +145,6 @@ impl Default for EmbeddingConfig {
             provider_id: "default".to_string(),
             model: "text-embedding-3-small".to_string(),
             dimensions: None,
-            batch_size: 64,
-            timeout_seconds: 30,
         }
     }
 }

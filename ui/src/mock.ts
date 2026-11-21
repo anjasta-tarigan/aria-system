@@ -88,8 +88,6 @@ const embeddingConfig: EmbeddingConfig = {
   enabled: false,
   providerId: "default",
   model: "text-embedding-3-small",
-  batchSize: 64,
-  timeoutSeconds: 30,
 };
 let webSearchConfig: WebSearchConfig | null = null;
 const toolState: Record<string, boolean> = {};

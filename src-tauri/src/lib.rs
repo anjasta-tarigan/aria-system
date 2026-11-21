@@ -1675,15 +1675,15 @@ fn get_embedding_config(state: State<'_, App>) -> CmdResult<EmbeddingConfig> {
 
 #[tauri::command]
 fn set_embedding_config(state: State<'_, App>, config: EmbeddingConfig) -> CmdResult<EmbeddingConfig> {
-    aria_core::settings::validate_embedding(
-        &config.model,
-        config.dimensions,
-        config.batch_size,
-        config.timeout_seconds,
-    )
-    .map_err(err)?;
+    aria_core::settings::validate_embedding(&config.model, config.dimensions).map_err(err)?;
     let cfg = &state.inner.config;
     let mut s = cfg.load().map_err(err)?;
+    // Auto-enable embeddings once the user has configured an embedding model:
+    // semantic recall turns on by itself instead of requiring a separate toggle.
+    let mut config = config;
+    if !config.model.trim().is_empty() {
+        config.enabled = true;
+    }
     s.embedding_config = config.clone();
     // Mirror into the flat runtime fields the provider already reads.
     s.embedding_model = Some(config.model.clone());
@@ -1753,7 +1753,9 @@ async fn test_embedding(
             });
         }
     };
-    let timeout = std::time::Duration::from_secs(s.embedding_config.timeout_seconds.max(5) as u64);
+    // Embedding requests use the hardcoded recommended timeout (30s); not
+    // user-tunable anymore.
+    let timeout = std::time::Duration::from_secs(30);
     let outcome =
         aria_core::settings::probe_embedding(&provider, &s.embedding_config.model, timeout).await;
     Ok(EmbeddingTestResult {

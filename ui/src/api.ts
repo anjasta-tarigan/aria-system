@@ -362,8 +362,6 @@ export interface EmbeddingConfig {
   providerId: string | "default";
   model: string;
   dimensions?: number;
-  batchSize: number;
-  timeoutSeconds: number;
 }
 
 export interface WebSearchConfig {
@@ -515,8 +513,6 @@ export function validateProviderForm(f: {
 export function validateEmbeddingForm(f: {
   model: string;
   dimensions?: number;
-  batchSize: number;
-  timeoutSeconds: number;
 }): Record<string, string> {
   const errors: Record<string, string> = {};
   if (!f.model.trim()) errors.model = "Choose or enter an embedding model.";
@@ -525,9 +521,5 @@ export function validateEmbeddingForm(f: {
     if (!Number.isInteger(d) || d < 64 || d > 8192)
       errors.dimensions = "Dimensions must be a whole number between 64 and 8192.";
   }
-  if (!Number.isInteger(f.batchSize) || f.batchSize < 1 || f.batchSize > 256)
-    errors.batchSize = "Batch size must be between 1 and 256.";
-  if (!Number.isInteger(f.timeoutSeconds) || f.timeoutSeconds < 5 || f.timeoutSeconds > 120)
-    errors.timeoutSeconds = "Timeout must be between 5 and 120 seconds.";
   return errors;
 }

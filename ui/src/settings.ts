@@ -129,10 +129,6 @@ const STR = {
     modelHelp: "Pick a known model or type the id your endpoint serves.",
     dimensions: "Dimensions",
     dimensionsHelp: "Optional. Leave blank to use the model's default width.",
-    batchSize: "Batch size",
-    batchSizeHelp: "How many texts to embed per request (1–256).",
-    timeout: "Timeout (seconds)",
-    timeoutHelp: "How long one embedding request may take (5–120).",
     test: "Test embedding",
     testing: "Testing…",
     testOk: (n: number, ms: number) => `Vector length ${n}, ${ms} ms`,
@@ -147,8 +143,6 @@ const STR = {
     reindexed: (n: number) => `Re-indexed ${n} ${n === 1 ? "memory" : "memories"}`,
     invalidModel: "Choose or enter an embedding model.",
     invalidDimensions: "Dimensions must be a whole number between 64 and 8192.",
-    invalidBatch: "Batch size must be between 1 and 256.",
-    invalidTimeout: "Timeout must be between 5 and 120 seconds.",
     indexInfo: (embedded: number, total: number) =>
       `${embedded} of ${total} ${total === 1 ? "memory is" : "memories are"} embedded.`,
   },
@@ -1674,9 +1668,12 @@ export function openSettings(ipc: Ipc, onDatabaseReplaced?: () => void): void {
         const model = (e.target as HTMLInputElement).value;
         // Auto-fill the width for a known model, but never overwrite a manual value.
         const known = KNOWN_EMBEDDING_MODELS[model.trim()];
+        // Auto-enable embeddings once an embedding model is configured.
+        const enabled = model.trim().length > 0;
         state.embedding = {
           ...state.embedding!,
           model,
+          enabled,
           dimensions: known ?? state.embedding!.dimensions,
         };
         refreshEmbeddingFooter();
@@ -1702,31 +1699,6 @@ export function openSettings(ipc: Ipc, onDatabaseReplaced?: () => void): void {
         refreshEmbeddingFooter();
       },
     }) as HTMLInputElement;
-
-    const numberInput = (
-      id: string,
-      value: number,
-      oninput: (n: number) => void,
-      invalid: boolean,
-      help: string,
-    ) =>
-      h(
-        "div",
-        { class: "field" },
-        h("label", { for: `embedding-${id}` }, id === "batchSize" ? STR.embedding.batchSize : STR.embedding.timeout),
-        h("input", {
-          id: `embedding-${id}`,
-          type: "number",
-          value: String(value),
-          class: invalid ? "invalid" : "",
-          "aria-invalid": invalid ? "true" : "false",
-          oninput: (e: Event) => {
-            oninput(Number((e.target as HTMLInputElement).value));
-            refreshEmbeddingFooter();
-          },
-        }),
-        h("p", { class: "field-help" }, help),
-      );
 
     const ack = h("input", {
       type: "checkbox",
@@ -1866,24 +1838,6 @@ export function openSettings(ipc: Ipc, onDatabaseReplaced?: () => void): void {
         errors.dimensions
           ? h("p", { class: "field-error", role: "alert" }, errors.dimensions)
           : h("p", { class: "field-help" }, STR.embedding.dimensionsHelp),
-      ),
-      numberInput(
-        "batchSize",
-        cfg.batchSize,
-        (n) => {
-          state.embedding = { ...state.embedding!, batchSize: n };
-        },
-        !!errors.batchSize,
-        STR.embedding.batchSizeHelp,
-      ),
-      numberInput(
-        "timeoutSeconds",
-        cfg.timeoutSeconds,
-        (n) => {
-          state.embedding = { ...state.embedding!, timeoutSeconds: n };
-        },
-        !!errors.timeoutSeconds,
-        STR.embedding.timeoutHelp,
       ),
       reindexBanner,
       h("div", { class: "test-row" }, testButton, testResult),
@@ -2536,8 +2490,6 @@ function embeddingErrors(cfg: EmbeddingConfig): Record<string, string> {
   return validateEmbeddingForm({
     model: cfg.model,
     dimensions: cfg.dimensions,
-    batchSize: cfg.batchSize,
-    timeoutSeconds: cfg.timeoutSeconds,
   });
 }
 
