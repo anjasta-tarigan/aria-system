@@ -3239,7 +3239,7 @@ label.checkbox-row {
 /* ---------------------------------------------------------------- artifacts */
 
 .app-body.has-artifact {
-  grid-template-columns: 264px minmax(360px, 1fr) minmax(440px, 1.2fr);
+  grid-template-columns: 264px minmax(360px, 1fr) max(var(--side-panel-width, 440px), 440px);
 }
 
 .artifact-card {
@@ -3619,6 +3619,6 @@ label.checkbox-row {
   }
 
   .app-body.has-artifact {
-    grid-template-columns: 180px minmax(280px, 1fr) minmax(320px, 1.2fr);
+    grid-template-columns: 180px minmax(280px, 1fr) max(var(--side-panel-width, 320px), 320px);
   }
 }

@@ -339,7 +339,11 @@ function onResizerMouseMove(e: MouseEvent) {
   const dx = e.clientX - resizerStartX;
   let newWidth = resizerStartWidth + dx;
   const maxWidth = Math.floor(window.innerWidth * 0.8);
-  newWidth = Math.max(250, Math.min(newWidth, maxWidth));
+  // When an artifact is showing, .app-body.has-artifact enforces a 440px
+  // minimum side panel width via max(var(--side-panel-width, 440px), 440px).
+  // Clamp drag to match so there's no visual jump.
+  const minWidth = ui.activeArtifact ? 440 : 250;
+  newWidth = Math.max(minWidth, Math.min(newWidth, maxWidth));
   if (newWidth !== ui.sidePanelWidth) {
     ui.sidePanelWidth = newWidth;
     const body = document.querySelector<HTMLElement>(".app-body");
