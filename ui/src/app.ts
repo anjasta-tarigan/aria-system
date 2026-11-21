@@ -92,7 +92,7 @@ interface Ui {
   conversations: ConversationView[];
   detail: ConversationDetail | null;
   /// Live text of the Turn being streamed, keyed by run id.
-  streaming: { runId: string; text: string; turn: number } | null;
+  streaming: { runId: string; text: string; reasoning: string; turn: number } | null;
   /// Live shell output per tool call.
   toolOutput: Record<string, string[]>;
   changed: ChangedFile[];
@@ -1397,15 +1397,15 @@ function messageNode(
       h("time", { class: "when" }, fmt(m.created_at)),
     ),
     ...bodyNodes,
-    ...(m.reasoning ? [reasoningNode(m)] : []),
+    ...(m.reasoning ? [reasoningNode(m.id, m.reasoning)] : []),
     ...m.tool_calls.map(toolCard),
   );
 }
 
 /// Collapsed-by-default reasoning block explaining the model's thought process
 /// ahead of its tool calls or final answer. Toggled like tool-call cards.
-function reasoningNode(m: MessageView): HTMLElement {
-  const key = `reasoning-${m.id}`;
+function reasoningNode(id: string, reasoning: string): HTMLElement {
+  const key = `reasoning-${id}`;
   const expanded = ui.expanded.has(key);
   return h(
     "div",
@@ -1414,6 +1414,7 @@ function reasoningNode(m: MessageView): HTMLElement {
       "button",
       {
         class: "reasoning-head",
+        type: "button",
         onclick: () => {
           if (expanded) ui.expanded.delete(key);
           else ui.expanded.add(key);
@@ -1433,7 +1434,7 @@ function reasoningNode(m: MessageView): HTMLElement {
       h("span", { class: "reasoning-hint" }, expanded ? "Hide" : "Show"),
     ),
     expanded
-      ? h("div", { class: "reasoning-body markdown", html: renderMarkdown(m.reasoning ?? "") })
+      ? h("div", { class: "reasoning-body markdown", html: renderMarkdown(reasoning) })
       : null,
   );
 }
@@ -1558,7 +1559,13 @@ function streamingNode(artifactsIndex?: ConversationArtifactIndex | null): HTMLE
     bodyNodes = [h("div", { class: "msg-body muted" }, "Thinking…")];
   }
 
-  return h("article", { class: "msg assistant streaming" }, ...bodyNodes);
+  const nodes: (HTMLElement | null)[] = [];
+  if (ui.streaming.reasoning.length > 0) {
+    nodes.push(reasoningNode(ui.streaming.runId, ui.streaming.reasoning));
+  }
+  nodes.push(...bodyNodes);
+
+  return h("article", { class: "msg assistant streaming" }, ...nodes);
 }
 
 function diffOf(body: string): HTMLElement {
@@ -2321,13 +2328,21 @@ function applyRunEvent(runId: string, event: RunEvent) {
       return;
     case "turn_started":
       if (current) {
-        ui.streaming = { runId, text: "", turn: event.turn_index };
+        ui.streaming = { runId, text: "", reasoning: "", turn: event.turn_index };
         render();
       }
       return;
     case "text_delta":
       if (current) {
-        ui.streaming = { runId, text: event.so_far, turn: event.turn_index };
+        if (!ui.streaming) ui.streaming = { runId, text: "", reasoning: "", turn: event.turn_index };
+        ui.streaming = { ...ui.streaming, text: event.so_far };
+        render();
+      }
+      return;
+    case "reasoning_delta":
+      if (current) {
+        if (!ui.streaming) ui.streaming = { runId, text: "", reasoning: "", turn: event.turn_index };
+        ui.streaming = { ...ui.streaming, reasoning: event.so_far };
         render();
       }
       return;

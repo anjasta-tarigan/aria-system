@@ -1109,11 +1109,16 @@ pre {
   color: var(--text);
 }
 
+.reasoning-head:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .reasoning-toggle {
   flex: none;
   font-size: var(--fs-xs);
   line-height: 1;
-  transition: transform 0.15s ease;
+  transition: transform 0.2s ease;
 }
 
 .reasoning-block.expanded .reasoning-toggle {
@@ -1137,6 +1142,17 @@ pre {
   line-height: 1.6;
   color: var(--text);
   overflow-x: auto;
+  /* Collapsible animation: animate max-height like shadcn Collapsible */
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease, opacity 0.2s ease, padding 0.2s ease;
+}
+
+.reasoning-block.expanded .reasoning-body {
+  max-height: 2000px;
+  opacity: 1;
+  padding: var(--sp-3) var(--sp-4);
 }
 
 /* ------------------------------------------------------------- approvals */

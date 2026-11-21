@@ -135,6 +135,7 @@ export type RunEvent =
   | { type: "state"; run: Run }
   | { type: "turn_started"; turn_index: number }
   | { type: "text_delta"; turn_index: number; text: string; so_far: string }
+  | { type: "reasoning_delta"; turn_index: number; text: string; so_far: string }
   | { type: "assistant_message"; message_id: string; content: string }
   | { type: "approval_requested"; pending: PendingApproval }
   | { type: "tool_result"; tool_call_id: string; tool: string; text: string; is_error: boolean }

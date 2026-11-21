@@ -324,7 +324,7 @@ async function runScript(detail: ConversationDetail, text: string) {
   const assistant = (turn: number) => {
     emit({ type: "turn_started", turn_index: turn }, run.id);
     const msgId = id("msg");
-    return { turn, msgId, text: "" };
+    return { turn, msgId, text: "", reasoning: "" };
   };
   const delta = (a: { turn: number; text: string }, piece: string) => {
     a.text += piece;
@@ -333,7 +333,24 @@ async function runScript(detail: ConversationDetail, text: string) {
       run.id,
     );
   };
-  const say = async (a: { turn: number; msgId: string; text: string }, words: string) => {
+  const reason = (a: { turn: number; reasoning: string }, piece: string) => {
+    a.reasoning += piece;
+    emit(
+      { type: "reasoning_delta", turn_index: a.turn, text: piece, so_far: a.reasoning },
+      run.id,
+    );
+  };
+  const say = async (
+    a: { turn: number; msgId: string; text: string; reasoning: string },
+    words: string,
+    reasoningWords?: string,
+  ) => {
+    if (reasoningWords) {
+      for (const w of reasoningWords.split(/(?<= )/)) {
+        reason(a, w);
+        await sleep(18);
+      }
+    }
     for (const w of words.split(/(?<= )/)) {
       delta(a, w);
       await sleep(18);
@@ -343,6 +360,7 @@ async function runScript(detail: ConversationDetail, text: string) {
       id: a.msgId,
       role: "assistant",
       content: a.text,
+      reasoning: a.reasoning,
       created_at: now(),
       tool_calls: [],
     });
@@ -361,7 +379,7 @@ async function runScript(detail: ConversationDetail, text: string) {
 
   // Turn 0: announce and look for the bug.
   const a0 = assistant(0);
-  await say(a0, "Let me find where the total is computed. ");
+  await say(a0, "Let me find where the total is computed. ", "I need to trace where the total is computed. Let me search for the total function. ");
   const search = toolCall(run, 0, 0, "search_files", "Read", { pattern: "fn total", glob: "**/*.rs" });
   detail.messages[detail.messages.length - 1].tool_calls.push(search);
   await sleep(120);
