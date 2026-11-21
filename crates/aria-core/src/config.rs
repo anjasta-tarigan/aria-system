@@ -36,7 +36,7 @@ pub struct Caps {
 impl Default for Caps {
     fn default() -> Self {
         Self {
-            max_turns: 50,
+            max_turns: 20,
             max_prompt_tokens: 200_000,
         }
     }
