@@ -331,6 +331,7 @@ function onResizerMouseDown(e: MouseEvent) {
   resizerStartX = e.clientX;
   resizerStartWidth = ui.sidePanelWidth;
   e.preventDefault();
+  e.stopPropagation();
 }
 
 function onResizerMouseMove(e: MouseEvent) {
@@ -341,7 +342,11 @@ function onResizerMouseMove(e: MouseEvent) {
   newWidth = Math.max(250, Math.min(newWidth, maxWidth));
   if (newWidth !== ui.sidePanelWidth) {
     ui.sidePanelWidth = newWidth;
-    scheduleRender();
+    // Apply directly to the live element so dragging stays smooth without a
+    // full DOM rebuild on every animation frame. The stored value is also
+    // reused by the next render().
+    const body = document.querySelector<HTMLElement>(".app-body");
+    if (body) body.style.setProperty("--side-panel-width", `${newWidth}px`);
   }
 }
 
@@ -2102,7 +2107,7 @@ function renderSidePanelArtifacts(
   return h(
     "aside",
     { class: `side-panel ${sidePanelTab}` },
-    h("div", { class: "side-panel-resizer", onmousedown: onResizerMouseDown }),
+    h("div", { class: "side-panel-resizer", onmousedown: onResizerMouseDown, ondragstart: () => false }),
     h(
       "div",
       { class: "side-panel-content" },
@@ -2286,7 +2291,7 @@ function sidePanelWrapper(tab: string, content: HTMLElement): HTMLElement {
   return h(
     "div",
     { class: `side-panel ${tab}` },
-    h("div", { class: "side-panel-resizer", onmousedown: onResizerMouseDown }),
+    h("div", { class: "side-panel-resizer", onmousedown: onResizerMouseDown, ondragstart: () => false }),
     h("div", { class: "side-panel-content" }, content),
   );
 }

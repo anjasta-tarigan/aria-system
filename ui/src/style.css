@@ -739,10 +739,12 @@ button.icon:hover {
   left: 0;
   top: 0;
   bottom: 0;
-  width: 8px;
+  width: 16px;
   cursor: col-resize;
   z-index: 1;
   user-select: none;
+  touch-action: none;
+  background: transparent;
 }
 .side-panel-resizer::before {
   content: "";
