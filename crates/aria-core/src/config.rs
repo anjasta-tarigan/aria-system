@@ -171,14 +171,10 @@ pub enum WebSearchStatus {
 pub struct Settings {
     pub base_url: String,
     pub model: String,
-    pub caps: Caps,
-    pub shell_timeout_secs: u64,
     pub embedding_base_url: Option<String>,
     pub embedding_model: Option<String>,
     pub search_provider: Option<String>,
     pub search_base_url: Option<String>,
-    /// Vision (image input) model id; falls back to `model` when absent.
-    pub vision_model: Option<String>,
     #[serde(default)]
     pub approval_policy: ApprovalPolicy,
     /// Configured OpenAI-compatible chat providers. The default one also drives
@@ -202,13 +198,10 @@ impl Default for Settings {
         Self {
             base_url: "https://api.openai.com/v1".to_string(),
             model: String::new(),
-            caps: Caps::default(),
-            shell_timeout_secs: 120,
             embedding_base_url: None,
             embedding_model: None,
             search_provider: None,
             search_base_url: None,
-            vision_model: None,
             approval_policy: ApprovalPolicy::AlwaysAsk,
             ai_providers: Vec::new(),
             default_ai_provider_id: None,

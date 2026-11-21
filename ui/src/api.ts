@@ -108,13 +108,10 @@ export interface ChangedFile {
 export interface Settings {
   base_url: string;
   model: string;
-  caps: { max_turns: number; max_prompt_tokens: number };
-  shell_timeout_secs: number;
   embedding_base_url: string | null;
   embedding_model: string | null;
   search_provider: string | null;
   search_base_url: string | null;
-  vision_model: string | null;
   approval_policy: string;
 }
 
@@ -203,15 +200,11 @@ export const api = {
   setSettings: (input: {
     base_url: string;
     model: string;
-    max_turns: number;
-    max_prompt_tokens: number;
-    shell_timeout_secs: number;
     embedding_base_url?: string | null;
     embedding_model?: string | null;
     search_provider?: string | null;
     search_base_url?: string | null;
     search_api_key?: string | null;
-    vision_model?: string | null;
     api_key?: string | null;
     approval_policy?: string | null;
   }) => invoke<SettingsView>("set_settings", { input }),

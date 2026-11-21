@@ -63,17 +63,6 @@ const STR = {
       "Always ask prompts for every file change, shell command and web call. Auto-approve safe runs reads without a prompt. In a folder, edits and web calls also run silently, and shell always asks because it can leave the folder. In the Main System chat, edits and web calls still ask, and only one safe read-only shell command runs silently (a Main System restricted to allowed paths asks for every command).",
     approvalAlways: "Always ask",
     approvalAuto: "Auto-approve safe tools",
-    maxTurns: "Max turns",
-    maxTurnsHelp: "How many model turns one request may take before Aria wraps up.",
-    maxTokens: "Max prompt tokens",
-    maxTokensHelp: "Token budget for a single request. Aria warns at 70% and stops at the cap.",
-    shellTimeout: "Shell timeout (seconds)",
-    shellTimeoutHelp: "Commands that run longer are terminated.",
-    visionModel: "Vision model",
-    visionModelHelp: "Optional. Used for images; defaults to the main model.",
-    invalidTurns: "Enter a whole number of at least 1.",
-    invalidTokens: "Enter a whole number of at least 1.",
-    invalidTimeout: "Enter a whole number of at least 1.",
   },
   ai: {
     intro: "Aria talks to any OpenAI-compatible endpoint. The default provider supplies the chat model.",
@@ -540,10 +529,6 @@ export function openSettings(ipc: Ipc, onDatabaseReplaced?: () => void): void {
         input: {
           base_url: state.generalBaseline.baseUrl,
           model: state.generalBaseline.model,
-          max_turns: g.maxTurns,
-          max_prompt_tokens: g.maxPromptTokens,
-          shell_timeout_secs: g.shellTimeoutSecs,
-          vision_model: g.visionModel.trim() || null,
           approval_policy: g.approvalPolicy,
         },
       });
@@ -1072,17 +1057,6 @@ export function openSettings(ipc: Ipc, onDatabaseReplaced?: () => void): void {
     ) as HTMLSelectElement;
     policy.value = g.approvalPolicy;
 
-    const vision = h("input", {
-      id: "general-visionModel",
-      type: "text",
-      value: g.visionModel,
-      placeholder: "e.g. gpt-4o",
-      oninput: (e: Event) => {
-        state.general = { ...state.general!, visionModel: (e.target as HTMLInputElement).value };
-        refreshGeneralFooter();
-      },
-    }) as HTMLInputElement;
-
     const footer = h(
       "div",
       { class: "settings-footer" },
@@ -1129,34 +1103,6 @@ export function openSettings(ipc: Ipc, onDatabaseReplaced?: () => void): void {
         STR.general.approvalHelp,
         policy,
       ),
-      field(
-        "maxTurns",
-        STR.general.maxTurns,
-        STR.general.maxTurnsHelp,
-        number("maxTurns", g.maxTurns, (n) => {
-          state.general = { ...state.general!, maxTurns: n };
-        }, !!errors.maxTurns),
-        errors.maxTurns,
-      ),
-      field(
-        "maxPromptTokens",
-        STR.general.maxTokens,
-        STR.general.maxTokensHelp,
-        number("maxPromptTokens", g.maxPromptTokens, (n) => {
-          state.general = { ...state.general!, maxPromptTokens: n };
-        }, !!errors.maxPromptTokens),
-        errors.maxPromptTokens,
-      ),
-      field(
-        "shellTimeoutSecs",
-        STR.general.shellTimeout,
-        STR.general.shellTimeoutHelp,
-        number("shellTimeoutSecs", g.shellTimeoutSecs, (n) => {
-          state.general = { ...state.general!, shellTimeoutSecs: n };
-        }, !!errors.shellTimeoutSecs),
-        errors.shellTimeoutSecs,
-      ),
-      field("visionModel", STR.general.visionModel, STR.general.visionModelHelp, vision),
       footer,
     );
   }
@@ -2425,10 +2371,6 @@ export function openSettings(ipc: Ipc, onDatabaseReplaced?: () => void): void {
 
 interface GeneralState {
   approvalPolicy: string;
-  maxTurns: number;
-  maxPromptTokens: number;
-  shellTimeoutSecs: number;
-  visionModel: string;
   baseUrl: string;
   model: string;
   errors?: Record<string, string>;
@@ -2493,10 +2435,6 @@ function generalFrom(view: SettingsView): GeneralState {
   const s: Settings = view.settings;
   return {
     approvalPolicy: s.approval_policy || "always_ask",
-    maxTurns: s.caps.max_turns,
-    maxPromptTokens: s.caps.max_prompt_tokens,
-    shellTimeoutSecs: s.shell_timeout_secs,
-    visionModel: s.vision_model ?? "",
     baseUrl: s.base_url,
     model: s.model,
   };
@@ -2506,19 +2444,13 @@ function isDirty(g: GeneralState | null, baseline: GeneralState | null): boolean
   if (!g || !baseline) return false;
   return (
     g.approvalPolicy !== baseline.approvalPolicy ||
-    g.maxTurns !== baseline.maxTurns ||
-    g.maxPromptTokens !== baseline.maxPromptTokens ||
-    g.shellTimeoutSecs !== baseline.shellTimeoutSecs ||
-    g.visionModel !== baseline.visionModel
+    g.baseUrl !== baseline.baseUrl ||
+    g.model !== baseline.model
   );
 }
 
 function generalErrors(g: GeneralState): Record<string, string> {
   const errors: Record<string, string> = {};
-  const positive = (n: number) => Number.isInteger(n) && n >= 1;
-  if (!positive(g.maxTurns)) errors.maxTurns = STR.general.invalidTurns;
-  if (!positive(g.maxPromptTokens)) errors.maxPromptTokens = STR.general.invalidTokens;
-  if (!positive(g.shellTimeoutSecs)) errors.shellTimeoutSecs = STR.general.invalidTimeout;
   return errors;
 }
 

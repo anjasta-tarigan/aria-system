@@ -375,10 +375,7 @@ impl Agent {
                         base_url: settings.search_base_url.clone(),
                     }
                 });
-                let vision_model = settings
-                    .vision_model
-                    .clone()
-                    .unwrap_or_else(|| settings.model.clone());
+                let vision_model = settings.model.clone();
                 let vision = if vision_model.is_empty() {
                     None
                 } else {
@@ -577,8 +574,6 @@ impl LoopCtx {
                 Ok(s) => s,
                 Err(e) => return Err(e.into()),
             };
-            self.caps = settings.caps.clone();
-            self.shell_timeout_secs = settings.shell_timeout_secs;
             self.approval_policy = self
                 .conversation_policy
                 .unwrap_or(settings.approval_policy);
@@ -610,10 +605,7 @@ impl LoopCtx {
                     base_url: settings.search_base_url.clone(),
                 }
             });
-            let vision_model = settings
-                .vision_model
-                .clone()
-                .unwrap_or_else(|| settings.model.clone());
+            let vision_model = settings.model.clone();
             self.vision = if vision_model.is_empty() {
                 None
             } else {

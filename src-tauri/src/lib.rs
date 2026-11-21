@@ -70,7 +70,7 @@ fn build_agent(db: Arc<Db>, blobs: Arc<Blobs>, settings: Settings, api_key: Stri
     Agent::new(
         db,
         blobs,
-        settings.caps.clone(),
+        aria_core::config::Caps::default(),
         ProviderSource::Settings { settings, api_key },
     )
     .with_config(config)
@@ -321,9 +321,6 @@ fn provider_view(config: &Config, p: &AIProvider) -> AIProviderView {
 pub struct SettingsInput {
     pub base_url: String,
     pub model: String,
-    pub max_turns: u32,
-    pub max_prompt_tokens: u64,
-    pub shell_timeout_secs: u64,
     /// Optional OpenAI-compatible embeddings endpoint override.
     pub embedding_base_url: Option<String>,
     /// Optional embeddings model id; defaults to `text-embedding-3-small`.
@@ -333,7 +330,6 @@ pub struct SettingsInput {
     pub search_provider: Option<String>,
     pub search_base_url: Option<String>,
     pub search_api_key: Option<String>,
-    pub vision_model: Option<String>,
     /// Approval policy: "always_ask" (default) or "auto_approve_safe".
     pub approval_policy: Option<String>,
 }
@@ -1351,11 +1347,6 @@ fn set_settings(state: State<'_, App>, input: SettingsInput) -> CmdResult<Settin
     let mut settings = config.load().map_err(err)?;
     settings.base_url = input.base_url.trim().to_string();
     settings.model = input.model.trim().to_string();
-    settings.caps = aria_core::config::Caps {
-        max_turns: input.max_turns.max(1),
-        max_prompt_tokens: input.max_prompt_tokens.max(1),
-    };
-    settings.shell_timeout_secs = input.shell_timeout_secs.max(1);
     // A General save does not carry embedding fields; keep the last
     // embedding setup instead of clearing the model and endpoint.
     if let Some(url) = input
@@ -1380,10 +1371,6 @@ fn set_settings(state: State<'_, App>, input: SettingsInput) -> CmdResult<Settin
     settings.search_base_url = input
         .search_base_url
         .clone()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    settings.vision_model = input
-        .vision_model
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     settings.approval_policy = match input.approval_policy.as_deref().unwrap_or("always_ask") {

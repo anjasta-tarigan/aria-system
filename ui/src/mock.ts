@@ -70,13 +70,10 @@ const settings: SettingsView = {
   settings: {
     base_url: "https://api.openai.com/v1",
     model: "gpt-4o-mini",
-    caps: { max_turns: 50, max_prompt_tokens: 200000 },
-    shell_timeout_secs: 120,
     embedding_base_url: null,
     embedding_model: null,
     search_provider: null,
     search_base_url: null,
-    vision_model: null,
     approval_policy: "always_ask",
   },
   has_key: true,
@@ -599,16 +596,10 @@ const handlers: Record<string, Handler> = {
     settings.settings = {
       base_url: String(input.base_url),
       model: String(input.model),
-      caps: {
-        max_turns: Number(input.max_turns),
-        max_prompt_tokens: Number(input.max_prompt_tokens),
-      },
-      shell_timeout_secs: Number(input.shell_timeout_secs),
       embedding_base_url: (input.embedding_base_url as string) ?? null,
       embedding_model: (input.embedding_model as string) ?? null,
       search_provider: (input.search_provider as string) ?? null,
       search_base_url: (input.search_base_url as string) ?? null,
-      vision_model: (input.vision_model as string) ?? null,
       approval_policy: (input.approval_policy as string) ?? "always_ask",
     };
     if (input.api_key) settings.has_key = true;

@@ -771,27 +771,24 @@ async fn main_system_shell_approval_is_adaptive() {
 }
 
 #[tokio::test]
-async fn caps_are_hot_reloaded_between_turns() {
+async fn caps_are_hardcoded_not_hot_reloaded() {
     let fx = fixture();
     let dir = tempfile::tempdir().unwrap();
     let config = Config::new(dir.path());
     let initial = Settings {
         model: "test-model".to_string(),
-        caps: Caps {
-            max_turns: 50,
-            ..Caps::default()
-        },
+        approval_policy: ApprovalPolicy::AlwaysAsk,
         ..Settings::default()
     };
     config.save(&initial).unwrap();
     let mut lowered = initial.clone();
-    lowered.caps.max_turns = 1;
+    lowered.approval_policy = ApprovalPolicy::AutoApproveSafe;
     let write_settings = config.clone();
 
     let fake = Arc::new(FakeProvider {
         calls: Mutex::new(Vec::new()),
         script: Mutex::new(vec![Box::new(move |_: &[ChatMessage]| {
-            // The user saves a tighter cap while the Run is live.
+            // The user saves settings while the Run is live.
             write_settings.save(&lowered).unwrap();
             tools(vec![call("l1", "list_dir", serde_json::json!({"path": "."}))])
         })
@@ -810,9 +807,9 @@ async fn caps_are_hot_reloaded_between_turns() {
     .with_config(config);
     let handle = agent.start(&fx.conversation_id, "list").await.unwrap();
 
-    // The next loop iteration must see max_turns = 1 and stop before Turn 2.
-    assert_eq!(wait_terminal(&fx, &handle).await, RunState::BudgetExhausted);
-    assert_eq!(fake.call_count(), 1);
+    // Settings no longer carry caps; the Run uses the hardcoded default and
+    // completes normally. Hot-reload still applies to other fields.
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
 }
 
 #[tokio::test]
