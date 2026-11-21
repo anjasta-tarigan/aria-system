@@ -1336,73 +1336,116 @@ pre {
   cursor: not-allowed;
 }
 
-/* Bottom bar inside the card: chips left, send button right. */
+/* Bottom bar inside the card: chips left, send button right in ONE line. */
 .composer-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+  padding: var(--sp-1) var(--sp-3) var(--sp-3);
   gap: var(--sp-2);
+  min-width: 0;
 }
 
 .composer-chips {
   display: flex;
+  align-items: center;
   gap: var(--sp-2);
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
 
-/* Pill-shaped select chips and button chips. */
-.composer-chip {
+.composer-chips::-webkit-scrollbar {
+  display: none;
+}
+
+/* Pill-shaped select chips and button chips in the composer toolbar. */
+.composer-chip,
+button.composer-chip,
+select.composer-chip {
   appearance: none;
   -webkit-appearance: none;
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: auto !important;
+  max-width: 240px;
+  height: 28px !important;
+  min-height: 28px !important;
+  max-height: 28px !important;
+  box-sizing: border-box !important;
+  background: var(--panel-2) !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 999px !important;
+  color: var(--muted) !important;
   cursor: pointer;
   font: inherit;
-  font-size: var(--fs-xs);
-  padding: 3px var(--sp-3);
-  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  font-size: var(--fs-xs) !important;
+  line-height: 26px !important;
+  padding: 0 var(--sp-3) !important;
+  margin: 0 !important;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 0 auto;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
 }
 
-.composer-chip:hover {
-  border-color: #3b4451;
-  color: var(--text);
+.composer-chip:hover,
+button.composer-chip:hover,
+select.composer-chip:hover {
+  border-color: #3b4451 !important;
+  color: var(--text) !important;
 }
 
-.composer-chip:focus-visible {
+.composer-chip:focus-visible,
+button.composer-chip:focus-visible,
+select.composer-chip:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
-/* Auto mode: accent-tinted to signal elevated trust. */
-.approval-auto {
-  background: color-mix(in srgb, var(--accent) 12%, var(--panel-2));
-  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
-  color: var(--accent);
+/* Dropdown select chip (e.g. Mode) with subtle chevron. */
+select.composer-chip {
+  padding-right: 22px !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='none' stroke='%238b94a3' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='m1 1 4 4 4-4'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 8px 5px;
 }
 
-.approval-auto:hover {
-  background: color-mix(in srgb, var(--accent) 20%, var(--panel-2));
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
-  color: var(--accent);
+/* Auto mode: accent-tinted to signal elevated trust. */
+.approval-auto,
+button.approval-auto {
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel-2)) !important;
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line)) !important;
+  color: var(--accent) !important;
+}
+
+.approval-auto:hover,
+button.approval-auto:hover {
+  background: color-mix(in srgb, var(--accent) 20%, var(--panel-2)) !important;
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line)) !important;
+  color: var(--accent) !important;
 }
 
 /* Locked mode: warm amber tint. */
-.approval-locked {
-  background: color-mix(in srgb, var(--warn) 10%, var(--panel-2));
-  border-color: color-mix(in srgb, var(--warn) 30%, var(--line));
-  color: var(--warn);
+.approval-locked,
+button.approval-locked {
+  background: color-mix(in srgb, var(--warn) 10%, var(--panel-2)) !important;
+  border-color: color-mix(in srgb, var(--warn) 30%, var(--line)) !important;
+  color: var(--warn) !important;
 }
 
-.approval-locked:hover {
-  background: color-mix(in srgb, var(--warn) 18%, var(--panel-2));
-  border-color: color-mix(in srgb, var(--warn) 45%, var(--line));
+.approval-locked:hover,
+button.approval-locked:hover {
+  background: color-mix(in srgb, var(--warn) 18%, var(--panel-2)) !important;
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--line)) !important;
 }
 
-/* Model chip: subtle indicator dot. */
+/* Model chip: subtle indicator dot and chevron. */
 .model-chip {
   font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
 }
@@ -1412,9 +1455,22 @@ pre {
   font-size: 10px;
 }
 
+.model-chip-text {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip-chevron {
+  font-size: 9px;
+  color: var(--muted);
+  margin-left: 1px;
+}
+
 .model-chip.model-unset {
-  border-style: dashed;
-  color: var(--warn);
+  border-style: dashed !important;
+  color: var(--warn) !important;
 }
 
 /* Inline model editor popover. */
@@ -1836,7 +1892,7 @@ select[aria-invalid="true"] {
   border-color: var(--bad);
 }
 
-select {
+select:not(.composer-chip) {
   font: inherit;
   color: inherit;
   background: var(--panel);

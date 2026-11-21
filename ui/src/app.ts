@@ -1568,8 +1568,8 @@ function composerNode(
     },
   },
     h("span", { class: "model-chip-icon", "aria-hidden": "true" }, "◈"),
-    " ",
-    modelLabel,
+    h("span", { class: "model-chip-text" }, modelLabel),
+    h("span", { class: "chip-chevron", "aria-hidden": "true" }, "▾"),
   );
 
   // Mode chip (Normal / Creative).
@@ -1590,8 +1590,8 @@ function composerNode(
         } catch (err) { ui.notice = String(err); render(); }
       },
     },
-    h("option", { value: "normal" }, "Normal"),
-    h("option", { value: "creative" }, "Creative"),
+    h("option", { value: "normal" }, "Normal ▾"),
+    h("option", { value: "creative" }, "Creative ▾"),
   ) as HTMLSelectElement;
   modeSelect.value = conv.mode;
 
