@@ -27,7 +27,7 @@ pub use background::BackgroundTasks;
 pub use crate::db::{BackgroundStatus, BackgroundTask};
 pub use fetch::{FetchOutcome, classify_ip, fetch_url};
 pub use search::{SearchConfig, SearchProvider, SearchHit, web_search};
-pub use shell::{ShellArgs, ShellOutcome, is_harmful_command, is_safe_command, run_shell};
+pub use shell::{ShellArgs, ShellOutcome, browser_open, is_harmful_command, is_safe_command, run_shell};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
@@ -135,9 +135,11 @@ pub const RUN_BACKGROUND: &str = "run_background";
 pub const POLL_TASK: &str = "poll_task";
 pub const KILL_TASK: &str = "kill_task";
 pub const DELEGATE: &str = "delegate";
+pub const GLOB_FILES: &str = "glob_files";
+pub const BROWSER_OPEN: &str = "browser_open";
 
 /// The tool set with its approval classes.
-pub const TOOLS: [(&str, ApprovalClass); 18] = [
+pub const TOOLS: [(&str, ApprovalClass); 20] = [
     (READ_FILE, ApprovalClass::Read),
     (VIEW_IMAGE, ApprovalClass::Read),
     (LIST_DIR, ApprovalClass::Read),
@@ -156,6 +158,8 @@ pub const TOOLS: [(&str, ApprovalClass); 18] = [
     (POLL_TASK, ApprovalClass::Read),
     (KILL_TASK, ApprovalClass::Read),
     (DELEGATE, ApprovalClass::Network),
+    (GLOB_FILES, ApprovalClass::Read),
+    (BROWSER_OPEN, ApprovalClass::Read),
 ];
 
 pub const SYSTEM_PROMPT: &str = "\
@@ -462,6 +466,7 @@ pub fn approval_targets(scope: &Scope, tool: &str, args_json: &str) -> Vec<std::
             out.extend(arg("path").and_then(|p| target(open.resolve_create(p))));
         }
         SEARCH_FILES => out.extend(arg("path").and_then(|p| target(open.resolve_read(p)))),
+        GLOB_FILES => out.extend(arg("path").and_then(|p| target(open.resolve_read(p)))),
         MOVE_FILE => {
             out.extend(arg("from").and_then(|p| target(open.resolve_read(p))));
             out.extend(arg("to").and_then(|p| target(open.resolve_create(p))));
@@ -702,13 +707,37 @@ impl ToolRegistry {
                     "required": ["task"]
                 }),
             ),
+            spec(
+                GLOB_FILES,
+                "List files whose paths match a glob pattern, e.g. `**/*.rs` or `src/**/*.{ts,tsx}`. Pass `path` to search a specific directory; otherwise the allowed roots are searched. Respects .gitignore.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "Glob pattern, e.g. **/*.rs" },
+                        "path": { "type": "string", "description": "Directory to search; absolute or relative to the base" },
+                        "max_results": { "type": "integer", "minimum": 1, "default": 200 }
+                    },
+                    "required": ["pattern"]
+                }),
+            ),
+            spec(
+                BROWSER_OPEN,
+                "Open a URL in the system's default browser (what is already installed on the device; no extra browser is needed).",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "http(s) URL to open" }
+                    },
+                    "required": ["url"]
+                }),
+            ),
         ];
         if !matches!(scope, Scope::None) {
             return all.into_iter()
                 .filter(|s| !disabled.contains(&s.name))
                 .collect();
         }
-        let usable = [WEB_FETCH, WEB_SEARCH, TODOS, REMEMBER, RECALL, DELEGATE];
+        let usable = [WEB_FETCH, WEB_SEARCH, TODOS, REMEMBER, RECALL, DELEGATE, BROWSER_OPEN];
         all.into_iter()
             .filter(|s| usable.contains(&s.name.as_str()))
             .filter(|s| !disabled.contains(&s.name))
@@ -745,6 +774,8 @@ impl ToolRegistry {
             TODOS => files::todos(ctx, parse_args(args)?).map(outcome),
             REMEMBER => memories::remember(ctx, parse_args(args)?).await.map(outcome),
             RECALL => memories::recall(ctx, parse_args(args)?).await.map(outcome),
+            GLOB_FILES => files::glob_files(ctx, parse_args(args)?).map(outcome),
+            BROWSER_OPEN => shell::browser_open(ctx, parse_args(args)?).map(outcome),
             RUN_BACKGROUND => run_background(ctx, parse_args(args)?).map(outcome),
             POLL_TASK => poll_task(ctx, parse_args(args)?).map(outcome),
             KILL_TASK => kill_task(ctx, parse_args(args)?).await.map(outcome),

@@ -5,7 +5,7 @@
 //! A nonzero exit code is a normal result, not an error (issue 09).
 
 use std::path::PathBuf;
-use std::process::Stdio;
+use std::process::{Command as StdCommand, Stdio};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -399,6 +399,34 @@ fn head_tail(text: &str) -> String {
         text.len() - start - (text.len() - end),
         &text[end..]
     )
+}
+
+/// Open a URL in the system's default browser (`xdg-open` on Linux, `open` on
+/// macOS, `start` on Windows). No extra browser is installed — it uses what is
+/// already on the device.
+#[derive(Debug, Deserialize)]
+pub struct BrowserOpenArgs {
+    pub url: String,
+}
+
+pub fn browser_open(_ctx: &ToolContext, args: BrowserOpenArgs) -> Result<String> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "cmd"
+    } else {
+        "xdg-open"
+    };
+    let mut command = StdCommand::new(opener);
+    if cfg!(windows) {
+        command.args(["/c", "start", "", &args.url]);
+    } else {
+        command.arg(&args.url);
+    }
+    // Detach: the browser should outlive Aria. Ignore errors — the browser may
+    // simply not be installed, which the model can learn from the silence.
+    let _ = command.spawn();
+    Ok(format!("opened {} in the default browser", args.url))
 }
 
 #[cfg(test)]

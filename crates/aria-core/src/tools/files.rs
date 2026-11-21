@@ -288,6 +288,74 @@ pub fn search_files(ctx: &ToolContext, args: SearchArgs) -> Result<String> {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct GlobArgs {
+    /// Glob pattern, e.g. `**/*.rs` or `src/**/*.{ts,tsx}`.
+    pub pattern: String,
+    /// Directory to search. Defaults to the allowed roots (or the base dir).
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub max_results: Option<usize>,
+}
+
+/// List files whose paths match a glob pattern. Respects .gitignore.
+pub fn glob_files(ctx: &ToolContext, args: GlobArgs) -> Result<String> {
+    let scope = &ctx.scope;
+    let glob = globset::Glob::new(&args.pattern)
+        .map_err(|e| ToolError::Args(format!("invalid glob: {e}")))?
+        .compile_matcher();
+    let max = default_limit(args.max_results, 200);
+    let bases = match &args.path {
+        Some(p) => vec![scope.resolve_read(p)?],
+        None => scope.roots(),
+    };
+    let multi = bases.len() > 1;
+    let display_root = if multi { None } else { scope.root() };
+
+    let mut hits = Vec::new();
+    let mut scanned = 0usize;
+    let mut capped = false;
+    'outer: for base in &bases {
+        let walker = ignore::WalkBuilder::new(base)
+            .standard_filters(true)
+            .build();
+        for entry in walker.flatten() {
+            let path = entry.path();
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
+            scanned += 1;
+            if scanned > MAX_SCAN {
+                capped = true;
+                break 'outer;
+            }
+            let target = path.strip_prefix(base).unwrap_or(path);
+            if !glob.is_match(target) {
+                continue;
+            }
+            let shown = match &display_root {
+                Some(root) => path.strip_prefix(root).unwrap_or(path),
+                None => path,
+            };
+            hits.push(shown.display().to_string());
+            if hits.len() >= max {
+                break 'outer;
+            }
+        }
+    }
+    let note = if capped {
+        format!("\n… [stopped after {MAX_SCAN} files; narrow it with `path`]")
+    } else {
+        String::new()
+    };
+    if hits.is_empty() {
+        Ok(format!("no matches{note}"))
+    } else {
+        Ok(format!("{}{note}", hits.join("\n")))
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct EditArgs {
     pub path: String,
     pub search: String,
@@ -433,4 +501,86 @@ pub fn todos(ctx: &ToolContext, args: TodosArgs) -> Result<String> {
         ));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod glob_tests {
+    use super::*;
+    use crate::db::Db;
+    use crate::journal::Blobs;
+    use crate::workspace::{Scope, WorkspaceRoot};
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    fn ctx_for(dir: &std::path::Path) -> ToolContext {
+        let root = WorkspaceRoot::new(dir).unwrap();
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let blobs = Arc::new(Blobs::new(dir, Arc::clone(&db)));
+        ToolContext {
+            scope: Scope::Workspace(root),
+            root: Some(WorkspaceRoot::new(dir).unwrap()),
+            workspace_id: Some("ws".into()),
+            journal_id: "test".into(),
+            run_id: "test".into(),
+            db,
+            blobs,
+            shell_timeout_secs: 30,
+            embed: None,
+            reranker: None,
+            reranker_top_k: 50,
+            search: None,
+            vision: None,
+            background: None,
+            disabled_tools: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn glob_files_matches_pattern() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "x").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "y").unwrap();
+        std::fs::write(dir.path().join("c.txt"), "z").unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join("d.rs"), "w").unwrap();
+
+        let ctx = ctx_for(dir.path());
+        let out = glob_files(&ctx, GlobArgs {
+            pattern: "**/*.rs".into(),
+            path: None,
+            max_results: None,
+        }).unwrap();
+
+        assert!(out.contains("a.rs"), "output: {out}");
+        assert!(out.contains("b.rs"), "output: {out}");
+        assert!(out.contains("sub/d.rs"), "output: {out}");
+        assert!(!out.contains("c.txt"), "output: {out}");
+    }
+
+    #[test]
+    fn glob_files_no_matches() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+
+        let ctx = ctx_for(dir.path());
+        let out = glob_files(&ctx, GlobArgs {
+            pattern: "**/*.rs".into(),
+            path: None,
+            max_results: None,
+        }).unwrap();
+
+        assert_eq!(out, "no matches");
+    }
+
+    #[test]
+    fn glob_files_invalid_pattern_errors() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_for(dir.path());
+        let err = glob_files(&ctx, GlobArgs {
+            pattern: "[".into(),
+            path: None,
+            max_results: None,
+        });
+        assert!(err.is_err());
+    }
 }
