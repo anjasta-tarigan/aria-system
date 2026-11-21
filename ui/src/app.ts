@@ -1990,7 +1990,7 @@ function renderSidePanelFiles(conv: ConversationView): HTMLElement {
           class: "icon panel-dismiss",
           title: "Hide Files panel",
           onclick: () => {
-            ui.sidePanelTab = "artifacts";
+            ui.sidePanelOpen = false;
             render();
           },
         },
