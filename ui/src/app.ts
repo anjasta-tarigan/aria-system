@@ -139,11 +139,19 @@ interface Ui {
   lightbox: { src: string; name: string } | null;
 }
 
-/// Persist side-panel open/dismissed state so an explicit dismissal survives
-/// an app restart (stopping and rerunning `pnpm tauri dev`).
+/// Persist side-panel open/dismissed state plus the user's chosen size and
+/// tab so the panel configuration survives an app restart
+/// (stopping and rerunning `pnpm tauri dev`).
 const SIDE_PANEL_STORAGE_KEY = "aria:side-panel";
 
-function loadSidePanelState(): { open: boolean; dismissed: boolean } {
+type SidePanelState = {
+  open: boolean;
+  dismissed: boolean;
+  width: number;
+  tab: "artifacts" | "files";
+};
+
+function loadSidePanelState(): SidePanelState {
   try {
     const raw = localStorage.getItem(SIDE_PANEL_STORAGE_KEY);
     if (raw) {
@@ -151,19 +159,26 @@ function loadSidePanelState(): { open: boolean; dismissed: boolean } {
       return {
         open: typeof parsed.open === "boolean" ? parsed.open : true,
         dismissed: typeof parsed.dismissed === "boolean" ? parsed.dismissed : false,
+        width:
+          typeof parsed.width === "number" && parsed.width > 0
+            ? parsed.width
+            : 440,
+        tab: parsed.tab === "files" ? "files" : "artifacts",
       };
     }
   } catch {
     // localStorage may be unavailable or unreadable; fall back to defaults.
   }
-  return { open: true, dismissed: false };
+  return { open: true, dismissed: false, width: 440, tab: "artifacts" };
 }
 
-function saveSidePanelState(open: boolean, dismissed: boolean) {
+function saveSidePanelState(state: Partial<SidePanelState>) {
   try {
+    const raw = localStorage.getItem(SIDE_PANEL_STORAGE_KEY);
+    const current: SidePanelState = raw ? JSON.parse(raw) : panelState;
     localStorage.setItem(
       SIDE_PANEL_STORAGE_KEY,
-      JSON.stringify({ open, dismissed }),
+      JSON.stringify({ ...current, ...state }),
     );
   } catch {
     // localStorage may be unavailable or unwritable; best effort only.
@@ -194,9 +209,9 @@ const ui: Ui = {
   providers: [] as AIProvider[],
   activeArtifact: null,
   artifactTab: "preview",
-  sidePanelTab: "artifacts",
+  sidePanelTab: panelState.tab,
   sidePanelOpen: panelState.open,
-  sidePanelWidth: 440,
+  sidePanelWidth: panelState.width,
   autoOpenedArtifactId: null,
   sidePanelDismissed: panelState.dismissed,
   lightbox: null,
@@ -289,7 +304,11 @@ function render() {
       ui.sidePanelOpen = true;
       ui.sidePanelTab = "artifacts";
       ui.sidePanelDismissed = false;
-      saveSidePanelState(ui.sidePanelOpen, ui.sidePanelDismissed);
+      saveSidePanelState({
+        open: ui.sidePanelOpen,
+        dismissed: ui.sidePanelDismissed,
+        tab: ui.sidePanelTab,
+      });
       if (latestArt.isStreaming) {
         streamingArtifactActive = true;
         ui.artifactTab = "code";
@@ -402,6 +421,7 @@ function onResizerMouseMove(e: MouseEvent) {
 
 function onResizerMouseUp() {
   resizing = false;
+  saveSidePanelState({ width: ui.sidePanelWidth });
 }
 
 // --------------------------------------------------------------- sidebar
@@ -1031,6 +1051,7 @@ function conversationPane(
             title: `${runningBg.length} background task running`,
             onclick: () => {
               ui.sidePanelTab = "files";
+              saveSidePanelState({ tab: ui.sidePanelTab });
               render();
             },
           },
@@ -1049,7 +1070,11 @@ function conversationPane(
         // Remember an explicit dismiss so auto-open doesn't reopen the panel
         // on the next message; clearing it when the user re-opens.
         ui.sidePanelDismissed = !ui.sidePanelOpen;
-        saveSidePanelState(ui.sidePanelOpen, ui.sidePanelDismissed);
+        saveSidePanelState({
+          open: ui.sidePanelOpen,
+          dismissed: ui.sidePanelDismissed,
+          tab: ui.sidePanelTab,
+        });
         render();
       },
     }, toggleIcon),
@@ -1324,7 +1349,11 @@ function messageNode(
             ui.sidePanelOpen = true;
             ui.sidePanelTab = "artifacts";
             ui.sidePanelDismissed = false;
-            saveSidePanelState(ui.sidePanelOpen, ui.sidePanelDismissed);
+            saveSidePanelState({
+              open: ui.sidePanelOpen,
+              dismissed: ui.sidePanelDismissed,
+              tab: ui.sidePanelTab,
+            });
             render();
           });
         }
@@ -1654,7 +1683,11 @@ function streamingNode(artifactsIndex?: ConversationArtifactIndex | null): HTMLE
             ui.sidePanelOpen = true;
             ui.sidePanelTab = "artifacts";
             ui.sidePanelDismissed = false;
-            saveSidePanelState(ui.sidePanelOpen, ui.sidePanelDismissed);
+            saveSidePanelState({
+              open: ui.sidePanelOpen,
+              dismissed: ui.sidePanelDismissed,
+              tab: ui.sidePanelTab,
+            });
             render();
           });
         }
@@ -2178,6 +2211,7 @@ function renderSidePanelArtifacts(
             class: `side-panel-tab ${active ? "active" : ""}`,
             onclick: () => {
               ui.sidePanelTab = "artifacts";
+              saveSidePanelState({ tab: ui.sidePanelTab });
               render();
             },
           },
@@ -2189,6 +2223,7 @@ function renderSidePanelArtifacts(
             class: `side-panel-tab ${!active ? "active" : ""}`,
             onclick: () => {
               ui.sidePanelTab = "files";
+              saveSidePanelState({ tab: ui.sidePanelTab });
               render();
             },
           },
@@ -2271,7 +2306,11 @@ function renderSidePanelFiles(conv: ConversationView): HTMLElement {
           onclick: () => {
             ui.sidePanelOpen = false;
             ui.sidePanelDismissed = true;
-            saveSidePanelState(ui.sidePanelOpen, ui.sidePanelDismissed);
+            saveSidePanelState({
+              open: ui.sidePanelOpen,
+              dismissed: ui.sidePanelDismissed,
+              tab: ui.sidePanelTab,
+            });
             render();
           },
         },
@@ -2323,6 +2362,7 @@ function sidePanelNode(
       (tab) => {
         ui.artifactTab = tab;
         ui.sidePanelTab = "artifacts";
+        saveSidePanelState({ tab: ui.sidePanelTab });
         render();
       },
       (ver) => {
