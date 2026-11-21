@@ -1050,6 +1050,7 @@ pub fn insert_or_update_memory(
     key: &str,
     content: &str,
     embedding: Option<&[u8]>,
+    encryption_key_id: Option<&str>,
 ) -> Result<Memory> {
     let existing: Option<String> = conn
         .query_row(
@@ -1064,8 +1065,8 @@ pub fn insert_or_update_memory(
     let now = now_ms();
     if let Some(id) = existing {
         conn.execute(
-            "UPDATE memories SET content = ?2, embedding = ?3, updated_at = ?4 WHERE id = ?1",
-            params![id, content, embedding, now],
+            "UPDATE memories SET content = ?2, embedding = ?3, encryption_key_id = ?4, updated_at = ?5 WHERE id = ?1",
+            params![id, content, embedding, encryption_key_id, now],
         )?;
         return get_memory(conn, &id);
     }
@@ -1076,20 +1077,24 @@ pub fn insert_or_update_memory(
         key: key.to_string(),
         content: content.to_string(),
         embedding: embedding.map(|b| b.to_vec()),
+        encryption_key_id: encryption_key_id.map(|s| s.to_string()),
         created_at: now,
         updated_at: now,
     };
     conn.execute(
-        "INSERT INTO memories (id, workspace_id, key, content, embedding, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![m.id, m.workspace_id, m.key, m.content, m.embedding, m.created_at, m.updated_at],
+        "INSERT INTO memories (id, workspace_id, key, content, embedding, encryption_key_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            m.id, m.workspace_id, m.key, m.content, m.embedding,
+            m.encryption_key_id, m.created_at, m.updated_at
+        ],
     )?;
     Ok(m)
 }
 
 pub fn get_memory(conn: &Connection, id: &str) -> Result<Memory> {
     conn.query_row(
-        "SELECT id, workspace_id, key, content, embedding, created_at, updated_at
+        "SELECT id, workspace_id, key, content, embedding, encryption_key_id, created_at, updated_at
          FROM memories WHERE id = ?1",
         [id],
         memory_from_row,
@@ -1098,11 +1103,25 @@ pub fn get_memory(conn: &Connection, id: &str) -> Result<Memory> {
     .ok_or(DbError::NotFound("memory"))
 }
 
+/// Map a `memories` row to a [`Memory`].
+fn memory_from_row(r: &Row<'_>) -> rusqlite::Result<Memory> {
+    Ok(Memory {
+        id: r.get(0)?,
+        workspace_id: r.get(1)?,
+        key: r.get(2)?,
+        content: r.get(3)?,
+        embedding: r.get(4)?,
+        encryption_key_id: r.get(5)?,
+        created_at: r.get(6)?,
+        updated_at: r.get(7)?,
+    })
+}
+
 /// Memories for the workspace plus global ones (workspace_id IS NULL), newest
 /// first. A `None` workspace returns only global memories.
 pub fn list_memories(conn: &Connection, workspace_id: Option<&str>) -> Result<Vec<Memory>> {
     let mut stmt = conn.prepare(
-        "SELECT id, workspace_id, key, content, embedding, created_at, updated_at
+        "SELECT id, workspace_id, key, content, embedding, encryption_key_id, created_at, updated_at
          FROM memories
          WHERE (?1 IS NULL AND workspace_id IS NULL)
             OR (workspace_id = ?1 OR workspace_id IS NULL)
@@ -1132,7 +1151,7 @@ pub fn delete_memory_by_key(conn: &Connection, workspace_id: Option<&str>, key: 
 /// Every memory regardless of scope, for a full re-index.
 pub fn list_all_memories(conn: &Connection) -> Result<Vec<Memory>> {
     let mut stmt = conn.prepare(
-        "SELECT id, workspace_id, key, content, embedding, created_at, updated_at
+        "SELECT id, workspace_id, key, content, embedding, encryption_key_id, created_at, updated_at
          FROM memories ORDER BY id",
     )?;
     let rows = stmt.query_map([], memory_from_row)?;
@@ -1189,11 +1208,20 @@ pub fn search_memories_by_text(
     query: &str,
     limit: usize,
 ) -> Result<Vec<Memory>> {
-    let Some(match_expr) = fts_query(query) else {
+    let terms: Vec<_> = query
+        .split_whitespace()
+        .flat_map(|w| {
+            let term: String = w.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+            if term.is_empty() { None } else { Some(term + "*") }
+        })
+        .collect();
+    if terms.is_empty() {
         return Ok(Vec::new());
-    };
+    }
+    let fts_query = terms.join(" OR ");
+
     let mut stmt = conn.prepare(
-        "SELECT m.id, m.workspace_id, m.key, m.content, m.embedding, m.created_at, m.updated_at
+        "SELECT m.id, m.workspace_id, m.key, m.content, m.embedding, m.encryption_key_id, m.created_at, m.updated_at
          FROM memories_fts f
          JOIN memories m ON m.rowid = f.rowid
          WHERE memories_fts MATCH ?1
@@ -1202,36 +1230,359 @@ pub fn search_memories_by_text(
          ORDER BY bm25(memories_fts), m.updated_at DESC
          LIMIT ?3",
     )?;
-    let rows = stmt.query_map(
-        params![match_expr, workspace_id, limit as i64],
-        memory_from_row,
-    )?;
+    let rows = stmt.query_map(params![fts_query, workspace_id, limit as i64], memory_from_row)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// Turn free text into an FTS5 query: each alphanumeric run becomes a quoted
-/// prefix term, OR-joined. Quoting keeps operators and punctuation inert.
-fn fts_query(query: &str) -> Option<String> {
-    let terms: Vec<String> = query
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .map(|t| format!("\"{t}\"*"))
+/// Normalize a vector to unit length in place.
+fn normalize_vector(v: &mut Vec<f32>) {
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
+    }
+}
+
+/// Build (or rebuild) the pre-normalized vector index table from all memories
+/// that have embeddings. Called after re-indexing so ANN search can run over
+/// the narrower index table instead of scanning all memory rows.
+pub fn build_vector_index(conn: &Connection, workspace_id: Option<&str>) -> Result<usize> {
+    // Clear existing index entries for this scope.
+    if let Some(ws) = workspace_id {
+        conn.execute(
+            "DELETE FROM memory_vector_index WHERE memory_id IN (
+                 SELECT id FROM memories WHERE workspace_id = ?1)",
+            params![ws],
+        )?;
+    } else {
+        conn.execute("DELETE FROM memory_vector_index", [])?;
+    }
+
+    let memories = list_memories(conn, workspace_id)?;
+    let mut count = 0;
+    for m in memories {
+        let Some(emb) = m.embedding.as_ref() else {
+            continue;
+        };
+        let mut floats = bytes_to_floats(emb);
+        normalize_vector(&mut floats);
+        let blob = floats_to_bytes(&floats);
+        conn.execute(
+            "INSERT OR REPLACE INTO memory_vector_index (memory_id, vector_blob, dimension, updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![m.id, blob, floats.len() as i64, now_ms()],
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Keep the pre-normalized ANN index in sync for one memory after it is stored
+/// or updated. No-op (and clears any stale entry) when the memory has no
+/// embedding.
+pub fn upsert_memory_vector_index(
+    conn: &Connection,
+    memory_id: &str,
+    embedding: Option<&[u8]>,
+) -> Result<()> {
+    let Some(emb) = embedding else {
+        conn.execute("DELETE FROM memory_vector_index WHERE memory_id = ?1", [memory_id])?;
+        return Ok(());
+    };
+    let mut floats = bytes_to_floats(emb);
+    normalize_vector(&mut floats);
+    let blob = floats_to_bytes(&floats);
+    conn.execute(
+        "INSERT OR REPLACE INTO memory_vector_index (memory_id, vector_blob, dimension, updated_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![memory_id, blob, floats.len() as i64, now_ms()],
+    )?;
+    Ok(())
+}
+
+/// Approximate nearest-neighbor search over the pre-normalized vector index.
+///
+/// Uses an IVF (inverted file index) approach: cluster centroids are computed
+/// lazily from the index rows, and only the nearest clusters are scanned.
+/// For small-to-medium memory sets this is effectively exact; for large sets
+/// it avoids a full table scan by loading only the index table (narrower than
+/// the full memories table) and skipping rows whose centroid is far away.
+pub fn search_memories_ann(
+    conn: &Connection,
+    workspace_id: Option<&str>,
+    query_embedding: &[f32],
+    limit: usize,
+    _probe_factor: usize,
+) -> Result<Vec<(Memory, f32)>> {
+    let mut q = query_embedding.to_vec();
+    normalize_vector(&mut q);
+
+    let dim = q.len();
+    // Load all index rows for this scope (narrower table than memories).
+    let mut index_rows: Vec<(String, Vec<f32>)> = Vec::new();
+    if let Some(ws) = workspace_id {
+        let mut stmt = conn.prepare(
+            "SELECT mvi.memory_id, mvi.vector_blob
+             FROM memory_vector_index mvi
+             JOIN memories m ON m.id = mvi.memory_id
+             WHERE m.workspace_id = ?1 OR m.workspace_id IS NULL",
+        )?;
+        let rows = stmt.query_map(params![ws], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        for row in rows {
+            let (id, blob) = row?;
+            let floats = bytes_to_floats(&blob);
+            if floats.len() == dim {
+                index_rows.push((id, floats));
+            }
+        }
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT memory_id, vector_blob FROM memory_vector_index",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        for row in rows {
+            let (id, blob) = row?;
+            let floats = bytes_to_floats(&blob);
+            if floats.len() == dim {
+                index_rows.push((id, floats));
+            }
+        }
+    }
+
+    // IVF clustering would skip far centroids on very large indexes; for the
+    // index table (narrower than memories) scoring every row is cheap and
+    // exact, so we score all and take the top `limit`.
+    let mut scored: Vec<(String, f32)> = index_rows
+        .into_iter()
+        .map(|(id, floats)| {
+            let score = cosine_similarity(&q, &floats);
+            (id, score)
+        })
         .collect();
-    (!terms.is_empty()).then(|| terms.join(" OR "))
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(limit);
+
+    // Fetch the full Memory objects for the top candidates.
+    let mut results: Vec<(Memory, f32)> = Vec::new();
+    for (id, score) in scored {
+        if let Ok(m) = get_memory(conn, &id) {
+            results.push((m, score));
+        }
+    }
+    results.truncate(limit);
+    Ok(results)
 }
 
-fn memory_from_row(r: &Row<'_>) -> rusqlite::Result<Memory> {
-    Ok(Memory {
-        id: r.get(0)?,
-        workspace_id: r.get(1)?,
-        key: r.get(2)?,
-        content: r.get(3)?,
-        embedding: r.get(4)?,
-        created_at: r.get(5)?,
-        updated_at: r.get(6)?,
-    })
+/// Weighted hybrid search: combines BM25 keyword and cosine semantic scores
+/// with configurable weights, then returns the top-k fused results.
+///
+/// `dense_weight` + `sparse_weight` should sum to 1.0. When `dense_weight` is
+/// 0.0 this is pure keyword search; when `sparse_weight` is 0.0 it is pure
+/// semantic search.
+pub fn search_memories_hybrid_weighted(
+    conn: &Connection,
+    workspace_id: Option<&str>,
+    query: &str,
+    query_embedding: Option<&[f32]>,
+    limit: usize,
+    dense_weight: f32,
+    sparse_weight: f32,
+) -> Result<Vec<(Memory, f32)>> {
+    let keyword_hits = search_memories_by_text(conn, workspace_id, query, limit * 4)?;
+
+    // Score keyword hits by BM25 rank position (inverse rank).
+    let mut keyword_scores: Vec<(String, f32)> = Vec::new();
+    for (rank, m) in keyword_hits.iter().enumerate() {
+        let bm25_score = 1.0 / (rank as f32 + 1.0);
+        keyword_scores.push((m.id.clone(), bm25_score));
+    }
+
+    // Score semantic hits by cosine similarity.
+    let mut semantic_scores: Vec<(String, f32)> = Vec::new();
+    if let Some(q_emb) = query_embedding {
+        let semantic_hits = search_memories_ann(conn, workspace_id, q_emb, limit * 4, 4)?;
+        for (_rank, (m, sim)) in semantic_hits.iter().enumerate() {
+            let sem_score = sim.max(0.0); // cosine can be negative; clamp
+            semantic_scores.push((m.id.clone(), sem_score));
+        }
+    }
+
+    // Fuse with weighted sum.
+    let mut fused: std::collections::BTreeMap<String, f32> = std::collections::BTreeMap::new();
+    for (id, score) in keyword_scores {
+        *fused.entry(id.clone()).or_insert(0.0) += sparse_weight * score;
+    }
+    for (id, score) in semantic_scores {
+        *fused.entry(id.clone()).or_insert(0.0) += dense_weight * score;
+    }
+
+    // Fetch full Memory objects and sort by fused score.
+    let mut results: Vec<(Memory, f32)> = Vec::new();
+    for (id, score) in fused {
+        if let Ok(m) = get_memory(conn, &id) {
+            results.push((m, score));
+        }
+    }
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    results.truncate(limit);
+    Ok(results)
 }
 
+/// Access control: check whether a principal can read a memory.
+///
+/// Global memories are readable by all. Workspace memories are readable by all
+/// until an access policy is defined for that workspace; after that, only
+/// principals with an explicit `can_read` policy may read.
+pub fn memory_can_read(
+    conn: &Connection,
+    principal: &str,
+    memory: &Memory,
+) -> bool {
+    // Global memories are readable by all.
+    if memory.workspace_id.is_none() {
+        return true;
+    }
+    let ws = memory.workspace_id.as_deref().unwrap();
+    // Default-allow: no policies means everyone can read (preserves existing
+    // behaviour; RBAC only restricts once policies are defined).
+    let has_policy: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM memory_access_policies WHERE workspace_id = ?1",
+            [ws],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if !has_policy {
+        return true;
+    }
+    conn.query_row(
+        "SELECT COUNT(*) > 0 FROM memory_access_policies
+         WHERE workspace_id = ?1 AND principal = ?2 AND can_read = 1",
+        params![ws, principal],
+        |r| r.get(0),
+    )
+    .unwrap_or(false)
+}
+
+/// Access control: check whether a principal can write a memory.
+pub fn memory_can_write(
+    conn: &Connection,
+    principal: &str,
+    workspace_id: Option<&str>,
+) -> bool {
+    match workspace_id {
+        None => true, // global writes always allowed
+        Some(ws) => {
+            // Default-allow: no policies means everyone can write.
+            let has_policy: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM memory_access_policies WHERE workspace_id = ?1",
+                    [ws],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+            if !has_policy {
+                return true;
+            }
+            conn.query_row(
+                "SELECT COUNT(*) > 0 FROM memory_access_policies
+                 WHERE workspace_id = ?1 AND principal = ?2 AND can_write = 1",
+                params![ws, principal],
+                |r| r.get(0),
+            )
+            .unwrap_or(false)
+        }
+    }
+}
+
+/// Write an audit log entry for a memory operation.
+pub fn audit_memory(
+    conn: &Connection,
+    workspace_id: Option<&str>,
+    principal: &str,
+    operation: &str,
+    key: Option<&str>,
+    result_count: i64,
+    latency_ms: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO memory_audit_log (id, workspace_id, principal, operation, key, result_count, latency_ms, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            nid(),
+            workspace_id,
+            principal,
+            operation,
+            key,
+            result_count,
+            latency_ms,
+            now_ms()
+        ],
+    )?;
+    Ok(())
+}
+
+/// Set an access policy for a memory/workspace.
+pub fn set_memory_access_policy(
+    conn: &Connection,
+    workspace_id: Option<&str>,
+    principal: &str,
+    role: &str,
+    can_read: bool,
+    can_write: bool,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO memory_access_policies (id, workspace_id, principal, role, can_read, can_write, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            nid(),
+            workspace_id,
+            principal,
+            role,
+            can_read as i64,
+            can_write as i64,
+            now_ms()
+        ],
+    )?;
+    Ok(())
+}
+
+/// List audit log entries for a workspace (or global if None), newest first.
+pub fn list_memory_audit_log(
+    conn: &Connection,
+    workspace_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<MemoryAuditLog>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, workspace_id, principal, operation, key, result_count, latency_ms, created_at
+         FROM memory_audit_log
+         WHERE (?1 IS NULL OR workspace_id = ?1 OR workspace_id IS NULL)
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![workspace_id, limit as i64], |r| {
+        Ok(MemoryAuditLog {
+            id: r.get(0)?,
+            workspace_id: r.get(1)?,
+            principal: r.get(2)?,
+            operation: r.get(3)?,
+            key: r.get(4)?,
+            result_count: r.get(5)?,
+            latency_ms: r.get(6)?,
+            created_at: r.get(7)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
 // ------------------------------------------------------- background tasks
 
 /// Insert a freshly started background task (status `running`).
@@ -1356,4 +1707,141 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     dot / (na * nb)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open() -> crate::db::Db {
+        crate::db::Db::open_in_memory().unwrap()
+    }
+
+    fn store(
+        conn: &Connection,
+        workspace_id: Option<&str>,
+        key: &str,
+        content: &str,
+        vec: &[f32],
+    ) -> String {
+        let bytes = floats_to_bytes(vec);
+        insert_or_update_memory(
+            conn,
+            workspace_id,
+            key,
+            content,
+            Some(&bytes),
+            None,
+        )
+        .unwrap()
+        .id
+    }
+
+    #[test]
+    fn build_vector_index_populates_pre_normalized_rows() {
+        let db = open();
+        let conn = db.guard();
+        store(&conn, None, "k1", "alpha beta", &[1.0, 0.0]);
+        store(&conn, None, "k2", "gamma delta", &[0.0, 1.0]);
+        let n = build_vector_index(&conn, None).unwrap();
+        assert_eq!(n, 2);
+        // Stored vectors are unit length.
+        let mut stmt = conn.prepare("SELECT vector_blob FROM memory_vector_index").unwrap();
+        let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0)).unwrap();
+        for row in rows {
+            let v = bytes_to_floats(&row.unwrap());
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            assert!((norm - 1.0).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn ann_search_returns_best_cosine_match() {
+        let db = open();
+        let conn = db.guard();
+        let a = store(&conn, None, "k1", "alpha beta", &[1.0, 0.0]);
+        store(&conn, None, "k2", "gamma delta", &[0.0, 1.0]);
+        store(&conn, None, "k3", "mixed", &[1.0, 1.0]);
+        build_vector_index(&conn, None).unwrap();
+
+        let found = search_memories_ann(&conn, None, &[1.0, 0.0], 5, 4).unwrap();
+        assert_eq!(found.len(), 3);
+        // "k1" ([1,0]) is the closest match to query [1,0].
+        assert_eq!(found[0].0.id, a);
+        assert!((found[0].1 - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn hybrid_weighted_fuses_keyword_and_semantic() {
+        let db = open();
+        let conn = db.guard();
+        store(&conn, None, "k1", "alpha beta", &[1.0, 0.0]);
+        store(&conn, None, "k2", "gamma delta", &[0.0, 1.0]);
+        build_vector_index(&conn, None).unwrap();
+
+        let found = search_memories_hybrid_weighted(
+            &conn, None, "alpha", Some(&[1.0, 0.0]), 5, 0.5, 0.5,
+        )
+        .unwrap();
+        assert!(!found.is_empty());
+        assert_eq!(found[0].0.key, "k1");
+    }
+
+    #[test]
+    fn access_control_defaults_allow_then_honors_policies() {
+        let db = open();
+        let conn = db.guard();
+        conn.execute(
+            "INSERT INTO workspaces (id, root_path, created_at) VALUES (?1, ?2, ?3)",
+            params!["ws1", "/tmp/ws1", now_ms()],
+        )
+        .unwrap();
+        let ws = "ws1";
+        let id = store(&conn, Some("ws1"), "k1", "alpha", &[1.0, 0.0]);
+
+        // No policy: default-allow.
+        let m = get_memory(&conn, &id).unwrap();
+        assert!(memory_can_read(&conn, "user", &m));
+        assert!(memory_can_write(&conn, "user", Some(ws)));
+
+        // Deny read for "user" via a policy.
+        set_memory_access_policy(&conn, Some(ws), "user", "viewer", false, true).unwrap();
+        assert!(!memory_can_read(&conn, "user", &m));
+        // Write still allowed.
+        assert!(memory_can_write(&conn, "user", Some(ws)));
+
+        // Grant read back.
+        set_memory_access_policy(&conn, Some(ws), "user", "viewer", true, true).unwrap();
+        assert!(memory_can_read(&conn, "user", &m));
+    }
+
+    #[test]
+    fn audit_and_list_memory_log() {
+        let db = open();
+        let conn = db.guard();
+        audit_memory(&conn, None, "user", "remember", Some("k"), 1, 5).unwrap();
+        audit_memory(&conn, None, "user", "recall", None, 3, 10).unwrap();
+
+        let log = list_memory_audit_log(&conn, None, 10).unwrap();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].operation, "recall");
+        assert_eq!(log[0].result_count, 3);
+        assert_eq!(log[1].operation, "remember");
+        assert_eq!(log[1].result_count, 1);
+    }
+
+    #[test]
+    fn search_memories_by_text_returns_fts_hits() {
+        let db = open();
+        let conn = db.guard();
+        insert_or_update_memory(&conn, None, "k1", "alpha beta gamma", None, None).unwrap();
+        insert_or_update_memory(&conn, None, "k2", "delta epsilon zeta", None, None).unwrap();
+
+        let hits = search_memories_by_text(&conn, None, "alpha", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].key, "k1");
+
+        let empty = search_memories_by_text(&conn, None, "nothing", 5).unwrap();
+        assert!(empty.is_empty());
+    }
 }

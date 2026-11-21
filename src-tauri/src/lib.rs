@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use base64::Engine;
 use aria_core::agent::{Agent, PendingApproval, ProviderSource, RunEvent, RunHandle};
 use aria_core::config::{
-    AIProvider, EmbeddingConfig, ProviderStatus, Settings, WebSearchConfig,
+    AIProvider, EmbeddingConfig, ProviderStatus, RerankerConfig, Settings, WebSearchConfig,
 };
 use aria_core::provider::OpenAiProvider;
 use aria_core::config::{Config, SecretBackend};
@@ -265,6 +265,14 @@ pub struct FetchModelsResult {
 pub struct EmbeddingTestResult {
     pub ok: bool,
     pub vector_length: Option<usize>,
+    pub latency_ms: Option<u64>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RerankerTestResult {
+    pub ok: bool,
     pub latency_ms: Option<u64>,
     pub error: Option<String>,
 }
@@ -1957,6 +1965,66 @@ async fn reindex_memories(state: State<'_, App>) -> CmdResult<usize> {
         .map_err(err)
 }
 
+/// Current reranker (cross-encoder) configuration.
+#[tauri::command]
+fn get_reranker_config(state: State<'_, App>) -> CmdResult<RerankerConfig> {
+    Ok(state.inner.config.load().map_err(err)?.reranker_config)
+}
+
+/// Save the reranker configuration.
+#[tauri::command]
+fn set_reranker_config(
+    state: State<'_, App>,
+    config: RerankerConfig,
+) -> CmdResult<RerankerConfig> {
+    aria_core::settings::validate_reranker(&config.model, config.top_k).map_err(err)?;
+    let cfg = &state.inner.config;
+    let mut s = cfg.load().map_err(err)?;
+    s.reranker_config = config.clone();
+    cfg.save(&s).map_err(err)?;
+    Ok(config)
+}
+
+/// Probe the reranker endpoint by scoring one sample pair.
+#[tauri::command]
+async fn test_reranker(state: State<'_, App>) -> CmdResult<RerankerTestResult> {
+    let config = &state.inner.config;
+    let s = config.load().map_err(err)?;
+    let key = match config
+        .provider_api_key(&s.reranker_config.provider_id)
+        .map_err(err)?
+    {
+        Some(k) => k,
+        None => match config.api_key().map_err(err)? {
+            Some((k, _)) => k,
+            None => {
+                return Ok(RerankerTestResult {
+                    ok: false,
+                    latency_ms: None,
+                    error: Some("No API key configured for this provider.".into()),
+                });
+            }
+        },
+    };
+    let provider = match OpenAiProvider::new(s.clone(), key) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(RerankerTestResult {
+                ok: false,
+                latency_ms: None,
+                error: Some(e.to_string()),
+            });
+        }
+    };
+    let timeout = std::time::Duration::from_secs(30);
+    let outcome = aria_core::settings::probe_reranker(&provider, timeout).await;
+    Ok(RerankerTestResult {
+        ok: outcome.ok,
+        latency_ms: Some(outcome.latency_ms),
+        error: outcome.error,
+    })
+}
+
 // -------------------------------------------------------- settings: web search
 
 #[tauri::command]
@@ -2328,6 +2396,9 @@ pub fn run() {
             test_embedding,
             get_embedding_index_info,
             reindex_memories,
+            get_reranker_config,
+            set_reranker_config,
+            test_reranker,
             get_web_search_config,
             set_web_search_config,
             verify_web_search,

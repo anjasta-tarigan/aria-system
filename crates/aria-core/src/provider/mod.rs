@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -415,6 +416,56 @@ impl Embedder for OpenAiProvider {
     }
 }
 
+/// Scores (query, candidate) pairs for retrieval precision. A reranker is
+/// significantly more accurate than embedding similarity alone but costs more
+/// per call, so it runs only on the top-k candidates from the embedding pool.
+pub trait Reranker: Send + Sync {
+    /// Score one candidate against the query. Higher = more relevant.
+    fn rerank<'a>(
+        &'a self,
+        query: &'a str,
+        candidate: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<f32>> + Send + 'a>>;
+}
+
+/// Reranks candidates using the embedding model itself: embeds the query and
+/// each candidate, then scores by cosine similarity. Cheaper than a dedicated
+/// cross-encoder but less precise; used when no reranker model is configured.
+pub struct CosineReranker {
+    embed: Arc<dyn Embedder>,
+}
+
+impl CosineReranker {
+    pub fn new(embed: Arc<dyn Embedder>) -> Self {
+        Self { embed }
+    }
+}
+
+impl Reranker for CosineReranker {
+    fn rerank<'a>(
+        &'a self,
+        query: &'a str,
+        candidate: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<f32>> + Send + 'a>> {
+        let embed = Arc::clone(&self.embed);
+        Box::pin(async move {
+            let q = embed.embed(query).await?;
+            let c = embed.embed(candidate).await?;
+            Ok(cosine_similarity(&q, &c))
+        })
+    }
+}
+
+impl Reranker for OpenAiProvider {
+    fn rerank<'a>(
+        &'a self,
+        query: &'a str,
+        candidate: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<f32>> + Send + 'a>> {
+        Box::pin(self.rerank(query, candidate))
+    }
+}
+
 #[derive(Clone)]
 pub struct OpenAiProvider {
     client: reqwest::Client,
@@ -469,6 +520,12 @@ impl OpenAiProvider {
     /// avoids a doomed embeddings request on every `remember`.
     pub fn embedding_enabled(&self) -> bool {
         self.settings.embedding_config.enabled
+    }
+
+    /// Whether recall re-scores candidates with a reranker. Off keeps the raw
+    /// hybrid score; the cosine fallback still needs an embedder.
+    pub fn reranker_enabled(&self) -> bool {
+        self.settings.reranker_config.enabled
     }
 
     fn endpoint(&self) -> String {
@@ -577,6 +634,55 @@ impl OpenAiProvider {
             .and_then(|e| serde_json::from_value(e.clone()).ok())
             .ok_or_else(|| ProviderError::Decode("missing embedding vector".into()))?;
         Ok(embedding)
+    }
+
+    /// Rerank one candidate against the query using a cross-encoder endpoint.
+    /// Posts {query, candidate} to {base}/rerank and reads back a score.
+    pub async fn rerank(&self, query: &str, candidate: &str) -> Result<f32> {
+        let body = serde_json::json!({
+            "query": query,
+            "passage": candidate,
+            "model": self.reranker_model(),
+        });
+        let response = self
+            .client
+            .post(self.reranker_endpoint())
+            .bearer_auth(&self.api_key)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            return Err(ProviderError::Status { status, body });
+        }
+        let value: serde_json::Value = response.json().await?;
+        value
+            .get("score")
+            .and_then(|s| s.as_f64())
+            .map(|s| s as f32)
+            .ok_or_else(|| ProviderError::Decode("missing rerank score".into()))
+    }
+
+    /// Reranking endpoint: per-`embedding_base_url` override or the chat base URL.
+    pub fn reranker_endpoint(&self) -> String {
+        let base = self
+            .settings
+            .embedding_base_url
+            .as_deref()
+            .unwrap_or(&self.settings.base_url)
+            .trim_end_matches('/');
+        format!("{base}/rerank")
+    }
+
+    /// The configured reranker model.
+    pub fn reranker_model(&self) -> &str {
+        if self.settings.reranker_config.model.trim().is_empty() {
+            "nvidia/Nemotron-3.5-Rerank-8B-BF16"
+        } else {
+            &self.settings.reranker_config.model
+        }
     }
 }
 
@@ -861,4 +967,19 @@ mod tests {
         }
         .is_context_overflow());
     }
+}
+
+/// Cosine similarity between two vectors. Returns 0.0 on length mismatch or
+/// zero-norm vectors. Used by the cosine reranker fallback.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let na = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na * nb)
 }

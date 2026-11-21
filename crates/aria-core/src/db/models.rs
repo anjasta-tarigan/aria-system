@@ -389,8 +389,36 @@ pub struct Memory {
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedding: Option<Vec<u8>>,
+    /// ID of the encryption key used to encrypt `content` at rest. NULL =
+    /// plaintext (legacy or unencrypted).
+    pub encryption_key_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// Append-only audit record of a memory operation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryAuditLog {
+    pub id: String,
+    pub workspace_id: Option<String>,
+    pub principal: String,
+    pub operation: String, // "remember", "recall", "delete"
+    pub key: Option<String>,
+    pub result_count: i64,
+    pub latency_ms: i64,
+    pub created_at: i64,
+}
+
+/// Role-based access control policy for a memory.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryAccessPolicy {
+    pub id: String,
+    pub workspace_id: Option<String>,
+    pub principal: String,
+    pub role: String,
+    pub can_read: bool,
+    pub can_write: bool,
+    pub created_at: i64,
 }
 
 /// Lifecycle of a background [`BackgroundTask`](crate::tools::BackgroundTask).

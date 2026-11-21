@@ -191,8 +191,6 @@ pub enum ProviderStatus {
 
 /// Embedding (vector search) configuration. Not a provider list: Aria runs one
 /// embedding model against a chosen provider (or the default AI provider).
-/// Embedding (vector search) configuration. Not a provider list: Aria runs one
-/// embedding model against a chosen provider (or the default AI provider).
 ///
 /// `dimensions` is left `None` (auto): the provider reports the vector width,
 /// so the user never has to guess it. `batch_size` and `timeout_seconds` were
@@ -213,10 +211,38 @@ pub struct EmbeddingConfig {
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             provider_id: "default".to_string(),
             model: "text-embedding-3-small".to_string(),
             dimensions: None,
+        }
+    }
+}
+
+/// Reranker (cross-encoder) configuration for the retrieval pipeline.
+///
+/// After the embedding stage retrieves a candidate pool, a reranker model
+/// re-scores each (query, candidate) pair for precision. Reranking is
+/// significantly more accurate than embedding similarity alone but costs more
+/// per call, so it runs only on the top-k candidates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RerankerConfig {
+    /// Whether cross-encoder reranking is on.
+    pub enabled: bool,
+    pub provider_id: String,
+    pub model: String,
+    /// How many candidates to pass to the reranker (from the embedding pool).
+    pub top_k: usize,
+}
+
+impl Default for RerankerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            provider_id: "default".to_string(),
+            model: "nvidia/Nemotron-3.5-Rerank-8B-BF16".to_string(),
+            top_k: 50,
         }
     }
 }
@@ -263,6 +289,9 @@ pub struct Settings {
     pub embedding_config: EmbeddingConfig,
     #[serde(default)]
     pub web_search_config: Option<WebSearchConfig>,
+    /// Reranker (cross-encoder) for the retrieval pipeline.
+    #[serde(default)]
+    pub reranker_config: RerankerConfig,
     /// Ids of built-in tools the user has turned off. Absent = all enabled, so
     /// the tool registry stays the source of truth for the tool list.
     #[serde(default)]
@@ -283,6 +312,7 @@ impl Default for Settings {
             default_ai_provider_id: None,
             embedding_config: EmbeddingConfig::default(),
             web_search_config: None,
+            reranker_config: RerankerConfig::default(),
             disabled_tools: Vec::new(),
         }
     }

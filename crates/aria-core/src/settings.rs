@@ -431,6 +431,40 @@ fn friendly_provider_error(e: &ProviderError) -> String {
     }
 }
 
+/// Probe the reranker endpoint by scoring one sample (query, passage) pair.
+pub async fn probe_reranker(
+    provider: &OpenAiProvider,
+    timeout: Duration,
+) -> ProbeOutcome {
+    let start = Instant::now();
+    let result = tokio::time::timeout(
+        timeout,
+        provider.rerank("reranking probe query", "reranking probe passage"),
+    )
+    .await;
+    let latency_ms = start.elapsed().as_millis() as u64;
+    match result {
+        Ok(Ok(_score)) => ProbeOutcome {
+            ok: true,
+            latency_ms,
+            error: None,
+            vector_length: None,
+        },
+        Ok(Err(e)) => ProbeOutcome {
+            ok: false,
+            latency_ms,
+            error: Some(friendly_provider_error(&e)),
+            vector_length: None,
+        },
+        Err(_) => ProbeOutcome {
+            ok: false,
+            latency_ms,
+            error: Some("Timed out reranking the sample".into()),
+            vector_length: None,
+        },
+    }
+}
+
 /// Validate and store the web-search provider choice. The key itself is stored
 /// by the caller (secret store); this only builds the persisted metadata.
 pub fn web_search_config(provider_key: &str, key: &str) -> Result<WebSearchConfig> {
@@ -499,7 +533,8 @@ pub fn apply_probe_status(provider: &mut AIProvider, ok: bool) {
 
 /// Recompute every memory's embedding with the configured embedder. Returns how
 /// many rows were updated; a failure on one row aborts so the index never ends
-/// up half-migrated with no signal.
+/// up half-migrated with no signal. Rebuilds the pre-normalized ANN index so
+/// semantic recall stays correct after the model changes.
 pub async fn reindex_memories(
     db: &crate::db::Db,
     embedder: &dyn crate::provider::Embedder,
@@ -512,7 +547,20 @@ pub async fn reindex_memories(
         db.call(|c| crate::db::set_memory_embedding(c, &m.id, &bytes))?;
         updated += 1;
     }
+    // Rebuild the pre-normalized ANN index from the refreshed embeddings.
+    db.call(|c| crate::db::build_vector_index(c, None))?;
     Ok(updated)
+}
+
+/// Validate a reranker config against the spec's ranges.
+pub fn validate_reranker(model: &str, top_k: usize) -> Result<()> {
+    if model.trim().is_empty() {
+        return Err(SettingsError::Invalid("Choose a reranker model.".into()));
+    }
+    if top_k == 0 {
+        return Err(SettingsError::Invalid("top_k must be at least 1.".into()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -579,6 +627,13 @@ mod tests {
         assert!(validate_embedding("m", None).is_ok());
         assert!(validate_embedding("", Some(1536)).is_err());
         assert!(validate_embedding("m", Some(63)).is_err());
+    }
+
+    #[test]
+    fn reranker_validation_ranges() {
+        assert!(validate_reranker("m", 10).is_ok());
+        assert!(validate_reranker("", 10).is_err());
+        assert!(validate_reranker("m", 0).is_err());
     }
 
     #[test]

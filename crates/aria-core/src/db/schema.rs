@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use super::{DbError, Result};
 
 /// Maximum schema version understood by this build.
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 
 /// A handle to the application database.
 ///
@@ -193,6 +193,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     if current < 13 {
         migrate_v13(conn)?;
     }
+    if current < 14 {
+        migrate_v14(conn)?;
+    }
     Ok(())
 }
 
@@ -222,6 +225,61 @@ fn migrate_v13(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS attachments_by_message ON attachments(message_id);",
     )?;
     conn.pragma_update(None, "user_version", 13)?;
+    Ok(())
+}
+
+/// Version 14: enterprise-grade memory/RAG infrastructure.
+///
+/// - `memory_audit_log`: immutable append-only log of every remember/recall
+///   operation (who, what, when, result count) for compliance and forensics.
+/// - `memory_access_policies`: role-based access control so memories can be
+///   scoped to specific roles/principals rather than workspace/global only.
+/// - `memories.encryption_key_id`: references the key used to encrypt the
+///   memory content at rest (key material is managed outside this DB).
+/// - `memory_vector_index`: pre-normalized embedding cache so ANN search can
+///   run over a smaller, indexed structure instead of scanning all rows.
+fn migrate_v14(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE memories ADD COLUMN encryption_key_id TEXT;",
+    )?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS memory_audit_log (
+            id            TEXT PRIMARY KEY,
+            workspace_id  TEXT,
+            principal     TEXT NOT NULL,
+            operation     TEXT NOT NULL,
+            key           TEXT,
+            result_count  INTEGER NOT NULL DEFAULT 0,
+            latency_ms    INTEGER NOT NULL DEFAULT 0,
+            created_at    INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS audit_log_by_time ON memory_audit_log(created_at DESC);
+        CREATE INDEX IF NOT EXISTS audit_log_by_principal ON memory_audit_log(principal, created_at DESC);
+        CREATE INDEX IF NOT EXISTS audit_log_by_operation ON memory_audit_log(operation, created_at DESC);",
+    )?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS memory_access_policies (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+            principal    TEXT NOT NULL,
+            role         TEXT NOT NULL,
+            can_read     INTEGER NOT NULL DEFAULT 1,
+            can_write    INTEGER NOT NULL DEFAULT 1,
+            created_at   INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS access_policies_by_principal ON memory_access_policies(principal);
+        CREATE INDEX IF NOT EXISTS access_policies_by_workspace ON memory_access_policies(workspace_id);",
+    )?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS memory_vector_index (
+            memory_id    TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+            vector_blob  BLOB NOT NULL,
+            dimension    INTEGER NOT NULL,
+            updated_at   INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS vector_index_by_dim ON memory_vector_index(dimension);",
+    )?;
+    conn.pragma_update(None, "user_version", 14)?;
     Ok(())
 }
 

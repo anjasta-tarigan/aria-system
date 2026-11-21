@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::{ApprovalClass, Db, ToolCallState};
 use crate::journal::Blobs;
-use crate::provider::{Embedder, ToolSpec};
+use crate::provider::{Embedder, Reranker, ToolSpec};
 use crate::workspace::{Scope, WorkspaceRoot};
 
 mod files;
@@ -91,6 +91,9 @@ pub struct ToolContext {
     /// Embedding capability, when the provider supports it. Enables similarity
     /// recall; absent for test fakes, which then fall back to recency.
     pub embed: Option<Arc<dyn Embedder>>,
+    /// Reranker for the recall pipeline. Absent = no reranking (the hybrid
+    /// score stands alone).
+    pub reranker: Option<Arc<dyn Reranker>>,
     /// Web search configuration, when a provider is configured. Absent when
     /// search is disabled; `web_search` then refuses.
     pub search: Option<crate::tools::search::SearchConfig>,
@@ -890,6 +893,7 @@ pub fn context_for(
         blobs,
         shell_timeout_secs: 120,
         embed: None,
+        reranker: None,
         search: None,
         vision: None,
         background: None,

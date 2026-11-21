@@ -23,7 +23,7 @@ use crate::db::{
     ToolCallState,
 };
 use crate::journal::Blobs;
-use crate::provider::{ChatMessage, ContentPart, Provider, ProviderEvent, ToolCallRequest};
+use crate::provider::{ChatMessage, ContentPart, CosineReranker, Provider, ProviderEvent, ToolCallRequest};
 use crate::tools::{self, BackgroundTasks, ToolContext, ToolOutcome, ToolRegistry};
 use crate::tools::search::{SearchConfig, SearchProvider};
 use crate::workspace::{Scope, WorkspaceRoot};
@@ -173,6 +173,21 @@ impl AnyProvider {
     fn embedder(&self) -> Option<Arc<dyn crate::provider::Embedder>> {
         match self {
             AnyProvider::OpenAi(p) if p.embedding_enabled() => Some(Arc::new(p.clone())),
+            _ => None,
+        }
+    }
+
+    /// Reranker for the recall pipeline: the configured cross-encoder when
+    /// enabled, otherwise a cosine-similarity fallback over the embedder.
+    fn reranker(&self) -> Option<Arc<dyn crate::provider::Reranker>> {
+        match self {
+            AnyProvider::OpenAi(p) if p.reranker_enabled() => {
+                Some(Arc::new(p.clone()) as Arc<dyn crate::provider::Reranker>)
+            }
+            AnyProvider::OpenAi(p) if p.embedding_enabled() => {
+                let embed: Arc<dyn crate::provider::Embedder> = Arc::new(p.clone());
+                Some(Arc::new(CosineReranker::new(embed)) as Arc<dyn crate::provider::Reranker>)
+            }
             _ => None,
         }
     }
@@ -808,6 +823,7 @@ impl LoopCtx {
                 blobs: Arc::clone(&self.blobs),
                 shell_timeout_secs: self.shell_timeout_secs,
                 embed: self.provider.embedder(),
+                reranker: self.provider.reranker(),
                 scope: scope.clone(),
                 search: self.search.clone(),
                 vision: self.vision.clone(),

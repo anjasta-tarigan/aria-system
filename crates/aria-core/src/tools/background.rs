@@ -74,6 +74,7 @@ impl BackgroundTasks {
             blobs: Arc::clone(&self.blobs),
             shell_timeout_secs: self.shell_timeout_secs,
             embed: None,
+            reranker: None,
             search: None,
             vision: None,
             background: None,

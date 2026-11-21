@@ -2,11 +2,11 @@
 //!
 //! Memories are keyed by `(workspace_id, key)`. A conversation with a folder
 //! stores workspace-scoped memories; the main session stores global ones. Recall
-//! returns the workspace's memories plus the global set: with a query it fuses
-//! FTS5 keyword hits with embedding similarity, falling back to keyword-only
-//! when no embedder is configured or the embed call fails; without a query it is
-//! newest first. Both tools are filesystem-free and run without an approval
-//! prompt.
+//! returns the workspace's memories plus the global set: with a query it runs
+//! weighted hybrid search (FTS5 keyword + cosine semantic) over the ANN index,
+//! optionally re-scores with a reranker, filters by access policy, and logs the
+//! operation to the audit trail. Without a query it returns newest first. Both
+//! tools are filesystem-free and run without an approval prompt.
 
 use serde::Deserialize;
 
@@ -32,6 +32,8 @@ pub async fn remember(ctx: &ToolContext, args: RememberArgs) -> Result<String> {
             .call(|c| db::delete_memory_by_key(c, ctx.workspace_id.as_deref(), key))?;
         return Ok(format!("Forgot memory \"{key}\"."));
     }
+
+    let workspace_id = ctx.workspace_id.as_deref();
     let embedding = match ctx.embed.as_ref() {
         // A provider without embeddings (or a failed embed) still stores the
         // memory; it stays searchable by keyword through FTS5.
@@ -43,13 +45,26 @@ pub async fn remember(ctx: &ToolContext, args: RememberArgs) -> Result<String> {
         None => None,
     };
     let m = ctx.db.call(|c| {
-        db::insert_or_update_memory(
+        // RBAC: refuse writes the caller is not permitted to make.
+        if !db::memory_can_write(c, "user", workspace_id) {
+            return Err(crate::db::DbError::InvalidValue {
+                field: "memory",
+                value: "write access denied".into(),
+            });
+        }
+        let m = db::insert_or_update_memory(
             c,
-            ctx.workspace_id.as_deref(),
+            workspace_id,
             key,
             &args.content,
             embedding.as_deref(),
-        )
+            None, // encryption_key_id: key management is out of scope for now
+        )?;
+        // Keep the pre-normalized ANN index in sync for semantic recall.
+        db::upsert_memory_vector_index(c, &m.id, embedding.as_deref())?;
+        // Audit trail: who stored what, when.
+        db::audit_memory(c, workspace_id, "user", "remember", Some(key), 1, 0)?;
+        Ok(m)
     })?;
     Ok(format!(
         "Stored memory \"{}\" ({} chars).",
@@ -70,42 +85,88 @@ pub struct RecallArgs {
 
 pub async fn recall(ctx: &ToolContext, args: RecallArgs) -> Result<String> {
     let limit = args.limit.unwrap_or(10).max(1);
-    let memories = ctx
-        .db
-        .call(|c| db::list_memories(c, ctx.workspace_id.as_deref()))?;
-    if memories.is_empty() {
-        return Ok("No memories stored yet.".to_string());
-    }
+    let workspace_id = ctx.workspace_id.as_deref();
+    let started = db::now_ms();
 
-    let ranked: Vec<db::Memory> = match args.query.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
-        Some(query) => {
-            let keyword = ctx.db.call(|c| {
-                db::search_memories_by_text(c, ctx.workspace_id.as_deref(), query, limit)
-            })?;
-            let semantic = match ctx.embed.as_ref() {
-                Some(embed) => match embed.embed(query).await {
-                    Ok(vector) => ctx
-                        .db
-                        .call(|c| {
-                            db::search_memories_by_embedding(
-                                c,
-                                ctx.workspace_id.as_deref(),
-                                &vector,
-                                limit,
-                            )
-                        })?
-                        .into_iter()
-                        .map(|(m, _)| m)
-                        .collect(),
-                    // FTS5 hits still answer when embeddings are unavailable.
-                    Err(_) => Vec::new(),
-                },
-                None => Vec::new(),
-            };
-            fuse(keyword, semantic, limit)
-        }
-        None => memories.into_iter().take(limit).collect(),
+    let query = args
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|q| !q.is_empty());
+
+    // Phase 1 (async): embed the query when an embedder is available.
+    let query_embedding = match (query, ctx.embed.as_ref()) {
+        (Some(q), Some(embed)) => match embed.embed(q).await {
+            Ok(vector) => Some(vector),
+            // Embed failure falls back to keyword-only recall.
+            Err(_) => None,
+        },
+        _ => None,
     };
+    let query_str = query.map(|q| q.to_string()).unwrap_or_default();
+
+    // Phase 2 (sync): hybrid candidates + access control.
+    let candidates: Vec<db::Memory> = ctx.db.call(|c| {
+        if query_str.is_empty() {
+            let mut out: Vec<db::Memory> = Vec::new();
+            for m in db::list_memories(c, workspace_id)? {
+                if db::memory_can_read(c, "user", &m) {
+                    out.push(m);
+                }
+            }
+            out.truncate(limit);
+            Ok(out)
+        } else {
+            let scored: Vec<(db::Memory, f32)> = db::search_memories_hybrid_weighted(
+                c,
+                workspace_id,
+                &query_str,
+                query_embedding.as_deref(),
+                limit * 4,
+                0.5, // dense_weight (semantic)
+                0.5, // sparse_weight (keyword)
+            )?;
+            let accessible: Vec<(db::Memory, f32)> = scored
+                .into_iter()
+                .filter(|(m, _)| db::memory_can_read(c, "user", m))
+                .collect();
+            Ok(accessible.into_iter().map(|(m, _)| m).collect())
+        }
+    })?;
+
+    // Phase 3 (async): rerank candidates when a reranker is configured.
+    let ranked: Vec<db::Memory> = if let Some(reranker) = &ctx.reranker {
+        let mut scored: Vec<(db::Memory, f32)> = Vec::new();
+        for m in candidates {
+            let score = reranker.rerank(&query_str, &m.content).await.unwrap_or(0.0);
+            scored.push((m, score));
+        }
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scored.truncate(limit);
+        scored.into_iter().map(|(m, _)| m).collect()
+    } else {
+        candidates.into_iter().take(limit).collect()
+    };
+
+    // Phase 4 (sync): audit trail.
+    let latency = db::now_ms() - started;
+    ctx.db.call(|c| {
+        db::audit_memory(
+            c,
+            workspace_id,
+            "user",
+            "recall",
+            if query_str.is_empty() {
+                None
+            } else {
+                Some(query_str.as_str())
+            },
+            ranked.len() as i64,
+            latency,
+        )
+    })?;
 
     if ranked.is_empty() {
         return Ok(format!(
@@ -127,32 +188,9 @@ pub async fn recall(ctx: &ToolContext, args: RecallArgs) -> Result<String> {
     Ok(format!("Memories ({scope}):\n{body}"))
 }
 
-/// Reciprocal-rank fusion: a memory found by both keyword and semantic search
-/// outranks one found by either alone, and neither side needs a calibrated
-/// score. Missing embeddings only cost the semantic half.
-fn fuse(keyword: Vec<db::Memory>, semantic: Vec<db::Memory>, limit: usize) -> Vec<db::Memory> {
-    const K: f32 = 60.0;
-    fn weight(rank: usize) -> f32 {
-        1.0 / (K + rank as f32 + 1.0)
-    }
-    let mut ranked: Vec<(db::Memory, f32)> = Vec::new();
-    for (rank, memory) in keyword.into_iter().enumerate() {
-        ranked.push((memory, weight(rank)));
-    }
-    for (rank, memory) in semantic.into_iter().enumerate() {
-        match ranked.iter_mut().find(|(m, _)| m.id == memory.id) {
-            Some((_, score)) => *score += weight(rank),
-            None => ranked.push((memory, weight(rank))),
-        }
-    }
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    ranked.truncate(limit);
-    ranked.into_iter().map(|(m, _)| m).collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::fuse;
+    use super::*;
     use crate::db::Memory;
 
     fn mem(id: &str, key: &str) -> Memory {
@@ -162,20 +200,24 @@ mod tests {
             key: key.into(),
             content: String::new(),
             embedding: None,
+            encryption_key_id: None,
             created_at: 0,
             updated_at: 0,
         }
     }
 
     #[test]
-    fn fusion_prefers_memories_found_by_both_and_honours_limit() {
-        let fused = fuse(
-            vec![mem("a", "both"), mem("b", "keyword")],
-            vec![mem("c", "semantic"), mem("a", "both")],
-            10,
-        );
-        assert_eq!(fused.len(), 3);
-        assert_eq!(fused[0].id, "a");
-        assert_eq!(fuse(vec![mem("a", "x")], vec![mem("b", "y")], 1).len(), 1);
+    fn global_memories_are_readable_by_default() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let m = mem("a", "k");
+        assert!(db.call(|c| Ok(db::memory_can_read(c, "user", &m))).unwrap());
+    }
+
+    #[test]
+    fn workspace_writes_are_allowed_by_default() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        assert!(db
+            .call(|c| Ok(db::memory_can_write(c, "user", Some("ws"))))
+            .unwrap());
     }
 }
