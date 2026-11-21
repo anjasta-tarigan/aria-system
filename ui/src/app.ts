@@ -240,6 +240,8 @@ function render() {
     if (ui.autoOpenedArtifactId !== artKey && (ui.streaming || !ui.activeArtifact)) {
       ui.autoOpenedArtifactId = artKey;
       ui.activeArtifact = { identifier: latestArt.identifier, version: latestArt.version };
+      ui.sidePanelOpen = true;
+      ui.sidePanelTab = "artifacts";
       if (latestArt.isStreaming) {
         streamingArtifactActive = true;
         ui.artifactTab = "code";
@@ -295,6 +297,20 @@ function render() {
       ui.streaming || approvals > ui.pendingCount || follow ? log.scrollHeight : previousTop;
     ui.pendingCount = approvals;
   }
+}
+
+// Throttled render for high-frequency streaming events (text_delta,
+// reasoning_delta, tool_output). Rebuilding the whole DOM on every token
+// keeps the main thread busy and can make the UI feel frozen; cap it at one
+// render per animation frame (~60 fps). User-initiated actions still call
+// render() directly for instant response.
+let renderFrame: number | null = null;
+function scheduleRender() {
+  if (renderFrame !== null) return;
+  renderFrame = requestAnimationFrame(() => {
+    renderFrame = null;
+    render();
+  });
 }
 
 // --------------------------------------------------------------- sidebar
@@ -1209,6 +1225,9 @@ function messageNode(
               version: seg.artifact.version,
             };
             ui.artifactTab = isArtifactPreviewable(seg.artifact.type) ? "preview" : "code";
+            // Opening an artifact should reveal the side panel if it is closed.
+            ui.sidePanelOpen = true;
+            ui.sidePanelTab = "artifacts";
             render();
           });
         }
@@ -1534,6 +1553,9 @@ function streamingNode(artifactsIndex?: ConversationArtifactIndex | null): HTMLE
               version: seg.artifact.version,
             };
             ui.artifactTab = isArtifactPreviewable(seg.artifact.type) ? "preview" : "code";
+            // Opening an artifact should reveal the side panel if it is closed.
+            ui.sidePanelOpen = true;
+            ui.sidePanelTab = "artifacts";
             render();
           });
         }
@@ -2508,14 +2530,14 @@ function applyRunEvent(runId: string, event: RunEvent) {
       if (current) {
         if (!ui.streaming) ui.streaming = { runId, text: "", reasoning: "", turn: event.turn_index };
         ui.streaming = { ...ui.streaming, text: event.so_far };
-        render();
+        scheduleRender();
       }
       return;
     case "reasoning_delta":
       if (current) {
         if (!ui.streaming) ui.streaming = { runId, text: "", reasoning: "", turn: event.turn_index };
         ui.streaming = { ...ui.streaming, reasoning: event.so_far };
-        render();
+        scheduleRender();
       }
       return;
     case "assistant_message":
@@ -2524,7 +2546,7 @@ function applyRunEvent(runId: string, event: RunEvent) {
       return;
     case "tool_output":
       (ui.toolOutput[event.tool_call_id] ??= []).push(event.line);
-      render();
+      scheduleRender();
       return;
     case "tool_result":
       delete ui.toolOutput[event.tool_call_id];
