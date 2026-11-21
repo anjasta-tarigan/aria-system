@@ -94,6 +94,8 @@ pub struct ToolContext {
     /// Reranker for the recall pipeline. Absent = no reranking (the hybrid
     /// score stands alone).
     pub reranker: Option<Arc<dyn Reranker>>,
+    /// How many candidates to pass to the reranker (from the hybrid pool).
+    pub reranker_top_k: usize,
     /// Web search configuration, when a provider is configured. Absent when
     /// search is disabled; `web_search` then refuses.
     pub search: Option<crate::tools::search::SearchConfig>,
@@ -894,6 +896,7 @@ pub fn context_for(
         shell_timeout_secs: 120,
         embed: None,
         reranker: None,
+        reranker_top_k: 50,
         search: None,
         vision: None,
         background: None,

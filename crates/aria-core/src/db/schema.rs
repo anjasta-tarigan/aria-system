@@ -239,9 +239,26 @@ fn migrate_v13(conn: &Connection) -> Result<()> {
 /// - `memory_vector_index`: pre-normalized embedding cache so ANN search can
 ///   run over a smaller, indexed structure instead of scanning all rows.
 fn migrate_v14(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "ALTER TABLE memories ADD COLUMN encryption_key_id TEXT;",
-    )?;
+    // Idempotent column add: ALTER TABLE ... ADD COLUMN fails if the column
+    // already exists (e.g. a partially-applied prior migration). Guard with a
+    // PRAGMA table_info check so re-running the migration is safe.
+    let has_encryption_key_id: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('memories') WHERE name = 'encryption_key_id'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if !has_encryption_key_id {
+        // ALTER TABLE is transactional in modern SQLite, so wrap to avoid a
+        // half-applied migration if a later statement fails.
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "ALTER TABLE memories ADD COLUMN encryption_key_id TEXT;",
+        )?;
+        tx.commit()?;
+    }
+
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS memory_audit_log (
             id            TEXT PRIMARY KEY,
@@ -599,4 +616,65 @@ fn migrate_v11(conn: &Connection) -> Result<()> {
     tx.pragma_update(None, "user_version", 11)?;
     tx.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn migrate_v14_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Run the full migration chain up to v13 first, then v14.
+        // Simplest: open a Db (runs migrate) then call migrate_v14 again.
+        let db = super::Db::open_in_memory().unwrap();
+        let conn = db.guard();
+        // user_version should now be 14.
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 14);
+
+        // Calling migrate_v14 directly again must not fail (idempotent column add,
+        // IF NOT EXISTS tables).
+        migrate_v14(&conn).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 14);
+
+        // The new tables and column exist.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'encryption_key_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'memory_audit_log'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'memory_access_policies'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'memory_vector_index'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
 }

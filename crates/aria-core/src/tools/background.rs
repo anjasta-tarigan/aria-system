@@ -75,6 +75,7 @@ impl BackgroundTasks {
             shell_timeout_secs: self.shell_timeout_secs,
             embed: None,
             reranker: None,
+            reranker_top_k: 50,
             search: None,
             vision: None,
             background: None,

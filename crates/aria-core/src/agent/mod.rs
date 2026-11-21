@@ -493,6 +493,9 @@ impl Agent {
             disabled_tools,
             config: self.config.clone(),
             agent_disabled_tools: self.disabled_tools.clone(),
+            // Default matches RerankerConfig::default().top_k; refresh_settings
+            // overrides it from saved settings on the first iteration.
+            reranker_top_k: 50,
             source: self.source.clone(),
             system_dir: self.system_dir.clone(),
             turn_permits: Arc::clone(&self.turn_permits),
@@ -617,6 +620,8 @@ struct LoopCtx {
     vision: Option<crate::tools::vision::VisionConfig>,
     approval_policy: ApprovalPolicy,
     disabled_tools: Vec<String>,
+    /// How many candidates to pass to the reranker (from the hybrid pool).
+    reranker_top_k: usize,
     /// App config, re-read each loop iteration for live hot reload.
     config: Option<Config>,
     /// Tool ids disabled via `Agent::with_disabled_tools`; re-merged on every
@@ -668,6 +673,7 @@ impl LoopCtx {
                 .conversation_policy
                 .unwrap_or(settings.approval_policy);
             self.disabled_tools = settings.disabled_tools.clone();
+            self.reranker_top_k = settings.reranker_config.top_k;
             if !self.agent_disabled_tools.is_empty() {
                 let additions: Vec<String> = self
                     .agent_disabled_tools
@@ -824,6 +830,7 @@ impl LoopCtx {
                 shell_timeout_secs: self.shell_timeout_secs,
                 embed: self.provider.embedder(),
                 reranker: self.provider.reranker(),
+                reranker_top_k: self.reranker_top_k,
                 scope: scope.clone(),
                 search: self.search.clone(),
                 vision: self.vision.clone(),

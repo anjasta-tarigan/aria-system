@@ -81,6 +81,14 @@ pub struct RecallArgs {
     /// How many memories to return.
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Fusion strategy: "weighted" (weighted sum of BM25 + cosine) or "rrf"
+    /// (reciprocal rank fusion). Defaults to "weighted".
+    #[serde(default)]
+    pub fusion: Option<String>,
+}
+
+fn fusion_is_rrf(fusion: Option<&str>) -> bool {
+    matches!(fusion, Some(s) if s.eq_ignore_ascii_case("rrf"))
 }
 
 pub async fn recall(ctx: &ToolContext, args: RecallArgs) -> Result<String> {
@@ -117,34 +125,53 @@ pub async fn recall(ctx: &ToolContext, args: RecallArgs) -> Result<String> {
             out.truncate(limit);
             Ok(out)
         } else {
-            let scored: Vec<(db::Memory, f32)> = db::search_memories_hybrid_weighted(
-                c,
-                workspace_id,
-                &query_str,
-                query_embedding.as_deref(),
-                limit * 4,
-                0.5, // dense_weight (semantic)
-                0.5, // sparse_weight (keyword)
-            )?;
-            let accessible: Vec<(db::Memory, f32)> = scored
-                .into_iter()
-                .filter(|(m, _)| db::memory_can_read(c, "user", m))
-                .collect();
+            let accessible: Vec<(db::Memory, f32)> = if fusion_is_rrf(args.fusion.as_deref()) {
+                // Reciprocal rank fusion: no score calibration needed.
+                let scored: Vec<(db::Memory, f32)> = db::search_memories_hybrid_rrf(
+                    c,
+                    workspace_id,
+                    &query_str,
+                    query_embedding.as_deref(),
+                    limit * 4,
+                    60.0, // rrf_k
+                    limit * 4, // keyword_limit
+                    limit * 4, // semantic_limit
+                )?;
+                scored
+                    .into_iter()
+                    .filter(|(m, _)| db::memory_can_read(c, "user", m))
+                    .collect()
+            } else {
+                let scored: Vec<(db::Memory, f32)> = db::search_memories_hybrid_weighted(
+                    c,
+                    workspace_id,
+                    &query_str,
+                    query_embedding.as_deref(),
+                    limit * 4,
+                    0.5, // dense_weight (semantic)
+                    0.5, // sparse_weight (keyword)
+                )?;
+                scored
+                    .into_iter()
+                    .filter(|(m, _)| db::memory_can_read(c, "user", m))
+                    .collect()
+            };
             Ok(accessible.into_iter().map(|(m, _)| m).collect())
         }
     })?;
 
     // Phase 3 (async): rerank candidates when a reranker is configured.
     let ranked: Vec<db::Memory> = if let Some(reranker) = &ctx.reranker {
+        // Only the top_k candidates go to the (costly) reranker.
+        let top_k = ctx.reranker_top_k;
         let mut scored: Vec<(db::Memory, f32)> = Vec::new();
-        for m in candidates {
+        for m in candidates.into_iter().take(top_k) {
             let score = reranker.rerank(&query_str, &m.content).await.unwrap_or(0.0);
             scored.push((m, score));
         }
         scored.sort_by(|a, b| {
             b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
         });
-        scored.truncate(limit);
         scored.into_iter().map(|(m, _)| m).collect()
     } else {
         candidates.into_iter().take(limit).collect()

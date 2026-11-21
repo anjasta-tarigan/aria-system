@@ -1433,6 +1433,53 @@ pub fn search_memories_hybrid_weighted(
     Ok(results)
 }
 
+/// Weighted hybrid search using Reciprocal Rank Fusion (RRF) instead of a
+/// weighted sum. Each candidate's score is sum over fusion lists of
+/// 1 / (K + rank), so a memory found by both keyword and semantic search
+/// outranks one found by either alone; neither side needs a calibrated score.
+///
+/// `K` is the RRF constant (60 is the common default). `keyword_limit` and
+/// `semantic_limit` cap how deep each fusion list goes before fusing.
+pub fn search_memories_hybrid_rrf(
+    conn: &Connection,
+    workspace_id: Option<&str>,
+    query: &str,
+    query_embedding: Option<&[f32]>,
+    limit: usize,
+    rrf_k: f32,
+    keyword_limit: usize,
+    semantic_limit: usize,
+) -> Result<Vec<(Memory, f32)>> {
+    const DEFAULT_K: f32 = 60.0;
+    let k = if rrf_k > 0.0 { rrf_k } else { DEFAULT_K };
+
+    let keyword_hits = search_memories_by_text(conn, workspace_id, query, keyword_limit)?;
+
+    let mut semantic_hits: Vec<(Memory, f32)> = Vec::new();
+    if let Some(q_emb) = query_embedding {
+        semantic_hits = search_memories_ann(conn, workspace_id, q_emb, semantic_limit, 4)?;
+    }
+
+    // RRF: score = sum over lists of 1 / (K + rank + 1).
+    let mut fused: std::collections::BTreeMap<String, f32> = std::collections::BTreeMap::new();
+    for (rank, m) in keyword_hits.iter().enumerate() {
+        *fused.entry(m.id.clone()).or_insert(0.0) += 1.0 / (k + rank as f32 + 1.0);
+    }
+    for (rank, (m, _sim)) in semantic_hits.iter().enumerate() {
+        *fused.entry(m.id.clone()).or_insert(0.0) += 1.0 / (k + rank as f32 + 1.0);
+    }
+
+    let mut results: Vec<(Memory, f32)> = Vec::new();
+    for (id, score) in fused {
+        if let Ok(m) = get_memory(conn, &id) {
+            results.push((m, score));
+        }
+    }
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    results.truncate(limit);
+    Ok(results)
+}
+
 /// Access control: check whether a principal can read a memory.
 ///
 /// Global memories are readable by all. Workspace memories are readable by all
@@ -1843,5 +1890,21 @@ mod tests {
 
         let empty = search_memories_by_text(&conn, None, "nothing", 5).unwrap();
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn hybrid_rrf_fuses_keyword_and_semantic() {
+        let db = open();
+        let conn = db.guard();
+        store(&conn, None, "k1", "alpha beta", &[1.0, 0.0]);
+        store(&conn, None, "k2", "gamma delta", &[0.0, 1.0]);
+        build_vector_index(&conn, None).unwrap();
+
+        let found = search_memories_hybrid_rrf(
+            &conn, None, "alpha", Some(&[1.0, 0.0]), 5, 60.0, 4, 4,
+        )
+        .unwrap();
+        assert!(!found.is_empty());
+        assert_eq!(found[0].0.key, "k1");
     }
 }
