@@ -34,7 +34,7 @@ _Avoid_: task, job, turn sequence.
 
 ## Turn
 
-One request/response pair with the model inside a Run. A Turn may contain several Tool Calls and their results. A Run is a sequence of Turns.
+One request/response pair with the model inside a Run. A Turn may contain several Tool Calls and their results. A Run is a sequence of Turns. A Turn that fails for a transient provider reason before any text streamed is retried twice; at most four Turns run at once across every Conversation.
 
 _Avoid_: step, iteration, round.
 
@@ -52,9 +52,15 @@ _Avoid_: tool output, response.
 
 ## Tool
 
-A capability the agent can invoke: reading, listing, searching, editing, writing, deleting or moving files, running a shell command, fetching a web page, and maintaining the Run's todo list. Each Tool has an approval class (read, mutate, exec, network).
+A capability the agent can invoke: reading, listing, searching, editing, writing, deleting or moving files, running a shell command, fetching a web page, maintaining the Run's todo list, starting, polling or stopping a Background Task, and delegating to a Sub-agent. Each Tool has an approval class (read, mutate, exec, network).
 
 _Avoid_: function, skill, plugin.
+
+## Sub-agent
+
+A read-only helper Run started by the `delegate` Tool inside the parent Run's Tool Call. It has its own message list and a small Turn cap, can read, list, search, view images, fetch pages and recall memories, and returns one report as the Tool Result. It cannot write, run a shell, change the plan or delegate again, and its Turns are not recorded in the transcript.
+
+_Avoid_: child run, worker, task.
 
 ## Edit
 
@@ -92,7 +98,7 @@ _Avoid_: backend, LLM service, model (the model is one of the Provider's setting
 
 ## Background Task
 
-A shell command started with `run_background` that runs detached, beyond a single Run and past the normal shell timeout, then is watched with `poll_task` and can be killed. It streams output to a temp log (finalized as a blob on completion) and runs under the conversation's scope, like any other shell Tool: from the Workspace root in a folder chat, or from Aria's home directory in Main System. On startup, any task still `running` is reaped as `killed` because its process died with the previous app instance.
+A shell command started with `run_background` that runs detached, beyond a single Run and past the normal shell timeout, then is watched with `poll_task` and can be killed. It streams output to a temp log (finalized as a blob on completion) and runs under the conversation's scope, like any other shell Tool: from the Workspace root in a folder chat, or from Aria's home directory in Main System. `poll_task` reads only the last ~2 KB of the log; `kill_task` (or the UI panel) stops it. On startup, any task still `running` is reaped as `killed` because its process died with the previous app instance.
 
 _Avoid_: job, daemon, service, long-running shell.
 

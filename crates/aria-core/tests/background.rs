@@ -188,3 +188,42 @@ async fn refuses_without_workspace_scope() {
     };
     assert!(non_ws.start(&conv.id, "echo nope").is_err());
 }
+
+/// Polling reads only the last chunk of a large log, not the whole file.
+#[test]
+fn poll_reads_only_the_log_tail() {
+    let fx = fx();
+    let id = "bg-tail";
+    let conversation_id = fx
+        .bg
+        .db
+        .call(|c| db::insert_conversation(c, None, "tail"))
+        .unwrap()
+        .id;
+    fx.bg
+        .db
+        .call(|c| {
+            db::insert_background_task(
+                c,
+                &db::BackgroundTask {
+                    id: id.to_string(),
+                    cmd: "true".to_string(),
+                    conversation_id,
+                    started_at: 0,
+                    ended_at: None,
+                    exit_code: None,
+                    status: BackgroundStatus::Running,
+                    log_blob: String::new(),
+                },
+            )
+        })
+        .unwrap();
+    let path = fx.bg.blobs.dir().join(format!("bg-{id}.log"));
+    std::fs::write(&path, format!("START{}END-MARK", "x".repeat(10_000))).unwrap();
+
+    let (task, tail) = fx.bg.poll(id).unwrap();
+    assert_eq!(task.status, BackgroundStatus::Running);
+    assert!(tail.contains("END-MARK"));
+    assert!(!tail.contains("START"), "only the tail should be read");
+    assert!(tail.len() <= 2000, "{}", tail.len());
+}

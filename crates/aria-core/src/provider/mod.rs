@@ -38,6 +38,22 @@ pub enum ProviderError {
 
 pub type Result<T> = std::result::Result<T, ProviderError>;
 
+impl ProviderError {
+    /// Worth retrying: rate limits, server hiccups and transport failures.
+    /// Anything the request itself got wrong (auth, bad model, malformed body)
+    /// fails again the same way, so it is not retried.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Unreachable(_) | Self::Truncated => true,
+            Self::Http(e) => e.is_timeout() || e.is_connect() || e.is_request(),
+            Self::Status { status, .. } => {
+                matches!(status, 408 | 409 | 425 | 429 | 500..=599)
+            }
+            _ => false,
+        }
+    }
+}
+
 /// One message as the API sees it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]

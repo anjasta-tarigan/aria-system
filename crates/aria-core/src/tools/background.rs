@@ -5,7 +5,7 @@
 //! `poll` returns the row plus a tail of the log so the agent or UI can watch
 //! progress. `kill` takes down the process group (grandchildren included).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -144,12 +144,12 @@ impl BackgroundTasks {
     /// running, the stored blob once finished).
     pub fn poll(&self, id: &str) -> Result<(BackgroundTask, String)> {
         let task = self.db.call(|c| db::get_background_task(c, id))?;
-        let bytes = if task.status == BackgroundStatus::Running {
-            std::fs::read(self.temp_log_path(id)).unwrap_or_default()
+        let path = if task.status == BackgroundStatus::Running {
+            self.temp_log_path(id)
         } else {
-            self.blobs.read(&task.log_blob).unwrap_or_default()
+            self.blobs.dir().join(&task.log_blob)
         };
-        Ok((task, tail_text(&bytes)))
+        Ok((task, tail_text(&path)))
     }
 
     /// All tasks for a conversation, newest first.
@@ -198,9 +198,23 @@ impl BackgroundTasks {
     }
 }
 
-/// Last ~2000 bytes of a log as a string, falling back to the whole thing.
-fn tail_text(bytes: &[u8]) -> String {
-    let tail = 2000;
-    let start = bytes.len().saturating_sub(tail);
-    String::from_utf8_lossy(&bytes[start..]).into_owned()
+/// Last ~2000 bytes of a log file, without loading the rest into memory.
+fn tail_text(path: &Path) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 2000;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    if file
+        .seek(SeekFrom::Start(len.saturating_sub(TAIL)))
+        .is_err()
+    {
+        return String::new();
+    }
+    let mut buf = Vec::new();
+    if file.read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&buf).into_owned()
 }

@@ -909,6 +909,8 @@ const TOOL_CATALOG: { id: string; name: string; description: string; requiresSet
   { id: "recall", name: "Recall memories", description: "Recalls previously stored facts.", requiresSetup: false, permission: "read" },
   { id: "run_background", name: "Background tasks", description: "Starts a long-running command in the background.", requiresSetup: false, permission: "exec" },
   { id: "poll_task", name: "Task polling", description: "Reads a background task's status and output.", requiresSetup: false, permission: "read" },
+  { id: "kill_task", name: "Task control", description: "Stops a background task this chat started.", requiresSetup: false, permission: "read" },
+  { id: "delegate", name: "Research sub-agent", description: "Runs a read-only research sub-agent and returns its report.", requiresSetup: false, permission: "network" },
 ];
 
 /** Drop-in replacement for `invoke`. */

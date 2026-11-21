@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Semaphore};
 
 use crate::config::{ApprovalPolicy, Caps, Config, Settings};
 use crate::db::{
@@ -31,6 +31,11 @@ use crate::workspace::{Scope, WorkspaceRoot};
 /// How often a parked or streaming Run checks for cancellation and Approval
 /// decisions. Small enough to feel instant, large enough to cost nothing.
 const POLL: Duration = Duration::from_millis(20);
+
+/// Model Turns allowed to be in flight at once across every conversation. A
+/// Run parked at an Approval holds no slot, so waiting never starves another
+/// chat. `delegate` sub-turns run inside their parent's slot.
+const MAX_CONCURRENT_TURNS: usize = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
@@ -182,6 +187,8 @@ pub struct Agent {
     disabled_tools: Vec<String>,
     /// Aria's home for Main System chats: shell cwd and relative paths.
     system_dir: Option<PathBuf>,
+    /// Caps how many Turns hit the provider at once, across all chats.
+    turn_permits: Arc<Semaphore>,
 }
 
 impl Agent {
@@ -195,6 +202,7 @@ impl Agent {
             config: None,
             disabled_tools: Vec::new(),
             system_dir: None,
+            turn_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_TURNS)),
         }
     }
 
@@ -396,6 +404,7 @@ impl Agent {
             agent_disabled_tools: self.disabled_tools.clone(),
             source: self.source.clone(),
             system_dir: self.system_dir.clone(),
+            turn_permits: Arc::clone(&self.turn_permits),
             conversation_id: conversation.id.clone(),
             conversation_policy: conversation.approval_policy,
             auto_approve_run: false,
@@ -412,6 +421,51 @@ async fn spawn_blocking<T: Send + 'static>(
         .await
         .map_err(|e| AgentError::Task(e.to_string()))?
         .map_err(AgentError::Db)
+}
+
+/// Tools that may overlap with each other: they only read (files, web, stored
+/// facts) and none writes the journal, the plan or a process.
+fn parallel_safe(tool: &str) -> bool {
+    matches!(
+        tool,
+        tools::READ_FILE
+            | tools::LIST_DIR
+            | tools::SEARCH_FILES
+            | tools::VIEW_IMAGE
+            | tools::WEB_FETCH
+            | tools::WEB_SEARCH
+            | tools::RECALL
+            | tools::POLL_TASK
+    )
+}
+
+/// What a delegated sub-agent may use: read and network only.
+const DELEGATE_TOOLS: [&str; 7] = [
+    tools::READ_FILE,
+    tools::LIST_DIR,
+    tools::SEARCH_FILES,
+    tools::VIEW_IMAGE,
+    tools::WEB_FETCH,
+    tools::WEB_SEARCH,
+    tools::RECALL,
+];
+
+const DELEGATE_MAX_TURNS: usize = 8;
+const DELEGATE_MAX_BYTES: usize = 8000;
+
+const DELEGATE_PROMPT: &str = "\
+You are a focused research sub-agent inside Aria. Answer the task using the
+tools you are given: read files, list folders, search, fetch pages, recall
+memories. You cannot change files, run shell commands or talk to the user.
+
+- Work from evidence: quote paths and line numbers, cite URLs.
+- Stop as soon as the task is answered; do not explore for its own sake.
+- Reply with a concise report (findings first, then evidence). The parent agent
+  will act on it, so state clearly what you could not determine.";
+
+#[derive(Debug, serde::Deserialize)]
+struct DelegateArgs {
+    task: String,
 }
 
 fn pending_approval(approval: &Approval, call: &ToolCall) -> PendingApproval {
@@ -479,6 +533,8 @@ struct LoopCtx {
     source: ProviderSource,
     /// Aria's home for Main System Runs (shell cwd, relative paths).
     system_dir: Option<PathBuf>,
+    /// Shared across Runs: bounds concurrent provider Turns.
+    turn_permits: Arc<Semaphore>,
     /// The chat this Run belongs to, for live policy refresh.
     conversation_id: String,
     /// Per-conversation policy override; `None` follows Settings.
@@ -797,11 +853,24 @@ impl LoopCtx {
             if ready.is_empty() {
                 return Ok(true);
             }
-            for call in ready {
-                if self.handle.is_cancelled() {
-                    return Ok(false);
+            if ready.len() > 1 && ready.iter().all(|call| parallel_safe(&call.tool)) {
+                // Independent reads overlap; each result is still recorded
+                // against its own call, and the next Turn reads them in call
+                // order from the database.
+                let done = futures_util::future::join_all(
+                    ready.iter().map(|call| self.run_one(ctx, call)),
+                )
+                .await;
+                for result in done {
+                    result?;
                 }
-                self.run_one(ctx, &call).await?;
+            } else {
+                for call in ready {
+                    if self.handle.is_cancelled() {
+                        return Ok(false);
+                    }
+                    self.run_one(ctx, &call).await?;
+                }
             }
         }
     }
@@ -867,6 +936,12 @@ impl LoopCtx {
             } else {
                 self.run_shell(ctx, call).await
             }
+        } else if call.tool == tools::DELEGATE {
+            if ctx.disabled_tools.iter().any(|t| t == tools::DELEGATE) {
+                ToolOutcome::error(format!("tool `{}` is disabled in Settings", tools::DELEGATE))
+            } else {
+                self.run_delegate(ctx, call).await
+            }
         } else {
             ToolRegistry::execute(&call.tool, &call.args_json, ctx).await
         };
@@ -883,6 +958,77 @@ impl LoopCtx {
             self.emit(RunEvent::Todos { todos });
         }
         Ok(())
+    }
+
+    /// A read-only sub-agent: it gets the task, explores with the read tools
+    /// and returns one report. Nothing it does is written to the transcript or
+    /// the database, so a failed delegation costs only the parent's Turn.
+    // shortcut: an in-flight sub-agent provider call is not interrupted until it
+    // returns; cancellation is checked between sub-turns.
+    async fn run_delegate(&self, ctx: &ToolContext, call: &ToolCall) -> ToolOutcome {
+        let task = match serde_json::from_str::<DelegateArgs>(&call.args_json) {
+            Ok(args) => args.task,
+            Err(e) => return ToolOutcome::error(format!("invalid arguments: {e}")),
+        };
+        let specs = ToolRegistry::describe(&ctx.scope, &ctx.disabled_tools)
+            .into_iter()
+            .filter(|spec| DELEGATE_TOOLS.contains(&spec.name.as_str()))
+            .collect::<Vec<_>>();
+        let mut messages = vec![
+            ChatMessage::system(DELEGATE_PROMPT),
+            ChatMessage::user(task),
+        ];
+        let mut last = String::new();
+        for _ in 0..DELEGATE_MAX_TURNS {
+            if self.handle.is_cancelled() {
+                return ToolOutcome::error("cancelled");
+            }
+            let turn = match self.collect_turn(&messages, &specs).await {
+                Ok(turn) => turn,
+                Err(e) => return ToolOutcome::error(format!("sub-agent failed: {e}")),
+            };
+            last = turn.text.clone();
+            if turn.tool_calls.is_empty() {
+                return ToolOutcome::ok(tools::truncate(turn.text, DELEGATE_MAX_BYTES));
+            }
+            messages.push(ChatMessage::assistant(turn.text, turn.tool_calls.clone()));
+            for request in &turn.tool_calls {
+                let text = if DELEGATE_TOOLS.contains(&request.function.name.as_str()) {
+                    ToolRegistry::execute(
+                        &request.function.name,
+                        &request.function.arguments,
+                        ctx,
+                    )
+                    .await
+                    .text
+                } else {
+                    format!(
+                        "`{}` is not available to a sub-agent; report that the parent must do it.",
+                        request.function.name
+                    )
+                };
+                messages.push(ChatMessage::tool_result(request.id.clone(), text));
+            }
+        }
+        ToolOutcome::ok(tools::truncate(
+            format!("(sub-agent stopped after {DELEGATE_MAX_TURNS} turns)\n{last}"),
+            DELEGATE_MAX_BYTES,
+        ))
+    }
+
+    /// One provider call for a sub-agent. Its text is not streamed into the
+    /// parent transcript; only the final report is.
+    async fn collect_turn(
+        &self,
+        messages: &[ChatMessage],
+        specs: &[crate::provider::ToolSpec],
+    ) -> Result<crate::provider::TurnResult> {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let result = match &self.provider {
+            AnyProvider::OpenAi(p) => p.stream_chat(messages, specs, tx).await,
+            AnyProvider::Custom(p) => p.stream_chat(messages, specs, tx).await,
+        };
+        Ok(result?)
     }
 
     /// `run_shell` alone streams output to the UI as it is produced.
@@ -931,6 +1077,9 @@ impl LoopCtx {
         let specs = ToolRegistry::describe(scope, &self.disabled_tools);
         self.emit(RunEvent::TurnStarted { turn_index });
 
+        // Bound concurrent provider calls. Held only for this Turn, so an
+        // Approval wait or a long tool never blocks another chat.
+        let _permit = self.turn_permits.clone().acquire_owned().await.ok();
         let result = self.stream(&messages, &specs, turn_index).await?;
         let result = match result {
             Some(result) => result,
@@ -971,6 +1120,39 @@ impl LoopCtx {
         specs: &[crate::provider::ToolSpec],
         turn_index: i64,
     ) -> Result<Option<crate::provider::TurnResult>> {
+        // A failed Turn is retried a couple of times, but only while nothing
+        // has reached the reader: replaying a half-streamed answer would show
+        // the same text twice.
+        const MAX_ATTEMPTS: u32 = 3;
+        let mut attempt = 0;
+        loop {
+            match self.stream_once(messages, specs, turn_index).await {
+                Ok(turn) => return Ok(turn),
+                Err((e, emitted)) => {
+                    attempt += 1;
+                    if emitted || attempt >= MAX_ATTEMPTS || !e.is_transient() {
+                        return Err(e.into());
+                    }
+                    let delay = Duration::from_millis(300 * 3u64.pow(attempt - 1));
+                    if !self.wait_or_cancel(delay).await {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+    }
+
+    /// One attempt at a Turn. The error carries whether text was already
+    /// streamed, which decides if a retry is safe.
+    async fn stream_once(
+        &self,
+        messages: &[ChatMessage],
+        specs: &[crate::provider::ToolSpec],
+        turn_index: i64,
+    ) -> std::result::Result<
+        Option<crate::provider::TurnResult>,
+        (crate::provider::ProviderError, bool),
+    > {
         let (tx, mut rx) = mpsc::unbounded_channel::<ProviderEvent>();
         let (messages, specs) = (messages.to_vec(), specs.to_vec());
         let future = match &self.provider {
@@ -980,11 +1162,13 @@ impl LoopCtx {
         tokio::pin!(future);
 
         let mut so_far = String::new();
+        let mut emitted = false;
         loop {
             tokio::select! {
                 biased;
                 event = rx.recv() => match event {
                     Some(ProviderEvent::TextDelta(text)) => {
+                        emitted = true;
                         so_far.push_str(&text);
                         self.emit(RunEvent::TextDelta {
                             turn_index,
@@ -993,9 +1177,9 @@ impl LoopCtx {
                         });
                     }
                     Some(ProviderEvent::Usage { .. } | ProviderEvent::ToolCall(_)) => {}
-                    None => return Ok(Some(future.await?)),
+                    None => return future.await.map(Some).map_err(|e| (e, emitted)),
                 },
-                result = &mut future => return Ok(Some(result?)),
+                result = &mut future => return result.map(Some).map_err(|e| (e, emitted)),
                 // Lowest priority: only when nothing is ready, so a fast
                 // provider still finishes every Turn it has queued.
                 _ = tokio::time::sleep(POLL) => {
@@ -1005,6 +1189,19 @@ impl LoopCtx {
                 }
             }
         }
+    }
+
+    /// Sleep for `delay`, but wake up early to report cancellation.
+    async fn wait_or_cancel(&self, delay: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + delay;
+        while tokio::time::Instant::now() < deadline {
+            if self.handle.is_cancelled() {
+                return false;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            tokio::time::sleep(remaining.min(POLL)).await;
+        }
+        !self.handle.is_cancelled()
     }
 
     /// How many assistant messages this Run has, i.e. Turns already taken.

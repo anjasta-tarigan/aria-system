@@ -62,7 +62,7 @@ async fn call(f: &Fx, tool: &str, args: serde_json::Value) -> ToolOutcome {
 #[test]
 fn registry_advertises_all_tools_with_classes() {
     let specs = ToolRegistry::describe(&Scope::Workspace(WorkspaceRoot::new(std::path::Path::new("/tmp")).unwrap()), &[]);
-    assert_eq!(specs.len(), 16);
+    assert_eq!(specs.len(), 18);
     assert_eq!(specs.len(), tools::TOOLS.len());
     assert_eq!(tools::approval_class(tools::READ_FILE), Some(ApprovalClass::Read));
     assert_eq!(tools::approval_class(tools::VIEW_IMAGE), Some(ApprovalClass::Read));
@@ -442,7 +442,8 @@ async fn without_a_folder_only_filesystem_free_tools_are_offered() {
             tools::TODOS,
             tools::REMEMBER,
             tools::RECALL,
-            tools::WEB_SEARCH
+            tools::WEB_SEARCH,
+            tools::DELEGATE
         ]
     );
 
@@ -658,6 +659,23 @@ async fn poll_task_is_scoped_to_its_conversation() {
 
     let theirs = ToolRegistry::execute(
         "poll_task",
+        &serde_json::json!({ "id": "bg-other" }).to_string(),
+        &ctx,
+    )
+    .await;
+    assert!(theirs.is_error);
+    assert!(theirs.text.contains("no background task"));
+
+    // Killing follows the same rule: only this conversation's tasks.
+    let mine = ToolRegistry::execute(
+        "kill_task",
+        &serde_json::json!({ "id": "bg-own" }).to_string(),
+        &ctx,
+    )
+    .await;
+    assert!(!mine.is_error, "{}", mine.text);
+    let theirs = ToolRegistry::execute(
+        "kill_task",
         &serde_json::json!({ "id": "bg-other" }).to_string(),
         &ctx,
     )

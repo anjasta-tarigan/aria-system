@@ -76,6 +76,8 @@ fn tool_display_name(id: &str) -> &'static str {
         "recall" => "Recall memories",
         "run_background" => "Background tasks",
         "poll_task" => "Task polling",
+        "kill_task" => "Task control",
+        "delegate" => "Research sub-agent",
         _ => "Tool",
     }
 }
@@ -98,6 +100,8 @@ fn tool_description(id: &str) -> &'static str {
         "recall" => "Recalls previously stored facts.",
         "run_background" => "Starts a long-running command in the background.",
         "poll_task" => "Reads a background task's status and output.",
+        "kill_task" => "Stops a background task this chat started.",
+        "delegate" => "Runs a read-only research sub-agent and returns its report.",
         _ => "",
     }
 }

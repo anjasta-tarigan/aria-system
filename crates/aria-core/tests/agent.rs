@@ -1157,3 +1157,124 @@ async fn disabled_shell_tool_is_gated_and_returns_error_outcome() {
     let result = call.result.unwrap();
     assert!(result.contains("tool `run_shell` is disabled in Settings"), "{result}");
 }
+
+// ------------------------------------------------------------ orchestration
+
+/// A provider that fails a few times before answering, to exercise retries.
+struct FlakyProvider {
+    calls: Mutex<usize>,
+    fail_first: usize,
+}
+
+impl Provider for FlakyProvider {
+    fn stream_chat<'a>(
+        &'a self,
+        _messages: &'a [ChatMessage],
+        _tools: &'a [ToolSpec],
+        _events: mpsc::UnboundedSender<ProviderEvent>,
+    ) -> std::pin::Pin<
+        std::boxed::Box<
+            dyn std::future::Future<Output = aria_core::provider::Result<TurnResult>> + Send + 'a,
+        >,
+    > {
+        let mut calls = self.calls.lock().unwrap();
+        *calls += 1;
+        let attempt = *calls;
+        let fail_first = self.fail_first;
+        Box::pin(async move {
+            if attempt <= fail_first {
+                return Err(aria_core::provider::ProviderError::Status {
+                    status: 503,
+                    body: "busy".into(),
+                });
+            }
+            Ok(text("recovered "))
+        })
+    }
+}
+
+#[tokio::test]
+async fn transient_provider_errors_are_retried() {
+    let fx = fixture();
+    let provider = Arc::new(FlakyProvider {
+        calls: Mutex::new(0),
+        fail_first: 2,
+    });
+    let agent = Agent::new(
+        Arc::clone(&fx.db),
+        Arc::new(Blobs::new(fx._blob.path(), Arc::clone(&fx.db))),
+        Caps::default(),
+        ProviderSource::Fixed {
+            provider: Arc::clone(&provider) as Arc<dyn Provider>,
+            approval_policy: ApprovalPolicy::AlwaysAsk,
+        },
+    );
+    let handle = agent.start(&fx.conversation_id, "hello").await.unwrap();
+
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
+    assert_eq!(*provider.calls.lock().unwrap(), 3);
+    assert!(fx.messages().last().unwrap().content.contains("recovered"));
+}
+
+/// Two independent reads run in the same Turn and both land.
+#[tokio::test]
+async fn independent_reads_in_one_turn_all_complete() {
+    let fx = fixture();
+    std::fs::write(fx.root().join("a.txt"), "alpha").unwrap();
+    std::fs::write(fx.root().join("b.txt"), "beta").unwrap();
+    let provider = FakeProvider::new(vec![
+        tools(vec![
+            call("a", "read_file", serde_json::json!({"path": "a.txt"})),
+            call("b", "read_file", serde_json::json!({"path": "b.txt"})),
+        ]),
+        text("both read "),
+    ]);
+    let agent = fx.agent(Caps::default(), Arc::clone(&provider));
+    let handle = agent.start(&fx.conversation_id, "read both").await.unwrap();
+
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
+    let calls = fx.tool_calls(&handle);
+    assert_eq!(calls.len(), 2);
+    assert!(calls.iter().all(|c| c.state == ToolCallState::Done));
+    let results = calls
+        .iter()
+        .map(|c| c.result.clone().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(results.contains("alpha") && results.contains("beta"), "{results}");
+}
+
+/// `delegate` runs a read-only sub-agent and returns its report as one Tool
+/// Result; the sub-agent's own Turns never enter the transcript.
+#[tokio::test]
+async fn delegate_returns_a_report_without_touching_the_transcript() {
+    let fx = fixture();
+    std::fs::write(fx.root().join("note.txt"), "the secret is 42").unwrap();
+    let provider = FakeProvider::new(vec![
+        tools(vec![call(
+            "d1",
+            "delegate",
+            serde_json::json!({"task": "what is in note.txt?"}),
+        )]),
+        // The sub-agent reads the file, then answers.
+        tools(vec![call("r1", "read_file", serde_json::json!({"path": "note.txt"}))]),
+        text("The note says 42. "),
+        // Back in the parent Run.
+        text("Delegation reported 42. "),
+    ]);
+    let settings = Settings {
+        approval_policy: ApprovalPolicy::AutoApproveSafe,
+        model: "test-model".to_string(),
+        ..Settings::default()
+    };
+    let agent = fx.agent_with_settings(Caps::default(), settings, Arc::clone(&provider));
+    let handle = agent.start(&fx.conversation_id, "find the secret").await.unwrap();
+
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
+    let calls = fx.tool_calls(&handle);
+    assert_eq!(calls.len(), 1, "sub-agent calls stay out of the transcript");
+    assert_eq!(calls[0].tool, "delegate");
+    let report = calls[0].result.clone().unwrap();
+    assert!(report.contains("42"), "{report}");
+    assert!(fx.messages().last().unwrap().content.contains("Delegation reported"));
+}

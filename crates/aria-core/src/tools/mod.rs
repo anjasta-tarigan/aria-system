@@ -128,9 +128,11 @@ pub const RECALL: &str = "recall";
 pub const WEB_SEARCH: &str = "web_search";
 pub const RUN_BACKGROUND: &str = "run_background";
 pub const POLL_TASK: &str = "poll_task";
+pub const KILL_TASK: &str = "kill_task";
+pub const DELEGATE: &str = "delegate";
 
 /// The tool set with its approval classes.
-pub const TOOLS: [(&str, ApprovalClass); 16] = [
+pub const TOOLS: [(&str, ApprovalClass); 18] = [
     (READ_FILE, ApprovalClass::Read),
     (VIEW_IMAGE, ApprovalClass::Read),
     (LIST_DIR, ApprovalClass::Read),
@@ -147,6 +149,8 @@ pub const TOOLS: [(&str, ApprovalClass); 16] = [
     (RECALL, ApprovalClass::Read),
     (RUN_BACKGROUND, ApprovalClass::Exec),
     (POLL_TASK, ApprovalClass::Read),
+    (KILL_TASK, ApprovalClass::Read),
+    (DELEGATE, ApprovalClass::Network),
 ];
 
 pub const SYSTEM_PROMPT: &str = "\
@@ -161,6 +165,8 @@ Rules:
   project context) so you can recall them in later conversations. Use `recall`
   when a past fact would help answer. Stored memories are global unless a folder
   is open, in which case they are scoped to that folder plus the global set.
+- For broad read-only exploration (mapping a codebase, comparing sources), use
+  `delegate` and keep this chat for the decisions and edits.
 - Report what you changed and how you verified it.";
 
 /// Append when the conversation is the no-folder Main System chat: full device
@@ -173,8 +179,9 @@ This is the Main System chat with access to the whole device.
 - Prefer read_file, list_dir, search_files and the mutating file tools over
   shell for file work. Pass `path` to search_files to search any directory.
 - Long or unattended work (builds, servers, downloads) should use
-  `run_background`, then `poll_task` to read its status and output. Plain
-  shell commands may still ask for approval.
+  `run_background`, then `poll_task` to read its status and output. Stop one
+  you no longer need with `kill_task`. Plain shell commands may still ask for
+  approval.
 - Shell commands start in Aria's base directory (empty by design), not the
   user's project or home; give them absolute paths or `cd` first.";
 
@@ -189,7 +196,8 @@ A folder is open in this conversation. Its tools act on that folder.
 - Long or unattended work (builds, servers, training) should use
   `run_background` instead of `run_shell`, then `poll_task` to read its
   status and output. Chain by feeding a task's output into the next tool:
-  start it, do other work, then `poll_task` and act on the result.";
+  start it, do other work, then `poll_task` and act on the result. Stop one
+  you no longer need with `kill_task`.";
 
 /// Appended when no folder is open, so the model does not promise file work it
 /// cannot do.
@@ -616,13 +624,35 @@ impl ToolRegistry {
                     "required": ["id"]
                 }),
             ),
+            spec(
+                KILL_TASK,
+                "Stop a background task started in this conversation and reap its process group.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Background task id from `run_background`" }
+                    },
+                    "required": ["id"]
+                }),
+            ),
+            spec(
+                DELEGATE,
+                "Hand a self-contained research question to a read-only sub-agent and get back a concise report. It can read files, list folders, search, fetch pages and recall memories, but cannot change anything. Use it for broad exploration you do not want to fill this chat with; do the actual edits yourself.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "task": { "type": "string", "description": "What to find out, and what the report should contain" }
+                    },
+                    "required": ["task"]
+                }),
+            ),
         ];
         if !matches!(scope, Scope::None) {
             return all.into_iter()
                 .filter(|s| !disabled.contains(&s.name))
                 .collect();
         }
-        let usable = [WEB_FETCH, WEB_SEARCH, TODOS, REMEMBER, RECALL];
+        let usable = [WEB_FETCH, WEB_SEARCH, TODOS, REMEMBER, RECALL, DELEGATE];
         all.into_iter()
             .filter(|s| usable.contains(&s.name.as_str()))
             .filter(|s| !disabled.contains(&s.name))
@@ -661,6 +691,9 @@ impl ToolRegistry {
             RECALL => memories::recall(ctx, parse_args(args)?).await.map(outcome),
             RUN_BACKGROUND => run_background(ctx, parse_args(args)?).map(outcome),
             POLL_TASK => poll_task(ctx, parse_args(args)?).map(outcome),
+            KILL_TASK => kill_task(ctx, parse_args(args)?).await.map(outcome),
+            // Needs the live provider, so the Run loop intercepts it.
+            DELEGATE => Err(ToolError::Refused("delegate needs a live Run".into())),
             other => Err(ToolError::Args(format!("unknown tool {other}"))),
         }
     }
@@ -706,6 +739,26 @@ fn poll_task(ctx: &ToolContext, args: PollTaskArgs) -> Result<String> {
         task.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "-".into()),
         tail,
     ))
+}
+
+/// Stop a background task that belongs to this conversation. Only tasks the
+/// model itself started here are reachable, so this needs no approval of its
+/// own even though it terminates a process.
+async fn kill_task(ctx: &ToolContext, args: PollTaskArgs) -> Result<String> {
+    let bg = ctx
+        .background
+        .as_ref()
+        .ok_or_else(|| ToolError::Refused("no background runner for this session".into()))?;
+    let conversation_id = ctx
+        .db
+        .call(|c| crate::db::get_run(c, &ctx.run_id))?
+        .conversation_id;
+    let (task, _) = bg.poll(&args.id)?;
+    if task.conversation_id != conversation_id {
+        return Err(ToolError::Refused(format!("no background task {}", args.id)));
+    }
+    let task = bg.kill(&args.id).await?;
+    Ok(format!("background task {} {}", task.id, task.status.as_str()))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -760,6 +813,7 @@ pub fn summarize(tool: &str, args: &str) -> ApprovalSummary {
         RUN_SHELL => ("Run shell command".to_string(), get("cmd")),
         WEB_FETCH => (format!("Fetch {}", get("url")), String::new()),
         WEB_SEARCH => (format!("Search the web for {}", get("query")), String::new()),
+        DELEGATE => ("Delegate a research task".to_string(), get("task")),
         other => (format!("Run {other}"), args.to_string()),
     };
     ApprovalSummary { title, body }
