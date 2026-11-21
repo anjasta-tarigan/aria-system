@@ -139,6 +139,39 @@ interface Ui {
   lightbox: { src: string; name: string } | null;
 }
 
+/// Persist side-panel open/dismissed state so an explicit dismissal survives
+/// an app restart (stopping and rerunning `pnpm tauri dev`).
+const SIDE_PANEL_STORAGE_KEY = "aria:side-panel";
+
+function loadSidePanelState(): { open: boolean; dismissed: boolean } {
+  try {
+    const raw = localStorage.getItem(SIDE_PANEL_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        open: typeof parsed.open === "boolean" ? parsed.open : true,
+        dismissed: typeof parsed.dismissed === "boolean" ? parsed.dismissed : false,
+      };
+    }
+  } catch {
+    // localStorage may be unavailable or unreadable; fall back to defaults.
+  }
+  return { open: true, dismissed: false };
+}
+
+function saveSidePanelState(open: boolean, dismissed: boolean) {
+  try {
+    localStorage.setItem(
+      SIDE_PANEL_STORAGE_KEY,
+      JSON.stringify({ open, dismissed }),
+    );
+  } catch {
+    // localStorage may be unavailable or unwritable; best effort only.
+  }
+}
+
+const panelState = loadSidePanelState();
+
 const ui: Ui = {
   conversations: [],
   detail: null,
@@ -162,10 +195,10 @@ const ui: Ui = {
   activeArtifact: null,
   artifactTab: "preview",
   sidePanelTab: "artifacts",
-  sidePanelOpen: true,
+  sidePanelOpen: panelState.open,
   sidePanelWidth: 440,
   autoOpenedArtifactId: null,
-  sidePanelDismissed: false,
+  sidePanelDismissed: panelState.dismissed,
   lightbox: null,
 };
 
@@ -256,6 +289,7 @@ function render() {
       ui.sidePanelOpen = true;
       ui.sidePanelTab = "artifacts";
       ui.sidePanelDismissed = false;
+      saveSidePanelState(ui.sidePanelOpen, ui.sidePanelDismissed);
       if (latestArt.isStreaming) {
         streamingArtifactActive = true;
         ui.artifactTab = "code";
@@ -1015,6 +1049,7 @@ function conversationPane(
         // Remember an explicit dismiss so auto-open doesn't reopen the panel
         // on the next message; clearing it when the user re-opens.
         ui.sidePanelDismissed = !ui.sidePanelOpen;
+        saveSidePanelState(ui.sidePanelOpen, ui.sidePanelDismissed);
         render();
       },
     }, toggleIcon),
@@ -1289,6 +1324,7 @@ function messageNode(
             ui.sidePanelOpen = true;
             ui.sidePanelTab = "artifacts";
             ui.sidePanelDismissed = false;
+            saveSidePanelState(ui.sidePanelOpen, ui.sidePanelDismissed);
             render();
           });
         }
@@ -1618,6 +1654,7 @@ function streamingNode(artifactsIndex?: ConversationArtifactIndex | null): HTMLE
             ui.sidePanelOpen = true;
             ui.sidePanelTab = "artifacts";
             ui.sidePanelDismissed = false;
+            saveSidePanelState(ui.sidePanelOpen, ui.sidePanelDismissed);
             render();
           });
         }
@@ -2234,6 +2271,7 @@ function renderSidePanelFiles(conv: ConversationView): HTMLElement {
           onclick: () => {
             ui.sidePanelOpen = false;
             ui.sidePanelDismissed = true;
+            saveSidePanelState(ui.sidePanelOpen, ui.sidePanelDismissed);
             render();
           },
         },
