@@ -342,9 +342,6 @@ function onResizerMouseMove(e: MouseEvent) {
   newWidth = Math.max(250, Math.min(newWidth, maxWidth));
   if (newWidth !== ui.sidePanelWidth) {
     ui.sidePanelWidth = newWidth;
-    // Apply directly to the live element so dragging stays smooth without a
-    // full DOM rebuild on every animation frame. The stored value is also
-    // reused by the next render().
     const body = document.querySelector<HTMLElement>(".app-body");
     if (body) body.style.setProperty("--side-panel-width", `${newWidth}px`);
   }
