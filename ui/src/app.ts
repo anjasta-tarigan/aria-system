@@ -279,7 +279,9 @@ function render() {
 
   // Auto-open newest artifact if streaming or if none selected yet.
   // Respect an explicit user dismissal so a closed panel stays closed.
+  // Never auto-open while viewing the Extensions page.
   if (
+    !ui.viewingExtensions &&
     artifactsIndex &&
     artifactsIndex.all.length > 0 &&
     !ui.sidePanelDismissed
@@ -330,7 +332,9 @@ function render() {
     },
     sidebar(),
     h("main", { class: "pane" }, ui.viewingExtensions ? extensionsPane() : detail ? conversationPane(detail, artifactsIndex) : emptyPane()),
-    sidePanelNode(activeArtVersion, allVersionsForActive),
+    !ui.viewingExtensions
+      ? sidePanelNode(activeArtVersion, allVersionsForActive)
+      : undefined,
   );
   const shell = h("div", { class: "app" }, body, footer());
   root.replaceChildren(
@@ -2496,11 +2500,11 @@ async function selectConversation(id: string) {
   ui.notice = null;
   if (!known) {
     // Conversation changed: drop artifact selection so the new conversation
-    // can auto-open its own artifacts. Same-conversation reloads (e.g. after
-    // sending a message) keep the user's side panel open/closed state.
+    // can auto-open its own artifacts. sidePanelDismissed is a user
+    // preference that persists across conversations and restarts; don't
+    // reset it here.
     ui.activeArtifact = null;
     ui.autoOpenedArtifactId = null;
-    ui.sidePanelDismissed = false;
   }
   pendingAttachments = [];
   await refreshChanged();
