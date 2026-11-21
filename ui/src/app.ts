@@ -944,21 +944,27 @@ function emptyPane(): HTMLElement {
 
 /// --------------------------------------------------------------- Extensions page
 
-const EXTENSION_SECTIONS: { id: "skills" | "plugins" | "connectors"; title: string; intro: string }[] = [
-  { id: "skills", title: "Skills", intro: "Prompt packages that teach Aria new behaviors. A skill bundles a system prompt with the tools it is allowed to use." },
-  { id: "plugins", title: "Plugins", intro: "JavaScript/TypeScript extensions that run inside Aria's process. Placeholder: no plugin host is wired yet." },
-  { id: "connectors", title: "Connectors / MCP", intro: "Connections to external services (MCP servers, OpenAPI specs). Placeholder: connector ingestion comes next." },
+const EXTENSION_SECTIONS: { id: "skills" | "plugins" | "connectors"; title: string; color: string; intro: string }[] = [
+  { id: "skills", title: "Skills", color: "var(--ext-skill)", intro: "Prompt packages that teach Aria new behaviors. A skill bundles a system prompt with the tools it is allowed to use." },
+  { id: "plugins", title: "Plugins", color: "var(--ext-plugin)", intro: "JavaScript/TypeScript extensions that run inside Aria's process. Placeholder: no plugin host is wired yet." },
+  { id: "connectors", title: "Connectors / MCP", color: "var(--ext-connector)", intro: "Connections to external services (MCP servers, OpenAPI specs). Placeholder: connector ingestion comes next." },
 ];
+
+function sectionColor(id: string): string {
+  const s = EXTENSION_SECTIONS.find((x) => x.id === id);
+  return s ? s.color : "var(--muted)";
+}
 
 function extensionsPane(): HTMLElement {
   const section = ui.extensionsSection ?? "skills";
   const items = extensionItems.filter((i) => i.section === section);
   const sectionInfo = EXTENSION_SECTIONS.find((s) => s.id === section)!;
+  const color = sectionColor(section);
 
   const back = h(
     "button",
     {
-      class: "ghost",
+      class: "ext-back",
       onclick: () => {
         ui.viewingExtensions = false;
         ui.extensionsSection = null;
@@ -970,13 +976,14 @@ function extensionsPane(): HTMLElement {
 
   const sectionTabs = h(
     "nav",
-    { class: "extension-tabs" },
+    { class: "ext-tabs" },
     ...EXTENSION_SECTIONS.map((s) => {
       const active = s.id === section;
       return h(
         "button",
         {
-          class: `extension-tab${active ? " active" : ""}`,
+          class: `ext-tab${active ? " active" : ""}`,
+          style: active ? `border-color: ${s.color}` : undefined,
           onclick: () => {
             ui.extensionsSection = s.id;
             render();
@@ -987,45 +994,61 @@ function extensionsPane(): HTMLElement {
     }),
   );
 
-  const itemRow = (item: ExtensionItem): HTMLElement => {
-    const toggle = h(
+  const toggle = (item: ExtensionItem): HTMLElement => {
+    const on = item.enabled;
+    return h(
       "button",
       {
-        class: `ghost small-btn ${item.enabled ? "" : "danger"}`,
+        class: `ext-toggle ${on ? "on" : "off"}`,
+        title: on ? "Disable" : "Enable",
         onclick: () => {
           item.enabled = !item.enabled;
           render();
         },
       },
-      item.enabled ? "Disable" : "Enable",
+      h("span", { class: "ext-toggle-thumb" }),
     );
+  };
+
+  const itemRow = (item: ExtensionItem): HTMLElement => {
+    const on = item.enabled;
     return h(
-      "div",
-      { class: "extension-item" },
+      "article",
+      { class: "ext-item", style: `border-color: ${color}` },
       h(
         "div",
-        { class: "extension-item-main" },
-        h("div", { class: "extension-item-name" }, item.name),
-        h(
-          "span",
-          { class: `extension-badge ${item.enabled ? "on" : "off"}` },
-          item.enabled ? "Enabled" : "Disabled",
-        ),
+        { class: "ext-item-main" },
+        h("div", { class: "ext-item-name" }, item.name),
+        h("p", { class: "ext-item-desc" }, item.description),
       ),
-      h("p", { class: "extension-desc muted" }, item.description),
-      toggle,
+      h(
+        "div",
+        { class: "ext-item-status" },
+        h("span", { class: `ext-badge ${on ? "on" : "off"}` }, on ? "Enabled" : "Disabled"),
+        toggle(item),
+      ),
     );
   };
 
   return h(
     "div",
     { class: "extensions-page" },
-    h("header", { class: "extensions-header" }, back, h("h1", {}, sectionInfo.title), h("p", { class: "muted" }, sectionInfo.intro)),
+    h(
+      "header",
+      { class: "extensions-header" },
+      h(
+        "div",
+        { class: "extensions-head" },
+        back,
+        h("h1", { class: "extensions-title" }, sectionInfo.title),
+        h("p", { class: "extensions-intro" }, sectionInfo.intro),
+      ),
+    ),
     sectionTabs,
     h(
       "div",
-      { class: "extension-list" },
-      ...(items.length ? items.map(itemRow) : [h("p", { class: "muted" }, "No items in this section yet.")]),
+      { class: "ext-list" },
+      ...(items.length ? items.map(itemRow) : [h("p", { class: "ext-empty" }, `No ${sectionInfo.title.toLowerCase()} yet.`)]),
     ),
   );
 }
