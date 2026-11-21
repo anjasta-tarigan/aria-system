@@ -171,7 +171,39 @@ Rules:
   is open, in which case they are scoped to that folder plus the global set.
 - For broad read-only exploration (mapping a codebase, comparing sources), use
   `delegate` and keep this chat for the decisions and edits.
-- Report what you changed and how you verified it.";
+- Report what you changed and how you verified it.
+
+<artifacts_info>
+The assistant can create and reference standalone artifacts during conversations.
+Artifacts are meant for substantial, self-contained content (>15 lines) that users
+will inspect, iterate on, or use outside the conversation.
+
+Good artifacts:
+- Complete code programs, modules or self-contained scripts
+- Interactive HTML/CSS/JS web applications, dashboards or widgets
+- Standalone SVG drawings or diagrams
+- Formatted markdown documents, reports, or articles
+- Mermaid diagrams (architecture, flowcharts, sequence diagrams)
+
+Do NOT use artifacts for:
+- Brief snippets (<15 lines), explanations, or small examples
+- Conversational or contextual replies
+
+Usage:
+Wrap artifact content in <antArtifact> tags with attributes:
+<antArtifact identifier=\"unique-id\" type=\"MIME-TYPE\" title=\"Descriptive Title\" language=\"LANG\">
+...content...
+</antArtifact>
+
+Supported types:
+- \"application/vnd.ant.code\" (for code; specify language e.g. python, typescript, html, css, rust, etc.)
+- \"text/html\" (standalone HTML with inline CSS/JS)
+- \"image/svg+xml\" (raw SVG code)
+- \"text/markdown\" (full markdown documents)
+- \"application/vnd.ant.mermaid\" (Mermaid diagram definition)
+
+When updating an artifact from earlier in the chat, reuse the exact same identifier.
+</artifacts_info>";
 
 /// Append when the conversation is the no-folder Main System chat: full device
 /// access, so it must not assume a project folder.

@@ -210,6 +210,67 @@ async function runChat(detail: ConversationDetail, text: string) {
     emit({ type: "assistant_message", message_id: id("msg"), content: text2 }, run.id);
   };
 
+  if (/artifact|app|dashboard|calc|game/i.test(text)) {
+    const streamReply = `I'll build an interactive calculator artifact for you:
+
+<antArtifact identifier="calculator-app" type="text/html" title="Interactive Calculator">
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: sans-serif; display: grid; place-items: center; height: 80vh; background: #0f1115; color: #fff; margin: 0; }
+    .calc { background: #161a21; border: 1px solid #2a3039; border-radius: 12px; padding: 20px; width: 220px; }
+    #screen { background: #0f1115; border: 1px solid #2a3039; border-radius: 6px; padding: 12px; font-size: 24px; text-align: right; margin-bottom: 16px; min-height: 28px; }
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    button { padding: 12px; font-size: 16px; border: none; border-radius: 6px; background: #2a3039; color: #fff; cursor: pointer; }
+    button.op { background: #6aa6ff; color: #0f1115; font-weight: bold; }
+    button.eq { background: #4cc38a; color: #0f1115; font-weight: bold; grid-column: span 2; }
+  </style>
+</head>
+<body>
+  <div class="calc">
+    <div id="screen">0</div>
+    <div class="grid">
+      <button onclick="press('7')">7</button>
+      <button onclick="press('8')">8</button>
+      <button onclick="press('9')">9</button>
+      <button class="op" onclick="press('/')">/</button>
+      <button onclick="press('4')">4</button>
+      <button onclick="press('5')">5</button>
+      <button onclick="press('6')">6</button>
+      <button class="op" onclick="press('*')">*</button>
+      <button onclick="press('1')">1</button>
+      <button onclick="press('2')">2</button>
+      <button onclick="press('3')">3</button>
+      <button class="op" onclick="press('-')">-</button>
+      <button onclick="press('0')">0</button>
+      <button onclick="clr()">C</button>
+      <button class="op" onclick="press('+')">+</button>
+      <button class="eq" onclick="calc()">=</button>
+    </div>
+  </div>
+  <script>
+    let s = '';
+    function press(v) { s += v; document.getElementById('screen').innerText = s; }
+    function clr() { s = ''; document.getElementById('screen').innerText = '0'; }
+    function calc() {
+      try { s = String(Function('return ' + s)()); } catch { s = 'Err'; }
+      document.getElementById('screen').innerText = s;
+    }
+  </script>
+</body>
+</html>
+</antArtifact>
+
+The calculator artifact is ready in the preview panel.`;
+    await say(streamReply);
+    run.stop_reason = "no_tool_calls";
+    run.ended_at = now();
+    setState("finished");
+    return;
+  }
+
   const reply =
     "I'm Aria, a desktop assistant. You can chat with me here, or open a folder " +
     "from the header to let me read, edit and run commands inside it. What would " +
@@ -222,7 +283,7 @@ async function runChat(detail: ConversationDetail, text: string) {
 
 /** The scripted task the mock drives: find a bug, fix it, run the tests. */
 async function runScript(detail: ConversationDetail, text: string) {
-  if (!detail.conversation.workspace_id) {
+  if (!detail.conversation.workspace_id || /artifact|app|dashboard|calc|game/i.test(text)) {
     return runChat(detail, text);
   }
   const conv = detail.conversation;
@@ -971,6 +1032,148 @@ export function seed(): void {
     rootPath: "/home/anjasta/Projects/sample-app",
   }) as ConversationView;
   handlers.new_session({ workspaceId: sample.workspace_id });
+
+  // Dedicated Artifacts Showcase session demonstrating multi-version Claude-style artifacts
+  const artSession = handlers.new_session({
+    workspaceId: sample.workspace_id,
+  }) as ConversationView;
+  const artDetail = conversations.get(artSession.id);
+  if (artDetail) {
+    artSession.title = "Artifacts Showcase";
+    artDetail.conversation.title = "Artifacts Showcase";
+    artDetail.messages.push(
+      {
+        id: id("msg"),
+        role: "user",
+        content: "Can you create an interactive counter and dashboard web app?",
+        created_at: now() - 120_000,
+        tool_calls: [],
+      },
+      {
+        id: id("msg"),
+        role: "assistant",
+        content: `I've created an interactive counter and metrics dashboard for you:
+
+<antArtifact identifier="metrics-counter" type="text/html" title="Interactive Counter Widget">
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 24px; background: #0f1115; color: #e6e9ef; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 80vh; margin: 0; }
+    .card { background: #161a21; border: 1px solid #2a3039; border-radius: 12px; padding: 24px; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+    h2 { margin: 0 0 16px 0; color: #6aa6ff; font-size: 20px; }
+    .count { font-size: 48px; font-weight: bold; color: #4cc38a; margin-bottom: 20px; font-variant-numeric: tabular-nums; }
+    .btn-row { display: flex; gap: 12px; justify-content: center; }
+    button { background: #6aa6ff; color: #0f1115; border: none; padding: 10px 18px; border-radius: 6px; font-weight: 600; cursor: pointer; transition: opacity 0.15s; }
+    button:hover { opacity: 0.9; }
+    button.reset { background: #2a3039; color: #8b94a3; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Interactive Counter Widget</h2>
+    <div class="count" id="val">0</div>
+    <div class="btn-row">
+      <button onclick="change(-1)">- Decrement</button>
+      <button class="reset" onclick="reset()">Reset</button>
+      <button onclick="change(1)">+ Increment</button>
+    </div>
+  </div>
+  <script>
+    let n = 0;
+    function change(delta) {
+      n += delta;
+      document.getElementById('val').innerText = n;
+    }
+    function reset() {
+      n = 0;
+      document.getElementById('val').innerText = n;
+    }
+  </script>
+</body>
+</html>
+</antArtifact>
+
+You can interact with it in the Preview pane, view the code, or download it.`,
+        created_at: now() - 60_000,
+        tool_calls: [],
+      },
+      {
+        id: id("msg"),
+        role: "user",
+        content: "Can you update it with auto-increment speed controls?",
+        created_at: now() - 30_000,
+        tool_calls: [],
+      },
+      {
+        id: id("msg"),
+        role: "assistant",
+        content: `Here is the updated version (v2) with auto-increment speed controls:
+
+<antArtifact identifier="metrics-counter" type="text/html" title="Interactive Counter Widget with Auto-Timer">
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 24px; background: #0f1115; color: #e6e9ef; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 80vh; margin: 0; }
+    .card { background: #161a21; border: 1px solid #2a3039; border-radius: 12px; padding: 24px; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.3); min-width: 280px; }
+    h2 { margin: 0 0 16px 0; color: #6aa6ff; font-size: 20px; }
+    .count { font-size: 56px; font-weight: bold; color: #4cc38a; margin-bottom: 20px; font-variant-numeric: tabular-nums; }
+    .btn-row { display: flex; gap: 8px; justify-content: center; margin-bottom: 12px; }
+    button { background: #6aa6ff; color: #0f1115; border: none; padding: 10px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; }
+    button:hover { opacity: 0.9; }
+    button.auto { background: #d98cff; }
+    button.reset { background: #2a3039; color: #8b94a3; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Interactive Counter (v2)</h2>
+    <div class="count" id="val">0</div>
+    <div class="btn-row">
+      <button onclick="change(-1)">-1</button>
+      <button class="reset" onclick="reset()">Reset</button>
+      <button onclick="change(1)">+1</button>
+    </div>
+    <div class="btn-row">
+      <button class="auto" id="toggle-btn" onclick="toggleAuto()">Start Auto-Increment</button>
+    </div>
+  </div>
+  <script>
+    let n = 0;
+    let timer = null;
+    function change(delta) {
+      n += delta;
+      document.getElementById('val').innerText = n;
+    }
+    function reset() {
+      n = 0;
+      document.getElementById('val').innerText = n;
+    }
+    function toggleAuto() {
+      const btn = document.getElementById('toggle-btn');
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+        btn.innerText = 'Start Auto-Increment';
+      } else {
+        timer = setInterval(() => change(1), 300);
+        btn.innerText = 'Stop Auto-Increment';
+      }
+    }
+  </script>
+</body>
+</html>
+</antArtifact>
+
+I updated the widget with an automated increment timer. Use the version switcher at the top to toggle between v1 and v2!`,
+        created_at: now() - 10_000,
+        tool_calls: [],
+      },
+    );
+  }
 
   if (aiProviders.length === 0) {
     aiProviders.push(

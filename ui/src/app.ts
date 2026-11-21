@@ -24,6 +24,15 @@ import { mockFaults, mockInvoke, mockListen, seed } from "./mock";
 import { h } from "./dom";
 import { openSettings as openSettingsModal } from "./settings";
 import { renderMarkdown } from "./format";
+import {
+  type ArtifactVersion,
+  type ConversationArtifactIndex,
+  buildArtifactIndex,
+  segmentMessage,
+  renderArtifactCard,
+  renderArtifactPanel,
+  isArtifactPreviewable,
+} from "./artifacts";
 
 /// Thin adapters the UI goes through, so `?mock=1` can swap the whole Rust
 /// side for the in-browser fake.
@@ -113,6 +122,12 @@ interface Ui {
   filesVisible: boolean;
   /// Whether the Background Tasks panel is visible (user can dismiss it).
   bgVisible: boolean;
+  /// Active artifact being displayed in the side panel: identifier + version.
+  activeArtifact: { identifier: string; version: number } | null;
+  /// Tab currently active in the artifact panel: "preview" | "code".
+  artifactTab: "preview" | "code";
+  /// Identifier@version of the last auto-opened artifact.
+  autoOpenedArtifactId: string | null;
 }
 
 const ui: Ui = {
@@ -137,6 +152,9 @@ const ui: Ui = {
   providers: [] as AIProvider[],
   filesVisible: true,
   bgVisible: true,
+  activeArtifact: null,
+  artifactTab: "preview",
+  autoOpenedArtifactId: null,
 };
 
 const root = document.querySelector<HTMLElement>("#app")!;
@@ -145,6 +163,7 @@ const root = document.querySelector<HTMLElement>("#app")!;
 let unsubscribe: (() => void) | null = null;
 /// Set by stop(); stale async work must not paint over the new instance.
 let disposed = false;
+let streamingArtifactActive = false;
 
 // Files panel state — kept module-level so expansion/editing survive re-renders.
 let filesOpen = true;
@@ -205,12 +224,69 @@ function render() {
   const previous = document.querySelector<HTMLElement>(".transcript");
   const previousTop = previous?.scrollTop ?? 0;
   const follow = !previous || previous.scrollHeight - previousTop - previous.clientHeight < 120;
+
+  const artifactsIndex = detail
+    ? buildArtifactIndex(detail.messages, ui.streaming?.text)
+    : null;
+
+  // Auto-open newest artifact if streaming or if none selected yet
+  if (artifactsIndex && artifactsIndex.all.length > 0) {
+    const latestArt = artifactsIndex.all[artifactsIndex.all.length - 1];
+    const artKey = `${latestArt.identifier}@${latestArt.version}`;
+    if (ui.autoOpenedArtifactId !== artKey && (ui.streaming || !ui.activeArtifact)) {
+      ui.autoOpenedArtifactId = artKey;
+      ui.activeArtifact = { identifier: latestArt.identifier, version: latestArt.version };
+      if (latestArt.isStreaming) {
+        streamingArtifactActive = true;
+        ui.artifactTab = "code";
+      } else {
+        ui.artifactTab = isArtifactPreviewable(latestArt.type) ? "preview" : "code";
+      }
+    } else if (streamingArtifactActive && !latestArt.isStreaming && !ui.streaming) {
+      streamingArtifactActive = false;
+      if (isArtifactPreviewable(latestArt.type)) {
+        ui.artifactTab = "preview";
+      }
+    }
+  }
+
+  let activeArtVersion: ArtifactVersion | null = null;
+  let allVersionsForActive: ArtifactVersion[] = [];
+  if (artifactsIndex && ui.activeArtifact) {
+    allVersionsForActive = artifactsIndex.byIdentifier.get(ui.activeArtifact.identifier) ?? [];
+    activeArtVersion =
+      allVersionsForActive.find((v) => v.version === ui.activeArtifact!.version) ??
+      allVersionsForActive[allVersionsForActive.length - 1] ??
+      null;
+  }
+  const showArtifact = activeArtVersion !== null;
+
   const body = h(
     "div",
-    { class: "app-body" },
+    { class: `app-body ${showArtifact ? "has-artifact" : ""}` },
     sidebar(),
-    h("main", { class: "pane" }, detail ? conversationPane(detail) : emptyPane()),
-    detail && detail.todos.length > 0 ? todoPanel(detail) : null,
+    h("main", { class: "pane" }, detail ? conversationPane(detail, artifactsIndex) : emptyPane()),
+    activeArtVersion
+      ? renderArtifactPanel(
+          activeArtVersion,
+          allVersionsForActive,
+          ui.artifactTab,
+          (tab) => {
+            ui.artifactTab = tab;
+            render();
+          },
+          (ver) => {
+            ui.activeArtifact = { identifier: activeArtVersion!.identifier, version: ver };
+            render();
+          },
+          () => {
+            ui.activeArtifact = null;
+            render();
+          },
+        )
+      : detail && detail.todos.length > 0
+        ? todoPanel(detail)
+        : null,
   );
   const shell = h("div", { class: "app" }, body, footer());
   root.replaceChildren(
@@ -806,7 +882,10 @@ function welcomeNode(conv: ConversationView): HTMLElement {
   );
 }
 
-function conversationPane(detail: ConversationDetail): HTMLElement {
+function conversationPane(
+  detail: ConversationDetail,
+  artifactsIndex?: ConversationArtifactIndex | null,
+): HTMLElement {
   const conv = detail.conversation;
   const run = conv.run;
   const busy = isBusy(run);
@@ -857,8 +936,8 @@ function conversationPane(detail: ConversationDetail): HTMLElement {
     "div",
     { class: "transcript", role: "log", "aria-live": "polite" },
     ...(detail.messages.length === 0 && !busy ? [welcomeNode(conv)] : []),
-    ...detail.messages.map((m) => messageNode(m)),
-    streamingNode(),
+    ...detail.messages.map((m) => messageNode(m, artifactsIndex)),
+    streamingNode(artifactsIndex),
     ...pending.map(approvalNode),
   );
 
@@ -1267,17 +1346,47 @@ function systemAccessModal(conversationId: string): HTMLElement {
   );
 }
 
-function messageNode(m: MessageView): HTMLElement {
+function messageNode(
+  m: MessageView,
+  artifactsIndex?: ConversationArtifactIndex | null,
+): HTMLElement {
   const isUser = m.role === "user";
   // Only the assistant's output is markdown. The user's own text is shown
   // verbatim, so pasted code or a stray ** isn't silently reformatted.
-  const body = isUser
-    ? m.content
-      ? h("div", { class: "msg-body" }, m.content)
-      : null
-    : m.content
-      ? h("div", { class: "msg-body markdown", html: renderMarkdown(m.content) })
-      : null;
+  let bodyNodes: (HTMLElement | null)[] = [];
+
+  if (isUser) {
+    bodyNodes = m.content ? [h("div", { class: "msg-body" }, m.content)] : [];
+  } else if (m.content) {
+    if (
+      artifactsIndex &&
+      (m.content.includes("<antArtifact") || m.content.includes("<ariaArtifact"))
+    ) {
+      const segments = segmentMessage(m.content, m.id, artifactsIndex);
+      bodyNodes = segments.map((seg) => {
+        if (seg.type === "text") {
+          return seg.text.trim()
+            ? h("div", { class: "msg-body markdown", html: renderMarkdown(seg.text) })
+            : null;
+        } else {
+          const isSelected =
+            ui.activeArtifact?.identifier === seg.artifact.identifier &&
+            ui.activeArtifact?.version === seg.artifact.version;
+          return renderArtifactCard(seg.artifact, isSelected, () => {
+            ui.activeArtifact = {
+              identifier: seg.artifact.identifier,
+              version: seg.artifact.version,
+            };
+            ui.artifactTab = isArtifactPreviewable(seg.artifact.type) ? "preview" : "code";
+            render();
+          });
+        }
+      });
+    } else {
+      bodyNodes = [h("div", { class: "msg-body markdown", html: renderMarkdown(m.content) })];
+    }
+  }
+
   return h(
     "article",
     { class: `msg ${m.role}`, id: `msg-${m.id}` },
@@ -1287,7 +1396,7 @@ function messageNode(m: MessageView): HTMLElement {
       h("span", { class: "who" }, isUser ? "You" : "Aria"),
       h("time", { class: "when" }, fmt(m.created_at)),
     ),
-    body,
+    ...bodyNodes,
     ...m.tool_calls.map(toolCard),
   );
 }
@@ -1376,13 +1485,43 @@ function toolCard(call: ToolCall): HTMLElement {
   );
 }
 
-function streamingNode(): HTMLElement | null {
+function streamingNode(artifactsIndex?: ConversationArtifactIndex | null): HTMLElement | null {
   if (!ui.streaming) return null;
-  const else_ =
-    ui.streaming.text.length > 0
-      ? h("div", { class: "msg-body markdown", html: renderMarkdown(ui.streaming.text) })
-      : h("div", { class: "msg-body muted" }, "Thinking…");
-  return h("article", { class: "msg assistant streaming" }, else_);
+  let bodyNodes: (HTMLElement | null)[] = [];
+
+  if (ui.streaming.text.length > 0) {
+    if (
+      artifactsIndex &&
+      (ui.streaming.text.includes("<antArtifact") || ui.streaming.text.includes("<ariaArtifact"))
+    ) {
+      const segments = segmentMessage(ui.streaming.text, "streaming", artifactsIndex);
+      bodyNodes = segments.map((seg) => {
+        if (seg.type === "text") {
+          return seg.text.trim()
+            ? h("div", { class: "msg-body markdown", html: renderMarkdown(seg.text) })
+            : null;
+        } else {
+          const isSelected =
+            ui.activeArtifact?.identifier === seg.artifact.identifier &&
+            ui.activeArtifact?.version === seg.artifact.version;
+          return renderArtifactCard(seg.artifact, isSelected, () => {
+            ui.activeArtifact = {
+              identifier: seg.artifact.identifier,
+              version: seg.artifact.version,
+            };
+            ui.artifactTab = isArtifactPreviewable(seg.artifact.type) ? "preview" : "code";
+            render();
+          });
+        }
+      });
+    } else {
+      bodyNodes = [h("div", { class: "msg-body markdown", html: renderMarkdown(ui.streaming.text) })];
+    }
+  } else {
+    bodyNodes = [h("div", { class: "msg-body muted" }, "Thinking…")];
+  }
+
+  return h("article", { class: "msg assistant streaming" }, ...bodyNodes);
 }
 
 function diffOf(body: string): HTMLElement {
@@ -1887,6 +2026,8 @@ async function selectConversation(id: string) {
   ui.notice = null;
   ui.filesVisible = true;
   ui.bgVisible = true;
+  ui.activeArtifact = null;
+  ui.autoOpenedArtifactId = null;
   pendingAttachments = [];
   await refreshChanged();
   render();
@@ -2056,6 +2197,8 @@ async function reloadAfterDatabaseChange() {
   ui.notice = null;
   ui.streaming = null;
   ui.toolOutput = {};
+  ui.activeArtifact = null;
+  ui.autoOpenedArtifactId = null;
   await refreshConversations();
   await selectFirst();
 }
