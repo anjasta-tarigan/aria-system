@@ -25,7 +25,6 @@ import { api } from "./api";
 import { mockFaults, mockInvoke, mockListen, seed } from "./mock";
 import { h } from "./dom";
 import { openSettings as openSettingsModal } from "./settings";
-import { openExtensions } from "./extensions";
 import { renderMarkdown } from "./format";
 import {
   type ArtifactVersion,
@@ -139,6 +138,10 @@ interface Ui {
   sidePanelDismissed: boolean;
   /// Currently open image lightbox: src data URL + file name.
   lightbox: { src: string; name: string } | null;
+  /// Whether the Extensions page is showing in the main pane instead of a conversation.
+  viewingExtensions: boolean;
+  /// Active section within Extensions: "skills" | "plugins" | "connectors".
+  extensionsSection: "skills" | "plugins" | "connectors" | null;
 }
 
 /// Side panel UI state. Defaults are applied here; persisted values are
@@ -181,6 +184,8 @@ const ui: Ui = {
   autoOpenedArtifactId: null,
   sidePanelDismissed: panelState.dismissed,
   lightbox: null,
+  viewingExtensions: false,
+  extensionsSection: null,
 };
 
 const root = document.querySelector<HTMLElement>("#app")!;
@@ -206,6 +211,23 @@ let filesConvId: string | null = null;
 // Auto-poll timer for background tasks; cleared on re-render so only one loop
 // runs for the visible conversation.
 let bgPoll: ReturnType<typeof setTimeout> | null = null;
+
+// Extension items (mock catalog; backend wiring comes next).
+interface ExtensionItem {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  section: "skills" | "plugins" | "connectors";
+}
+const extensionItems: ExtensionItem[] = [
+  { id: "skill-summarize", name: "Summarize", description: "Condenses long threads into key decisions and next actions.", enabled: true, section: "skills" },
+  { id: "skill-review", name: "Code Review", description: "Reviews diffs for bugs, style, and security issues.", enabled: false, section: "skills" },
+  { id: "skill-meeting-notes", name: "Meeting Notes", description: "Turns a transcript into structured notes with action items.", enabled: true, section: "skills" },
+  { id: "plugin-linter", name: "Lint Plugin", description: "Runs the project linter on edited files.", enabled: false, section: "plugins" },
+  { id: "connector-github", name: "GitHub", description: "MCP connector for issues, PRs, and repositories.", enabled: false, section: "connectors" },
+  { id: "connector-slack", name: "Slack", description: "MCP connector for channels and messages.", enabled: false, section: "connectors" },
+];
 
 // Single real-time health poll loop for the footer.
 let healthPoll: ReturnType<typeof setInterval> | null = null;
@@ -307,7 +329,7 @@ function render() {
       style: `--side-panel-width: ${ui.sidePanelWidth}px`,
     },
     sidebar(),
-    h("main", { class: "pane" }, detail ? conversationPane(detail, artifactsIndex) : emptyPane()),
+    h("main", { class: "pane" }, ui.viewingExtensions ? extensionsPane() : detail ? conversationPane(detail, artifactsIndex) : emptyPane()),
     sidePanelNode(activeArtVersion, allVersionsForActive),
   );
   const shell = h("div", { class: "app" }, body, footer());
@@ -506,7 +528,7 @@ function sidebar(): HTMLElement {
     { class: "sidebar-menu" },
     h(
       "button",
-      { class: "menu-item", title: "Extensions", onclick: () => void openExtensions(call) },
+      { class: "menu-item", title: "Extensions", onclick: () => { ui.viewingExtensions = true; ui.extensionsSection = "skills"; render(); } },
       h("span", { class: "menu-icon" }, "🧩"),
       h("span", { class: "menu-label" }, "Extensions"),
     ),
@@ -913,6 +935,94 @@ function emptyPane(): HTMLElement {
       "Ask me anything, or open a folder to let me work on the files inside it.",
     ),
     h("button", { class: "ghost", onclick: () => void chooseFolder() }, "📁 Work in a folder…"),
+  );
+}
+
+/// --------------------------------------------------------------- Extensions page
+
+const EXTENSION_SECTIONS: { id: "skills" | "plugins" | "connectors"; title: string; intro: string }[] = [
+  { id: "skills", title: "Skills", intro: "Prompt packages that teach Aria new behaviors. A skill bundles a system prompt with the tools it is allowed to use." },
+  { id: "plugins", title: "Plugins", intro: "JavaScript/TypeScript extensions that run inside Aria's process. Placeholder: no plugin host is wired yet." },
+  { id: "connectors", title: "Connectors / MCP", intro: "Connections to external services (MCP servers, OpenAPI specs). Placeholder: connector ingestion comes next." },
+];
+
+function extensionsPane(): HTMLElement {
+  const section = ui.extensionsSection ?? "skills";
+  const items = extensionItems.filter((i) => i.section === section);
+  const sectionInfo = EXTENSION_SECTIONS.find((s) => s.id === section)!;
+
+  const back = h(
+    "button",
+    {
+      class: "ghost",
+      onclick: () => {
+        ui.viewingExtensions = false;
+        ui.extensionsSection = null;
+        render();
+      },
+    },
+    "← Back to conversations",
+  );
+
+  const sectionTabs = h(
+    "nav",
+    { class: "extension-tabs" },
+    ...EXTENSION_SECTIONS.map((s) => {
+      const active = s.id === section;
+      return h(
+        "button",
+        {
+          class: `extension-tab${active ? " active" : ""}`,
+          onclick: () => {
+            ui.extensionsSection = s.id;
+            render();
+          },
+        },
+        s.title,
+      );
+    }),
+  );
+
+  const itemRow = (item: ExtensionItem): HTMLElement => {
+    const toggle = h(
+      "button",
+      {
+        class: `ghost small-btn ${item.enabled ? "" : "danger"}`,
+        onclick: () => {
+          item.enabled = !item.enabled;
+          render();
+        },
+      },
+      item.enabled ? "Disable" : "Enable",
+    );
+    return h(
+      "div",
+      { class: "extension-item" },
+      h(
+        "div",
+        { class: "extension-item-main" },
+        h("div", { class: "extension-item-name" }, item.name),
+        h(
+          "span",
+          { class: `extension-badge ${item.enabled ? "on" : "off"}` },
+          item.enabled ? "Enabled" : "Disabled",
+        ),
+      ),
+      h("p", { class: "extension-desc muted" }, item.description),
+      toggle,
+    );
+  };
+
+  return h(
+    "div",
+    { class: "extensions-page" },
+    h("header", { class: "extensions-header" }, back, h("h1", {}, sectionInfo.title), h("p", { class: "muted" }, sectionInfo.intro)),
+    sectionTabs,
+    h(
+      "div",
+      { class: "extension-list" },
+      ...(items.length ? items.map(itemRow) : [h("p", { class: "muted" }, "No items in this section yet.")]),
+    ),
   );
 }
 
@@ -2369,6 +2479,8 @@ async function refreshConversations() {
 }
 
 async function selectConversation(id: string) {
+  ui.viewingExtensions = false;
+  ui.extensionsSection = null;
   const known = ui.detail?.conversation.id === id ? ui.detail.conversation.run : null;
   const fresh = await call.invoke<ConversationDetail>("get_conversation", {
     conversationId: id,

@@ -3622,3 +3622,116 @@ label.checkbox-row {
     grid-template-columns: 180px minmax(280px, 1fr) max(var(--side-panel-width, 320px), 320px);
   }
 }
+
+/* ---------------------------------------------------------------- extensions page */
+
+.extensions-page {
+  padding: var(--sp-4) var(--sp-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  height: 100%;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.extensions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.extensions-header h1 {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+
+.extension-tabs {
+  display: flex;
+  gap: var(--sp-2);
+  border-bottom: 1px solid var(--line);
+  padding-bottom: var(--sp-2);
+}
+
+.extension-tab {
+  padding: var(--sp-2) var(--sp-3);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  font-size: var(--fs-base);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.extension-tab:hover {
+  color: var(--text);
+}
+
+.extension-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.extension-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.extension-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.extension-item-main {
+  flex: 1;
+}
+
+.extension-item-name {
+  font-weight: 600;
+  font-size: var(--fs-base);
+  color: var(--text);
+}
+
+.extension-item-desc {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.extension-badge {
+  font-size: var(--fs-xs);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--muted-bg);
+  color: var(--muted);
+}
+
+.extension-badge.on {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.extension-badge.off {
+  background: var(--muted-bg);
+  color: var(--muted);
+}
+
+.extension-item .small-btn {
+  margin-left: var(--sp-3);
+}
+
+/* Medium: adjust for narrow sidebar. */
+@media (max-width: 900px) and (min-width: 601px) {
+  .extensions-page {
+    padding: var(--sp-3) var(--sp-4);
+  }
+}
