@@ -85,6 +85,14 @@ fn dot() -> String {
     ".".to_string()
 }
 
+/// Stop after this many entries so a directory with tens of thousands of files
+/// cannot hang the Run or exhaust memory.
+const MAX_DIR_ENTRIES: usize = 10_000;
+
+/// Cap on todo list items so a run cannot bloat the database with thousands
+/// of entries.
+const MAX_TODO_ITEMS: usize = 500;
+
 pub fn list_dir(ctx: &ToolContext, args: ListDirArgs) -> Result<String> {
     let resolved = ctx.scope.resolve_read(&args.path)?;
     if !resolved.is_dir() {
@@ -92,8 +100,16 @@ pub fn list_dir(ctx: &ToolContext, args: ListDirArgs) -> Result<String> {
     }
     let mut dirs = Vec::new();
     let mut files = Vec::new();
+    let mut count = 0usize;
     for entry in std::fs::read_dir(&resolved)? {
         let entry = entry?;
+        count += 1;
+        if count > MAX_DIR_ENTRIES {
+            return Err(ToolError::Args(format!(
+                "{} has more than {MAX_DIR_ENTRIES} entries; narrow the path",
+                args.path
+            )));
+        }
         let name = entry.file_name().to_string_lossy().to_string();
         let meta = entry.metadata()?;
         if meta.is_dir() {
@@ -481,6 +497,12 @@ pub struct TodosArgs {
 }
 
 pub fn todos(ctx: &ToolContext, args: TodosArgs) -> Result<String> {
+    if args.items.len() > MAX_TODO_ITEMS {
+        return Err(ToolError::Args(format!(
+            "todo list has {} items, over the {MAX_TODO_ITEMS}-item limit",
+            args.items.len()
+        )));
+    }
     let items: Vec<(String, bool)> = args
         .items
         .into_iter()
@@ -581,6 +603,28 @@ mod glob_tests {
             path: None,
             max_results: None,
         });
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn list_dir_caps_entries() {
+        let dir = tempdir().unwrap();
+        for i in 0..MAX_DIR_ENTRIES + 5 {
+            std::fs::write(dir.path().join(format!("file_{i:05}.txt")), "x").unwrap();
+        }
+        let ctx = ctx_for(dir.path());
+        let err = list_dir(&ctx, ListDirArgs { path: ".".into() });
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn todos_caps_items() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_for(dir.path());
+        let items: Vec<TodoItem> = (0..MAX_TODO_ITEMS + 5)
+            .map(|i| TodoItem { text: format!("item {i}"), done: false })
+            .collect();
+        let err = todos(&ctx, TodosArgs { items });
         assert!(err.is_err());
     }
 }

@@ -28,6 +28,9 @@ pub struct ViewImageArgs {
 const DEFAULT_QUESTION: &str = "Describe this image in detail, including all \
                                 visible text, UI elements, charts, diagrams, and layout.";
 
+// Refuse images larger than this to avoid loading huge files into memory.
+const MAX_IMAGE_BYTES: u64 = 10_000_000; // 10 MB
+
 pub async fn view_image(ctx: &ToolContext, args: ViewImageArgs) -> Result<String> {
     let cfg = ctx
         .vision
@@ -36,6 +39,13 @@ pub async fn view_image(ctx: &ToolContext, args: ViewImageArgs) -> Result<String
     let resolved = ctx.scope.resolve_read(&args.path)?;
     if resolved.is_dir() {
         return Err(ToolError::Args(format!("{} is a directory", args.path)));
+    }
+    let size = resolved.metadata()?.len();
+    if size > MAX_IMAGE_BYTES {
+        return Err(ToolError::Args(format!(
+            "{} is {} bytes, over the {MAX_IMAGE_BYTES}-byte image limit",
+            args.path, size
+        )));
     }
     let bytes = std::fs::read(&resolved)?;
     let mime = detect_mime(&args.path, &bytes).ok_or_else(|| {

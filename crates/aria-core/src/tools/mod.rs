@@ -426,8 +426,8 @@ pub fn outside_scope(scope: &Scope, tool: &str, args_json: &str) -> bool {
         // `list_dir` defaults to ".", which may itself be outside a root.
         LIST_DIR => read(arg("path").unwrap_or_else(|| Path::new("."))),
         EDIT_FILE | WRITE_FILE => arg("path").is_some_and(|p| create(p)),
-        // A search may name any directory; the default searches allowed roots.
-        SEARCH_FILES => arg("path").is_some_and(|p| read(p)),
+        // A search or glob may name any directory; the default searches allowed roots.
+        SEARCH_FILES | GLOB_FILES => arg("path").is_some_and(|p| read(p)),
         MOVE_FILE => {
             arg("from").is_some_and(|p| read(p)) || arg("to").is_some_and(|p| create(p))
         }

@@ -4,6 +4,7 @@
 //! status is watched concurrently. The whole process group is killed on timeout.
 //! A nonzero exit code is a normal result, not an error (issue 09).
 
+use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::process::{Command as StdCommand, Stdio};
 use std::time::Duration;
@@ -101,12 +102,12 @@ pub fn is_safe_command(cmd: &str) -> bool {
 }
 
 /// Whether `cmd` is a destructive/harmful command that requires user approval
-/// even under `AutoApproveSafe`. Conservative by design: only well-known
-/// destructive programs and clearly destructive flags are caught; chained,
-/// quoted or otherwise complex commands fall through and run without asking.
+/// even under `AutoApproveSafe`. Checks the first program word so chained
+/// commands (`rm -rf / ; echo x`) are still caught. Conservative by design:
+/// only well-known destructive programs and clearly destructive flags match.
 pub fn is_harmful_command(cmd: &str) -> bool {
     let cmd = cmd.trim();
-    if cmd.is_empty() || cmd.chars().any(|c| SHELL_SYNTAX.contains(&c)) {
+    if cmd.is_empty() {
         return false;
     }
     let argv: Vec<&str> = cmd.split_whitespace().collect();
@@ -403,13 +404,42 @@ fn head_tail(text: &str) -> String {
 
 /// Open a URL in the system's default browser (`xdg-open` on Linux, `open` on
 /// macOS, `start` on Windows). No extra browser is installed — it uses what is
-/// already on the device.
+/// already on the device. Only `http`/`https` URLs are accepted; the URL is
+/// validated before spawning and errors are surfaced instead of silently ignored.
 #[derive(Debug, Deserialize)]
 pub struct BrowserOpenArgs {
     pub url: String,
 }
 
 pub fn browser_open(_ctx: &ToolContext, args: BrowserOpenArgs) -> Result<String> {
+    let parsed = url::Url::parse(&args.url).map_err(|e| {
+        ToolError::Args(format!("invalid URL: {e}"))
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(ToolError::Args(format!(
+            "only http and https URLs are allowed, got {}",
+            parsed.scheme()
+        )));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ToolError::Args("URL has no host".into()))?;
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    // Refuse link-local / metadata addresses so a browser cannot be pointed at
+    // cloud metadata services (169.254.169.254) or the user's local services.
+    let addrs: Vec<std::net::IpAddr> = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| ToolError::Refused(format!("cannot resolve {host}: {e}")))?
+        .map(|a| a.ip())
+        .collect();
+    for ip in &addrs {
+        if is_non_public_ip(ip) {
+            return Err(ToolError::Refused(format!(
+                "refusing to open a non-public address ({ip})"
+            )));
+        }
+    }
+
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(windows) {
@@ -423,15 +453,32 @@ pub fn browser_open(_ctx: &ToolContext, args: BrowserOpenArgs) -> Result<String>
     } else {
         command.arg(&args.url);
     }
-    // Detach: the browser should outlive Aria. Ignore errors — the browser may
-    // simply not be installed, which the model can learn from the silence.
-    let _ = command.spawn();
+    command
+        .spawn()
+        .map_err(|e| ToolError::Refused(format!("cannot start browser: {e}")))?;
     Ok(format!("opened {} in the default browser", args.url))
+}
+
+/// True when `ip` is a loopback, private, link-local, or multicast address —
+/// i.e. not safe to open in a browser from Aria.
+fn is_non_public_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_multicast()
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unicast_link_local()
+                || v6.is_multicast()
+                || v6.is_unique_local()
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_harmful_command, is_safe_command, user_path};
+    use super::{browser_open, is_harmful_command, is_safe_command, user_path, Result, ToolContext};
+    use crate::workspace::WorkspaceRoot;
 
     #[test]
     fn user_path_appends_existing_user_bins_once() {
@@ -554,5 +601,70 @@ mod tests {
         ] {
             assert!(!is_harmful_command(cmd), "{cmd}");
         }
+    }
+
+    #[test]
+    fn chained_harmful_commands_still_need_approval() {
+        // Shell syntax after the destructive program must not bypass the check.
+        for cmd in [
+            "rm -rf / ; echo done",
+            "rm -rf /tmp/x && echo pwned",
+            "sudo sh -c 'rm -rf /'",
+            "npm install ; rm -rf /",
+            "dd if=/dev/zero of=/dev/sda | grep .",
+        ] {
+            assert!(is_harmful_command(cmd), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn browser_open_validates_url() {
+        // invalid URL
+        let err = browser_open_args_not_ctx("not a url");
+        assert!(err.is_err());
+
+        // non-http scheme
+        let err = browser_open_args_not_ctx("file:///etc/passwd");
+        assert!(err.is_err());
+
+        // localhost/private refused
+        let err = browser_open_args_not_ctx("http://localhost:8080/");
+        assert!(err.is_err());
+
+        // metadata address refused
+        let err = browser_open_args_not_ctx("http://169.254.169.254/");
+        assert!(err.is_err());
+
+        // public https accepted (spawn may fail in headless env, but validation passes)
+        let res = browser_open_args_not_ctx("https://example.com/");
+        assert!(res.is_ok(), "public https should pass validation: {:?}", res.err());
+    }
+
+    fn browser_open_args_not_ctx(url: &str) -> Result<String> {
+        use crate::db::Db;
+        use crate::journal::Blobs;
+        use crate::workspace::{Scope, WorkspaceRoot};
+        use std::sync::Arc;
+        let root = WorkspaceRoot::new(std::env::temp_dir()).unwrap();
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let blobs = Arc::new(Blobs::new(std::env::temp_dir(), Arc::clone(&db)));
+        let ctx = ToolContext {
+            scope: Scope::Workspace(root.clone()),
+            root: Some(root),
+            workspace_id: Some("ws".into()),
+            journal_id: "test".into(),
+            run_id: "test".into(),
+            db,
+            blobs,
+            shell_timeout_secs: 30,
+            embed: None,
+            reranker: None,
+            reranker_top_k: 50,
+            search: None,
+            vision: None,
+            background: None,
+            disabled_tools: Vec::new(),
+        };
+        browser_open(&ctx, super::BrowserOpenArgs { url: url.to_string() })
     }
 }
