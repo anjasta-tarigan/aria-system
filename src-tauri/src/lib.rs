@@ -1028,6 +1028,19 @@ fn list_cloud_folders() -> CmdResult<Vec<CloudFolder>> {
         .collect())
 }
 
+/// Read an arbitrary file by absolute path for the attachment feature.
+/// Capped at 512 KB; binary files return an error so the UI can fall back
+/// to a path reference instead of embedding garbage.
+#[tauri::command]
+fn read_file_raw(path: String) -> CmdResult<String> {
+    const MAX: u64 = 512 * 1024;
+    let meta = std::fs::metadata(&path).map_err(err)?;
+    if meta.len() > MAX {
+        return Err(format!("File too large to attach ({} bytes; limit 512 KB)", meta.len()).into());
+    }
+    std::fs::read_to_string(&path).map_err(err)
+}
+
 /// Build a cheap [`BackgroundTasks`] for a conversation's workspace root, reusing
 /// the shared `db`/`blobs`. Returns `Err` when the conversation has no folder.
 fn background_tasks(inner: &Inner, conversation_id: &str) -> CmdResult<BackgroundTasks> {
@@ -2164,6 +2177,7 @@ pub fn run() {
             test_web_search,
             list_built_in_tools,
             set_built_in_tool,
+            read_file_raw,
         ])
         .run(tauri::generate_context!())
         .expect("error while running aria");

@@ -14,13 +14,13 @@ fn defaults_when_no_config_file() {
 }
 
 #[test]
-fn approval_policy_defaults_to_always_ask_and_parses() {
-    assert_eq!(Settings::default().approval_policy, ApprovalPolicy::AlwaysAsk);
+fn approval_policy_defaults_to_auto_approve_safe_and_parses() {
+    assert_eq!(Settings::default().approval_policy, ApprovalPolicy::AutoApproveSafe);
     let s: Settings = serde_json::from_str(
-        r#"{"base_url":"https://example.test/v1","model":"m","shell_timeout_secs":120,"approval_policy":"auto_approve_safe"}"#,
+        r#"{"base_url":"https://example.test/v1","model":"m","shell_timeout_secs":120,"approval_policy":"always_ask"}"#,
     )
     .unwrap();
-    assert_eq!(s.approval_policy, ApprovalPolicy::AutoApproveSafe);
+    assert_eq!(s.approval_policy, ApprovalPolicy::AlwaysAsk);
 }
 
 #[test]

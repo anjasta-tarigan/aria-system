@@ -1438,12 +1438,18 @@ function approvalNode(p: PendingApproval): HTMLElement {
   );
 }
 
+// Attachments queued in the composer but not yet sent. Cleared on send/switch.
+interface Attachment { name: string; path: string; content: string }
+let pendingAttachments: Attachment[] = [];
+
 function composerNode(
   busy: boolean,
   hasFolder: boolean,
   conv: ConversationView,
 ): HTMLElement {
   const mainSystem = conv.main_system;
+
+  // ── textarea ──────────────────────────────────────────────────────────────
   const input = h("textarea", {
     class: "composer-input",
     rows: "1",
@@ -1461,13 +1467,9 @@ function composerNode(
       t.style.height = `${Math.min(t.scrollHeight, 200)}px`;
     },
     onkeydown: (e: KeyboardEvent) => {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        void send();
-      }
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); }
       if (e.key === "Escape") (e.target as HTMLElement).blur();
     },
-    // Forward focus to card so the focus ring appears on the card.
     onfocus: (e: Event) => {
       (e.target as HTMLElement).closest(".composer-card")?.classList.add("focused");
     },
@@ -1477,11 +1479,34 @@ function composerNode(
   });
   input.dataset.role = "composer";
 
-  // SVG send arrow — same style as Claude/ChatGPT icon button.
+  // ── attachment tags (shown above textarea when files are queued) ───────────
+  const attachmentRow = pendingAttachments.length
+    ? h(
+        "div",
+        { class: "composer-attachments" },
+        ...pendingAttachments.map((att) =>
+          h(
+            "span",
+            { class: "attachment-tag" },
+            h("span", { class: "attachment-name" }, att.name),
+            h("button", {
+              class: "attachment-remove",
+              title: `Remove ${att.name}`,
+              "aria-label": `Remove ${att.name}`,
+              onclick: () => {
+                pendingAttachments = pendingAttachments.filter((a) => a.path !== att.path);
+                render();
+              },
+            }, "×"),
+          ),
+        ),
+      )
+    : null;
+
+  // ── send button ───────────────────────────────────────────────────────────
   const sendIcon = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
     <path d="M2 8L14 8M14 8L9 3M14 8L9 13" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
   </svg>`;
-
   const sendBtn = h("button", {
     class: `composer-send${busy ? " disabled" : ""}`,
     disabled: busy,
@@ -1491,7 +1516,63 @@ function composerNode(
     onclick: () => void send(),
   });
 
-  // Mode pill chip.
+  // ── attachment button (paperclip) ─────────────────────────────────────────
+  const clipIcon = `<svg width="15" height="15" viewBox="0 0 15 15" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <path d="M13.5 6.5L7 13C5.6 14.4 3.4 14.4 2 13C0.6 11.6 0.6 9.4 2 8L8.5 1.5C9.5 0.5 11.1 0.5 12.1 1.5C13.1 2.5 13.1 4.1 12.1 5.1L5.6 11.6C5.1 12.1 4.3 12.1 3.8 11.6C3.3 11.1 3.3 10.3 3.8 9.8L10.3 3.3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`;
+  const attachBtn = h("button", {
+    class: "composer-attach",
+    title: "Attach a file",
+    "aria-label": "Attach file",
+    html: clipIcon,
+    onclick: async () => {
+      try {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        const picked = await open({ multiple: true, directory: false });
+        if (!picked) return;
+        const paths = Array.isArray(picked) ? picked : [picked];
+        for (const p of paths) {
+          if (pendingAttachments.some((a) => a.path === p)) continue;
+          const name = p.split("/").pop() ?? p;
+          // Read file content via Rust backend (scoped read_file); fall back to path ref.
+          let content = "";
+          try {
+            content = await call.invoke<string>("read_file_raw", { path: p });
+          } catch {
+            content = `[attached: ${p}]`;
+          }
+          pendingAttachments.push({ name, path: p, content });
+        }
+        render();
+      } catch (e) {
+        ui.notice = String(e);
+        render();
+      }
+    },
+  });
+
+  // ── bottom toolbar chips ──────────────────────────────────────────────────
+
+  // Model chip: shows truncated model from health, clicking opens inline edit.
+  const currentModel = ui.health?.model ?? "";
+  const modelLabel = currentModel
+    ? (currentModel.includes("/") ? currentModel.split("/").pop()! : currentModel)
+    : "No model";
+  const modelChip = h("button", {
+    class: `composer-chip model-chip${!currentModel ? " model-unset" : ""}`,
+    title: currentModel ? `Model: ${currentModel}\nClick to change` : "No model configured — click to set",
+    "aria-label": "Change model",
+    onclick: (e: MouseEvent) => {
+      e.stopPropagation();
+      openModelEditor(e.currentTarget as HTMLElement, currentModel);
+    },
+  },
+    h("span", { class: "model-chip-icon", "aria-hidden": "true" }, "◈"),
+    " ",
+    modelLabel,
+  );
+
+  // Mode chip (Normal / Creative).
   const modeSelect = h(
     "select",
     {
@@ -1502,15 +1583,11 @@ function composerNode(
         const mode = (e.target as HTMLSelectElement).value as ConversationMode;
         try {
           const updated = await call.invoke<ConversationView>("set_conversation_mode", {
-            conversationId: conv.id,
-            mode,
+            conversationId: conv.id, mode,
           });
           if (ui.detail) ui.detail.conversation = updated;
           render();
-        } catch (err) {
-          ui.notice = String(err);
-          render();
-        }
+        } catch (err) { ui.notice = String(err); render(); }
       },
     },
     h("option", { value: "normal" }, "Normal"),
@@ -1518,76 +1595,22 @@ function composerNode(
   ) as HTMLSelectElement;
   modeSelect.value = conv.mode;
 
-  // Adaptive approval chip — a button that cycles through 3 states and whose
-  // label describes what is *actually enforced* given the current context.
-  //
-  // States (the value stored in conv.approval_policy):
-  //   null             → follows global Settings (currently AlwaysAsk)
-  //   "always_ask"     → every tool call asks
-  //   "auto_approve_safe" → reads auto-approved; mutations/shell adapt to scope:
-  //       workspace      → edits + network silent, shell asks
-  //       main system    → only reads silent, everything else asks
-  //
-  // Cycle order: null → auto_approve_safe → always_ask → null
-  const approvalPolicy = conv.approval_policy ?? null;
-  const isMainSystem = conv.main_system;
-
-  // Compute the display label and style class based on effective context.
-  type ApprovalDisplay = { label: string; cls: string; tooltip: string };
-  function approvalDisplay(policy: string | null): ApprovalDisplay {
-    if (policy === "auto_approve_safe") {
-      if (hasFolder) {
-        return {
-          label: "⚡ Auto · edits free",
-          cls: "composer-chip approval-auto",
-          tooltip:
-            "Auto mode (workspace): reads and file edits run silently. " +
-            "Shell and network calls still ask.",
-        };
-      } else if (isMainSystem) {
-        return {
-          label: "⚡ Auto · reads only",
-          cls: "composer-chip approval-auto",
-          tooltip:
-            "Auto mode (device): only reads run silently. File edits, " +
-            "network, and shell still ask for permission.",
-        };
-      } else {
-        return {
-          label: "⚡ Auto",
-          cls: "composer-chip approval-auto",
-          tooltip: "Auto mode: reads run silently; other actions ask.",
-        };
-      }
-    }
-    if (policy === "always_ask") {
-      return {
-        label: "🔒 Ask always",
-        cls: "composer-chip approval-ask",
-        tooltip: "Ask always: every tool call requires your approval.",
-      };
-    }
-    // null = follows global setting (default = always ask)
-    return {
-      label: "🔒 Ask always",
-      cls: "composer-chip approval-default",
-      tooltip: "Following global Settings (currently: ask for every action). Click to switch to Auto.",
-    };
-  }
-
-  function nextPolicy(current: string | null): string | null {
-    if (current === null) return "auto_approve_safe";
-    if (current === "auto_approve_safe") return "always_ask";
-    return null; // always_ask → back to default
-  }
-
-  const display = approvalDisplay(approvalPolicy);
+  // Approval chip: toggles between auto (default, edits free) and always-ask (locked).
+  // auto_approve_safe is now the global default; "always_ask" is the locked opt-in.
+  const isAuto = (conv.approval_policy ?? "auto_approve_safe") !== "always_ask";
+  const approvalTooltip = isAuto
+    ? hasFolder
+      ? "Auto: reads & edits run silently. Shell and network still ask.\nClick to lock down."
+      : mainSystem
+        ? "Auto: reads run silently. Edits, shell, network still ask.\nClick to lock down."
+        : "Auto: reads run silently. Click to lock down."
+    : "Locked: every tool call asks for approval.\nClick to switch to Auto.";
   const approvalBtn = h("button", {
-    class: display.cls,
-    title: display.tooltip,
-    "aria-label": "Approval policy — click to cycle",
+    class: `composer-chip approval-chip${isAuto ? " approval-auto" : " approval-locked"}`,
+    title: approvalTooltip,
+    "aria-label": "Toggle approval mode",
     onclick: async () => {
-      const next = nextPolicy(conv.approval_policy ?? null);
+      const next = isAuto ? "always_ask" : null; // null → back to default (auto)
       try {
         const updated = await call.invoke<ConversationView>(
           "set_conversation_approval",
@@ -1595,27 +1618,87 @@ function composerNode(
         );
         if (ui.detail) ui.detail.conversation = updated;
         render();
-      } catch (err) {
-        ui.notice = String(err);
-        render();
-      }
+      } catch (err) { ui.notice = String(err); render(); }
     },
-  }, display.label);
+  },
+    isAuto ? h("span", { "aria-hidden": "true" }, "⚡") : h("span", { "aria-hidden": "true" }, "🔒"),
+    isAuto
+      ? (hasFolder ? " Auto · edits free" : mainSystem ? " Auto · reads free" : " Auto")
+      : " Ask always",
+  );
 
-  // The card: textarea on top, toolbar with chips + send button on bottom.
+  // ── card assembly ─────────────────────────────────────────────────────────
   const card = h(
     "div",
     { class: "composer-card" },
+    attachmentRow,
     input,
     h(
       "div",
       { class: "composer-footer" },
-      h("div", { class: "composer-chips" }, modeSelect, approvalBtn),
-      sendBtn,
+      h("div", { class: "composer-chips" }, modelChip, modeSelect, approvalBtn),
+      h("div", { class: "composer-actions" }, attachBtn, sendBtn),
     ),
   );
 
   return h("div", { class: "composer" }, card);
+}
+
+// Inline model editor: a small popover anchored to the model chip.
+function openModelEditor(anchor: HTMLElement, current: string) {
+  // Reuse the existing context-menu infrastructure for positioning.
+  closeMenu();
+  const container = document.createElement("div");
+  container.className = "model-editor ctx-menu";
+
+  const inp = document.createElement("input");
+  inp.type = "text";
+  inp.value = current;
+  inp.placeholder = "e.g. openai/gpt-4o";
+  inp.className = "model-editor-input";
+  inp.spellcheck = false;
+
+  const save = async () => {
+    const model = inp.value.trim();
+    if (!model || model === current) { closeMenu(); return; }
+    try {
+      // Load current settings, patch model, save back.
+      const sv = await call.invoke<{ settings: { base_url: string; model: string; embedding_base_url: string | null; embedding_model: string | null; search_provider: string | null; search_base_url: string | null; approval_policy: string } }>("get_settings");
+      await call.invoke("set_settings", {
+        input: { ...sv.settings, model },
+      });
+      // Health poll will pick it up; force one now.
+      ui.health = await call.invoke("health");
+      closeMenu();
+      render();
+    } catch (e) {
+      ui.notice = String(e);
+      closeMenu();
+      render();
+    }
+  };
+
+  inp.onkeydown = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); void save(); }
+    if (e.key === "Escape") closeMenu();
+  };
+
+  const btn = document.createElement("button");
+  btn.textContent = "Apply";
+  btn.className = "primary";
+  btn.onclick = () => void save();
+
+  container.append(inp, btn);
+  document.body.appendChild(container);
+  menuEl = container as HTMLDivElement;
+  menuAnchor = anchor;
+  positionMenu();
+  setTimeout(() => {
+    inp.focus();
+    inp.select();
+    window.addEventListener("click", onMenuOutside, true);
+    window.addEventListener("keydown", onMenuKey, true);
+  }, 0);
 }
 
 function todoPanel(detail: ConversationDetail): HTMLElement {
@@ -1670,6 +1753,7 @@ async function selectConversation(id: string) {
   ui.notice = null;
   ui.filesVisible = true;
   ui.bgVisible = true;
+  pendingAttachments = [];
   await refreshChanged();
   render();
 }
@@ -1723,11 +1807,18 @@ async function send() {
   const text = input?.value.trim();
   if (!detail || !text) return;
   input!.value = "";
+  // Append any queued attachments as fenced code blocks after the message.
+  const attachSuffix = pendingAttachments.length
+    ? "\n\n" + pendingAttachments.map((a) =>
+        `**${a.name}**\n\`\`\`\n${a.content}\n\`\`\``
+      ).join("\n\n")
+    : "";
+  pendingAttachments = [];
   ui.notice = null;
   try {
     await call.invoke<Run>("send_message", {
       conversationId: detail.conversation.id,
-      text,
+      text: text + attachSuffix,
     });
     await selectConversation(detail.conversation.id);
   } catch (e) {

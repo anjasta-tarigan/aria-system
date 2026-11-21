@@ -1390,8 +1390,127 @@ pre {
   color: var(--accent);
 }
 
-/* Ask-always: neutral muted — same as base chip, no extra style needed. */
-/* approval-default and approval-ask both use the base .composer-chip style. */
+/* Locked mode: warm amber tint. */
+.approval-locked {
+  background: color-mix(in srgb, var(--warn) 10%, var(--panel-2));
+  border-color: color-mix(in srgb, var(--warn) 30%, var(--line));
+  color: var(--warn);
+}
+
+.approval-locked:hover {
+  background: color-mix(in srgb, var(--warn) 18%, var(--panel-2));
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--line));
+}
+
+/* Model chip: subtle indicator dot. */
+.model-chip {
+  font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+}
+
+.model-chip-icon {
+  color: var(--purple);
+  font-size: 10px;
+}
+
+.model-chip.model-unset {
+  border-style: dashed;
+  color: var(--warn);
+}
+
+/* Inline model editor popover. */
+.model-editor {
+  display: flex;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  min-width: 260px;
+}
+
+.model-editor-input {
+  flex: 1;
+  font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  font-size: var(--fs-xs);
+  padding: 4px var(--sp-2);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+}
+
+.model-editor button {
+  padding: 3px var(--sp-3);
+  font-size: var(--fs-xs);
+  flex: none;
+}
+
+/* Attachment row inside the card, above the textarea. */
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3) 0;
+}
+
+.attachment-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 2px var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--text);
+  max-width: 220px;
+}
+
+.attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-remove {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  font-size: 13px;
+}
+
+.attachment-remove:hover {
+  color: var(--bad);
+}
+
+/* Right-side action buttons: attach + send in a row. */
+.composer-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+/* Paperclip attach button. */
+.composer-attach {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.1s, background 0.1s;
+}
+
+.composer-attach:hover {
+  background: var(--panel-2);
+  color: var(--text);
+  border-color: var(--line);
+}
 
 /* Round icon send button bottom-right. */
 .composer-send {

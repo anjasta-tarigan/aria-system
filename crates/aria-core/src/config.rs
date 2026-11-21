@@ -206,7 +206,7 @@ impl Default for Settings {
             embedding_model: None,
             search_provider: None,
             search_base_url: None,
-            approval_policy: ApprovalPolicy::AlwaysAsk,
+            approval_policy: ApprovalPolicy::AutoApproveSafe,
             ai_providers: Vec::new(),
             default_ai_provider_id: None,
             embedding_config: EmbeddingConfig::default(),
