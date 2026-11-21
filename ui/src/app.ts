@@ -267,7 +267,7 @@ function render() {
 
   const body = h(
     "div",
-    { class: `app-body ${showArtifact ? "has-artifact" : ""}${!ui.sidePanelOpen ? " side-panel-closed" : ""}` },
+    { class: `app-body ${showArtifact && ui.sidePanelOpen ? "has-artifact" : ""}${!ui.sidePanelOpen ? " side-panel-closed" : ""}` },
     sidebar(),
     h("main", { class: "pane" }, detail ? conversationPane(detail, artifactsIndex) : emptyPane()),
     sidePanelNode(activeArtVersion, allVersionsForActive),

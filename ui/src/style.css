@@ -3,6 +3,7 @@
   --bg: #0f1115;
   --panel: #161a21;
   --panel-2: #1d222b;
+  --side-panel: #1d2634;
   --line: #2a3039;
   --text: #e6e9ef;
   --muted: #8b94a3;
@@ -726,7 +727,7 @@ button.icon:hover {
   flex-direction: column;
   height: 100%;
   min-width: 0;
-  background: var(--panel);
+  background: var(--side-panel);
   border-left: 1px solid var(--line);
   overflow: hidden;
 }
