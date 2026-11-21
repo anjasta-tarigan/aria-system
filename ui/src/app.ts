@@ -336,8 +336,12 @@ function onResizerMouseDown(e: MouseEvent) {
 
 function onResizerMouseMove(e: MouseEvent) {
   if (!resizing) return;
+  // The side panel sits on the right edge; its left border (where the
+  // resizer is) is the boundary with the main content. Dragging right moves
+  // that border into the panel (narrower), dragging left pulls it away
+  // (wider). Negate dx so the visual direction matches.
   const dx = e.clientX - resizerStartX;
-  let newWidth = resizerStartWidth + dx;
+  let newWidth = resizerStartWidth - dx;
   const maxWidth = Math.floor(window.innerWidth * 0.8);
   // When an artifact is showing, .app-body.has-artifact enforces a 440px
   // minimum side panel width via max(var(--side-panel-width, 440px), 440px).
