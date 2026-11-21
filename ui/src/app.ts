@@ -131,6 +131,10 @@ interface Ui {
   sidePanelWidth: number;
   /// Identifier@version of the last auto-opened artifact.
   autoOpenedArtifactId: string | null;
+  /// Whether the user explicitly dismissed (closed) the side panel. While set,
+  /// auto-open of artifacts is suppressed so a closed panel stays closed across
+  /// new messages. Cleared when the user re-opens or interacts with the panel.
+  sidePanelDismissed: boolean;
   /// Currently open image lightbox: src data URL + file name.
   lightbox: { src: string; name: string } | null;
 }
@@ -161,6 +165,7 @@ const ui: Ui = {
   sidePanelOpen: true,
   sidePanelWidth: 440,
   autoOpenedArtifactId: null,
+  sidePanelDismissed: false,
   lightbox: null,
 };
 
@@ -236,8 +241,13 @@ function render() {
     ? buildArtifactIndex(detail.messages, ui.streaming?.text)
     : null;
 
-  // Auto-open newest artifact if streaming or if none selected yet
-  if (artifactsIndex && artifactsIndex.all.length > 0) {
+  // Auto-open newest artifact if streaming or if none selected yet.
+  // Respect an explicit user dismissal so a closed panel stays closed.
+  if (
+    artifactsIndex &&
+    artifactsIndex.all.length > 0 &&
+    !ui.sidePanelDismissed
+  ) {
     const latestArt = artifactsIndex.all[artifactsIndex.all.length - 1];
     const artKey = `${latestArt.identifier}@${latestArt.version}`;
     if (ui.autoOpenedArtifactId !== artKey && (ui.streaming || !ui.activeArtifact)) {
@@ -245,6 +255,7 @@ function render() {
       ui.activeArtifact = { identifier: latestArt.identifier, version: latestArt.version };
       ui.sidePanelOpen = true;
       ui.sidePanelTab = "artifacts";
+      ui.sidePanelDismissed = false;
       if (latestArt.isStreaming) {
         streamingArtifactActive = true;
         ui.artifactTab = "code";
@@ -1001,6 +1012,9 @@ function conversationPane(
       title: ui.sidePanelOpen ? "Hide side panel" : "Show side panel",
       onclick: () => {
         ui.sidePanelOpen = !ui.sidePanelOpen;
+        // Remember an explicit dismiss so auto-open doesn't reopen the panel
+        // on the next message; clearing it when the user re-opens.
+        ui.sidePanelDismissed = !ui.sidePanelOpen;
         render();
       },
     }, toggleIcon),
@@ -1274,6 +1288,7 @@ function messageNode(
             // Opening an artifact should reveal the side panel if it is closed.
             ui.sidePanelOpen = true;
             ui.sidePanelTab = "artifacts";
+            ui.sidePanelDismissed = false;
             render();
           });
         }
@@ -1602,6 +1617,7 @@ function streamingNode(artifactsIndex?: ConversationArtifactIndex | null): HTMLE
             // Opening an artifact should reveal the side panel if it is closed.
             ui.sidePanelOpen = true;
             ui.sidePanelTab = "artifacts";
+            ui.sidePanelDismissed = false;
             render();
           });
         }
@@ -2217,6 +2233,7 @@ function renderSidePanelFiles(conv: ConversationView): HTMLElement {
           title: "Hide Files panel",
           onclick: () => {
             ui.sidePanelOpen = false;
+            ui.sidePanelDismissed = true;
             render();
           },
         },
@@ -2321,8 +2338,14 @@ async function selectConversation(id: string) {
   ui.streaming = null;
   ui.toolOutput = {};
   ui.notice = null;
-  ui.activeArtifact = null;
-  ui.autoOpenedArtifactId = null;
+  if (!known) {
+    // Conversation changed: drop artifact selection so the new conversation
+    // can auto-open its own artifacts. Same-conversation reloads (e.g. after
+    // sending a message) keep the user's side panel open/closed state.
+    ui.activeArtifact = null;
+    ui.autoOpenedArtifactId = null;
+    ui.sidePanelDismissed = false;
+  }
   pendingAttachments = [];
   await refreshChanged();
   await refreshBgTasks();
