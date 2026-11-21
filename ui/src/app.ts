@@ -124,6 +124,8 @@ interface Ui {
   artifactTab: "preview" | "code";
   /// Side panel tab: "artifacts" | "files".
   sidePanelTab: "artifacts" | "files";
+  /// Whether the side panel is open.
+  sidePanelOpen: boolean;
   /// Identifier@version of the last auto-opened artifact.
   autoOpenedArtifactId: string | null;
 }
@@ -151,6 +153,7 @@ const ui: Ui = {
   activeArtifact: null,
   artifactTab: "preview",
   sidePanelTab: "artifacts",
+  sidePanelOpen: true,
   autoOpenedArtifactId: null,
 };
 
@@ -260,34 +263,10 @@ function render() {
 
   const body = h(
     "div",
-    { class: `app-body ${showArtifact ? "has-artifact" : ""}` },
+    { class: `app-body ${showArtifact ? "has-artifact" : ""}${!ui.sidePanelOpen ? " side-panel-closed" : ""}` },
     sidebar(),
     h("main", { class: "pane" }, detail ? conversationPane(detail, artifactsIndex) : emptyPane()),
-    activeArtVersion
-      ? renderSidePanelArtifacts(
-          activeArtVersion,
-          allVersionsForActive,
-          ui.artifactTab,
-          ui.sidePanelTab,
-          (tab) => {
-            ui.artifactTab = tab;
-            ui.sidePanelTab = "artifacts";
-            render();
-          },
-          (ver) => {
-            ui.activeArtifact = { identifier: activeArtVersion!.identifier, version: ver };
-            render();
-          },
-          () => {
-            ui.activeArtifact = null;
-            render();
-          },
-        )
-      : ui.sidePanelTab === "files"
-        ? renderSidePanelFiles(detail!.conversation)
-        : detail && detail.todos.length > 0
-          ? todoPanel(detail)
-          : null,
+    sidePanelNode(activeArtVersion, allVersionsForActive),
   );
   const shell = h("div", { class: "app" }, body, footer());
   root.replaceChildren(
@@ -947,6 +926,14 @@ function conversationPane(
     run?.state === "budget_exhausted"
       ? h("button", { class: "primary", onclick: () => void resume(run.id) }, "Continue")
       : null,
+    h("button", {
+      class: `ghost side-panel-toggle${ui.sidePanelOpen ? " open" : ""}`,
+      title: ui.sidePanelOpen ? "Hide side panel" : "Show side panel",
+      onclick: () => {
+        ui.sidePanelOpen = !ui.sidePanelOpen;
+        render();
+      },
+    }, ui.sidePanelOpen ? "◀" : "▶"),
   );
 
   const transcript = h(
@@ -2033,6 +2020,40 @@ function renderSidePanelFiles(conv: ConversationView): HTMLElement {
   );
   renderFileTree(tree, conversationId, editor, saved);
   return panel;
+}
+
+/// Side panel node: rendered only when ui.sidePanelOpen is true.
+function sidePanelNode(
+  activeArtVersion: ArtifactVersion | null,
+  allVersionsForActive: ArtifactVersion[],
+): HTMLElement | null {
+  if (!ui.sidePanelOpen) return null;
+  const detail = ui.detail;
+  if (!detail) return null;
+  if (activeArtVersion) {
+    return renderSidePanelArtifacts(
+      activeArtVersion,
+      allVersionsForActive,
+      ui.artifactTab,
+      ui.sidePanelTab,
+      (tab) => {
+        ui.artifactTab = tab;
+        ui.sidePanelTab = "artifacts";
+        render();
+      },
+      (ver) => {
+        ui.activeArtifact = { identifier: activeArtVersion!.identifier, version: ver };
+        render();
+      },
+      () => {
+        ui.activeArtifact = null;
+        render();
+      },
+    );
+  }
+  if (ui.sidePanelTab === "files") return renderSidePanelFiles(detail.conversation);
+  if (detail.todos.length > 0) return todoPanel(detail);
+  return null;
 }
 
 // ---------------------------------------------------------------- behaviour

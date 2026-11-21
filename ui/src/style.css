@@ -837,6 +837,39 @@ button.icon:hover {
   overflow-y: auto;
 }
 
+/* Side panel toggle button in header. */
+.side-panel-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  margin-left: var(--sp-2);
+  padding: 3px var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.side-panel-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.side-panel-toggle.open {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel-2));
+  color: var(--accent);
+}
+
+/* When side panel is closed, the main pane expands to fill the space. */
+.app-body.side-panel-closed {
+  grid-template-columns: 264px 1fr;
+}
+
 .error-text {
   color: var(--bad);
   font-size: var(--fs-sm);
