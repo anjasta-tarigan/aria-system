@@ -17,7 +17,7 @@ fn fts_finds_inserted_message_in_same_transaction() {
     let (_ws, conv) = seed(&db);
     db.call(|c| {
         let tx = c.unchecked_transaction()?;
-        db::insert_message(&tx, &conv, None, Role::User, "the quick brown fox")?;
+        db::insert_message(&tx, &conv, None, Role::User, "the quick brown fox", None)?;
         let hits = db::search_messages(&tx, "brown", None, 10)?;
         assert_eq!(hits.len(), 1);
         assert!(hits[0].snippet.contains("[brown]"));
@@ -32,7 +32,7 @@ fn fts_update_and_delete_keep_index_consistent() {
     let db = Db::open_in_memory().unwrap();
     let (_ws, conv) = seed(&db);
     db.call(|c| {
-        let msg = db::insert_message(c, &conv, None, Role::User, "alpha beta")?;
+        let msg = db::insert_message(c, &conv, None, Role::User, "alpha beta", None)?;
         assert_eq!(db::search_messages(c, "beta", None, 10)?.len(), 1);
         c.execute(
             "UPDATE messages SET content = 'gamma delta' WHERE id = ?1",
@@ -52,7 +52,7 @@ fn fts_bad_syntax_is_no_hits_not_error() {
     let db = Db::open_in_memory().unwrap();
     let (_ws, conv) = seed(&db);
     db.call(|c| {
-        db::insert_message(c, &conv, None, Role::User, "hello")?;
+        db::insert_message(c, &conv, None, Role::User, "hello", None)?;
         assert_eq!(db::search_messages(c, "\"unterminated", None, 10)?.len(), 0);
         assert_eq!(db::search_messages(c, "NEAR(", None, 10)?.len(), 0);
         assert_eq!(db::search_messages(c, "   ", None, 10)?.len(), 0);
@@ -69,8 +69,8 @@ fn fts_scoped_to_conversation() {
         .call(|c| db::insert_conversation(c, Some(&ws), "second"))
         .unwrap();
     db.call(|c| {
-        db::insert_message(c, &a, None, Role::User, "shared needle")?;
-        db::insert_message(c, &b.id, None, Role::User, "shared needle")?;
+        db::insert_message(c, &a, None, Role::User, "shared needle", None)?;
+        db::insert_message(c, &b.id, None, Role::User, "shared needle", None)?;
         assert_eq!(db::search_messages(c, "needle", None, 10)?.len(), 2);
         assert_eq!(db::search_messages(c, "needle", Some(&a), 10)?.len(), 1);
         Ok(())
@@ -83,12 +83,12 @@ fn migration_is_idempotent_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("aria.db");
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 11);
+    assert_eq!(db.schema_version().unwrap(), 12);
     drop(db);
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 11);
+    assert_eq!(db.schema_version().unwrap(), 12);
     let (_ws, conv) = seed(&db);
-    db.call(|c| db::insert_message(c, &conv, None, Role::User, "persisted"))
+    db.call(|c| db::insert_message(c, &conv, None, Role::User, "persisted", None))
         .unwrap();
     drop(db);
     let db = Db::open(&path).unwrap();
@@ -201,7 +201,7 @@ fn migrating_v1_keeps_rows_and_allows_a_folderness_conversation() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 11);
+    assert_eq!(db.schema_version().unwrap(), 12);
     db.call(|c| {
         // Existing rows survived the rebuild, and FTS was not disturbed.
         let conv = db::get_conversation(c, "c1")?;
@@ -303,7 +303,7 @@ CREATE TABLE edit_journal (
 #[test]
 fn migration_v4_creates_memories_table() {
     let db = Db::open_in_memory().unwrap();
-    assert_eq!(db.schema_version().unwrap(), 11);
+    assert_eq!(db.schema_version().unwrap(), 12);
     db.call(|c| {
         c.execute_batch("INSERT INTO memories (id, key, content, created_at, updated_at)
                          VALUES ('m1', 'k', 'v', 1, 1)")?;
@@ -464,7 +464,7 @@ fn embedding_roundtrip_and_similarity_search() {
 #[test]
 fn migration_v5_adds_main_system_and_paths_tables() {
     let db = Db::open_in_memory().unwrap();
-    assert_eq!(db.schema_version().unwrap(), 11);
+    assert_eq!(db.schema_version().unwrap(), 12);
     let (ws, conv) = seed(&db);
     db.call(|c| {
         db::set_conversation_scope(c, &conv, true, &[])?;
@@ -545,6 +545,7 @@ fn migration_v7_gives_existing_main_chat_full_access() {
              DROP TABLE memories_fts;
              ALTER TABLE conversations DROP COLUMN mode;
              ALTER TABLE conversations DROP COLUMN approval_policy;
+             ALTER TABLE messages DROP COLUMN reasoning;
              DROP TABLE edit_journal;
              CREATE TABLE edit_journal (
                  id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -560,7 +561,7 @@ fn migration_v7_gives_existing_main_chat_full_access() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 11);
+    assert_eq!(db.schema_version().unwrap(), 12);
     db.call(|c| {
         assert!(db::get_conversation(c, &system_id)?.main_system);
         assert!(db::list_main_system_paths(c, &system_id)?.is_empty());
@@ -620,7 +621,7 @@ fn backup_restores_and_reset_empties() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(&dir.path().join("aria.db")).unwrap();
     let (_ws, conv) = seed(&db);
-    db.call(|c| db::insert_message(c, &conv, None, Role::User, "before the backup"))
+    db.call(|c| db::insert_message(c, &conv, None, Role::User, "before the backup", None))
         .unwrap();
 
     let backup = dir.path().join("backup.db");
@@ -645,7 +646,7 @@ fn backup_restores_and_reset_empties() {
     db.reset().unwrap();
     assert!(db.call(|c| db::list_conversations(c)).unwrap().is_empty());
     assert!(db.call(|c| db::search_messages(c, "backup", None, 10)).unwrap().is_empty());
-    assert_eq!(db.schema_version().unwrap(), 11);
+    assert_eq!(db.schema_version().unwrap(), 12);
     db.call(|c| db::insert_conversation(c, None, "fresh")).unwrap();
 }
 

@@ -88,6 +88,7 @@ impl Provider for FakeProvider {
 fn text(s: &str) -> TurnResult {
     TurnResult {
         text: s.to_string(),
+        reasoning: String::new(),
         tool_calls: Vec::new(),
         prompt_tokens: Some(10),
     }
@@ -100,6 +101,7 @@ fn call(id: &str, name: &str, args: serde_json::Value) -> ToolCallRequest {
 fn tools(calls: Vec<ToolCallRequest>) -> TurnResult {
     TurnResult {
         text: String::new(),
+        reasoning: String::new(),
         tool_calls: calls,
         prompt_tokens: Some(10),
     }
@@ -1290,6 +1292,7 @@ async fn long_history_is_trimmed_to_fit_the_context() {
                     None,
                     Role::User,
                     &format!("{i} {}", "u".repeat(20_000)),
+                    None,
                 )
             })
             .unwrap();
@@ -1301,6 +1304,7 @@ async fn long_history_is_trimmed_to_fit_the_context() {
                     None,
                     Role::Assistant,
                     &format!("{i} {}", "a".repeat(20_000)),
+                    None,
                 )
             })
             .unwrap();
@@ -1357,6 +1361,7 @@ async fn context_overflow_retries_with_halved_history() {
                 let _ = events.send(ProviderEvent::TextDelta("ok ".to_string()));
                 Ok(TurnResult {
                     text: "ok".to_string(),
+                    reasoning: String::new(),
                     tool_calls: Vec::new(),
                     prompt_tokens: Some(10),
                 })
@@ -1366,7 +1371,7 @@ async fn context_overflow_retries_with_halved_history() {
 
     let fx = fixture();
     fx.db.call(|c| {
-        db::insert_message(c, &fx.conversation_id, None, Role::User, &"x".repeat(200_000))
+        db::insert_message(c, &fx.conversation_id, None, Role::User, &"x".repeat(200_000), None)
     }).unwrap();
     let small = Arc::new(SmallWindow { calls: AtomicU32::new(0) });
     let provider: Arc<dyn Provider> = Arc::clone(&small) as Arc<dyn Provider>;

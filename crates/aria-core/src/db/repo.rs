@@ -535,6 +535,7 @@ pub fn insert_message(
     run_id: Option<&str>,
     role: Role,
     content: &str,
+    reasoning: Option<&str>,
 ) -> Result<Message> {
     let m = Message {
         id: nid(),
@@ -542,12 +543,21 @@ pub fn insert_message(
         run_id: run_id.map(str::to_string),
         role,
         content: content.to_string(),
+        reasoning: reasoning.map(str::to_string),
         created_at: now_ms(),
     };
     conn.execute(
-        "INSERT INTO messages (id, conversation_id, run_id, role, content, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![m.id, m.conversation_id, m.run_id, m.role.as_str(), m.content, m.created_at],
+        "INSERT INTO messages (id, conversation_id, run_id, role, content, reasoning, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            m.id,
+            m.conversation_id,
+            m.run_id,
+            m.role.as_str(),
+            m.content,
+            m.reasoning,
+            m.created_at
+        ],
     )?;
     touch_conversation(conn, conversation_id)?;
     Ok(m)
@@ -562,11 +572,13 @@ fn message_from_row(r: &Row<'_>) -> rusqlite::Result<Message> {
         run_id,
         role: Role::from_str(&role).map_err(to_sql_err)?,
         content: r.get(4)?,
-        created_at: r.get(5)?,
+        reasoning: r.get(5)?,
+        created_at: r.get(6)?,
     })
 }
 
-const MESSAGE_COLS: &str = "id, conversation_id, run_id, role, content, created_at";
+const MESSAGE_COLS: &str =
+    "id, conversation_id, run_id, role, content, reasoning, created_at";
 
 pub fn list_messages(conn: &Connection, conversation_id: &str) -> Result<Vec<Message>> {
     let mut stmt = conn.prepare(&format!(

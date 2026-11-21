@@ -102,6 +102,9 @@ pub enum RunEvent {
     TextDelta { turn_index: i64, text: String, so_far: String },
     /// The Turn's assistant message is persisted.
     AssistantMessage { message_id: String, content: String },
+    /// Incremental chain-of-thought / reasoning text streamed before the
+    /// final answer or tool calls.
+    ReasoningDelta { turn_index: i64, text: String, so_far: String },
     /// A Tool Call needs an Approval before it runs.
     ApprovalRequested { pending: PendingApproval },
     /// A Tool Call finished with a Tool Result.
@@ -261,7 +264,7 @@ impl Agent {
                         value: format!("{} is still {}", run.id, run.state),
                     });
                 }
-                db::insert_message(c, &conv, None, Role::User, &text)?;
+                db::insert_message(c, &conv, None, Role::User, &text, None)?;
                 db::insert_run(c, &conv)
             })
         })
@@ -418,6 +421,7 @@ impl Agent {
             conversation_id: conversation.id.clone(),
             conversation_policy: conversation.approval_policy,
             auto_approve_run: false,
+            reasoning_so_far: String::new(),
         };
         tokio::spawn(ctx.run_to_end());
         Ok(handle)
@@ -551,6 +555,8 @@ struct LoopCtx {
     conversation_policy: Option<ApprovalPolicy>,
     /// Set by "Allow all this run"; suppresses every further approval in it.
     auto_approve_run: bool,
+    /// Reasoning accumulated for the current Turn, reset at Turn start.
+    reasoning_so_far: String,
 }
 
 impl LoopCtx {
@@ -1080,6 +1086,8 @@ impl LoopCtx {
             .max(self.assistant_turns(&run)?);
         let specs = ToolRegistry::describe(scope, &self.disabled_tools);
         self.emit(RunEvent::TurnStarted { turn_index });
+        // Reset per-turn accumulation buffers.
+        self.reasoning_so_far.clear();
 
         // Bound concurrent provider calls. Held only for this Turn, so an
         // Approval wait or a long tool never blocks another chat.
@@ -1112,6 +1120,7 @@ impl LoopCtx {
                 Some(&self.run_id),
                 Role::Assistant,
                 &result.text,
+                Some(&result.reasoning),
             )
         })?;
         self.emit(RunEvent::AssistantMessage {
@@ -1134,7 +1143,7 @@ impl LoopCtx {
     /// Stream one Turn, forwarding text to subscribers. `None` means the user
     /// cancelled mid-stream.
     async fn stream(
-        &self,
+        &mut self,
         messages: &[ChatMessage],
         specs: &[crate::provider::ToolSpec],
         turn_index: i64,
@@ -1164,7 +1173,7 @@ impl LoopCtx {
     /// One attempt at a Turn. The error carries whether text was already
     /// streamed, which decides if a retry is safe.
     async fn stream_once(
-        &self,
+        &mut self,
         messages: &[ChatMessage],
         specs: &[crate::provider::ToolSpec],
         turn_index: i64,
@@ -1193,6 +1202,15 @@ impl LoopCtx {
                             turn_index,
                             text,
                             so_far: so_far.clone(),
+                        });
+                    }
+                    Some(ProviderEvent::ReasoningDelta(text)) => {
+                        emitted = true;
+                        self.reasoning_so_far.push_str(&text);
+                        self.emit(RunEvent::ReasoningDelta {
+                            turn_index,
+                            text,
+                            so_far: self.reasoning_so_far.clone(),
                         });
                     }
                     Some(ProviderEvent::Usage { .. } | ProviderEvent::ToolCall(_)) => {}
@@ -1417,12 +1435,20 @@ fn message_chars(message: &ChatMessage) -> usize {
             content,
             tool_calls,
             tool_call_id,
-        }
-        | ChatMessage::Assistant {
+            ..
+        } => content.len()
+            + calls(tool_calls)
+            + tool_call_id.as_ref().map_or(0, String::len),
+        ChatMessage::Assistant {
             content,
             tool_calls,
             tool_call_id,
-        } => content.len() + calls(tool_calls) + tool_call_id.as_ref().map_or(0, String::len),
+            reasoning,
+            ..
+        } => content.len()
+            + calls(tool_calls)
+            + tool_call_id.as_ref().map_or(0, String::len)
+            + reasoning.as_ref().map_or(0, String::len),
         ChatMessage::Tool {
             content,
             tool_call_id,
@@ -1460,6 +1486,7 @@ mod tests {
                 },
             }],
             tool_call_id: None,
+            reasoning: None,
         };
         assert!(message_chars(&message) >= 10_000);
     }

@@ -96,6 +96,11 @@ pub enum ChatMessage {
     },
     Assistant {
         content: String,
+        /// Chain-of-thought / reasoning the model produced before the final
+        /// answer. Echoed back in conversation history so providers that
+        /// support it (e.g. OpenAI o1) can see their own prior reasoning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<ToolCallRequest>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -126,6 +131,21 @@ impl ChatMessage {
     pub fn assistant(content: impl Into<String>, tool_calls: Vec<ToolCallRequest>) -> Self {
         Self::Assistant {
             content: content.into(),
+            reasoning: None,
+            tool_calls,
+            tool_call_id: None,
+        }
+    }
+
+    /// Assistant message with chain-of-thought reasoning.
+    pub fn assistant_with_reasoning(
+        content: impl Into<String>,
+        reasoning: impl Into<String>,
+        tool_calls: Vec<ToolCallRequest>,
+    ) -> Self {
+        Self::Assistant {
+            content: content.into(),
+            reasoning: Some(reasoning.into()),
             tool_calls,
             tool_call_id: None,
         }
@@ -200,6 +220,8 @@ pub struct ToolSpec {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProviderEvent {
     TextDelta(String),
+    /// Incremental chain-of-thought / reasoning text.
+    ReasoningDelta(String),
     /// A tool call is complete and ready to execute.
     ToolCall(ToolCallRequest),
     /// Prompt tokens for this Turn, when the provider reports usage.
@@ -210,6 +232,8 @@ pub enum ProviderEvent {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TurnResult {
     pub text: String,
+    /// Reasoning produced before the final answer / tool calls.
+    pub reasoning: String,
     pub tool_calls: Vec<ToolCallRequest>,
     pub prompt_tokens: Option<u64>,
 }
@@ -530,6 +554,7 @@ fn find_double_newline(buf: &[u8]) -> Option<usize> {
 #[derive(Default)]
 struct Accumulator {
     text: String,
+    reasoning: String,
     tool_calls: BTreeMap<usize, PartialCall>,
     prompt_tokens: Option<u64>,
     finished: bool,
@@ -572,6 +597,17 @@ impl Accumulator {
             {
                 self.text.push_str(content);
                 let _ = events.send(ProviderEvent::TextDelta(content.to_string()));
+            }
+            // OpenAI o1-series models stream reasoning in `reasoning_content`;
+            // some providers use a top-level `reasoning` field on the delta.
+            let reasoning = delta
+                .get("reasoning_content")
+                .and_then(|c| c.as_str())
+                .or_else(|| delta.get("reasoning").and_then(|c| c.as_str()))
+                .filter(|s| !s.is_empty());
+            if let Some(reasoning) = reasoning {
+                self.reasoning.push_str(reasoning);
+                let _ = events.send(ProviderEvent::ReasoningDelta(reasoning.to_string()));
             }
             if let Some(calls) = delta.get("tool_calls").and_then(|c| c.as_array()) {
                 for call in calls {
@@ -630,6 +666,7 @@ impl Accumulator {
         }
         Ok(TurnResult {
             text: self.text,
+            reasoning: self.reasoning,
             tool_calls,
             prompt_tokens: self.prompt_tokens,
         })

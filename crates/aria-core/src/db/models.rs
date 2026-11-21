@@ -333,6 +333,7 @@ pub struct Message {
     pub run_id: Option<String>,
     pub role: Role,
     pub content: String,
+    pub reasoning: Option<String>,
     pub created_at: i64,
 }
 

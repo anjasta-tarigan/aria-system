@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use super::{DbError, Result};
 
 /// Maximum schema version understood by this build.
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 /// A handle to the application database.
 ///
@@ -187,6 +187,17 @@ fn migrate(conn: &Connection) -> Result<()> {
     if current < 11 {
         migrate_v11(conn)?;
     }
+    if current < 12 {
+        migrate_v12(conn)?;
+    }
+    Ok(())
+}
+
+/// Version 12: messages gain a nullable `reasoning` column to persist
+/// chain-of-thought text produced by the model before its final answer.
+fn migrate_v12(conn: &Connection) -> Result<()> {
+    conn.execute_batch("ALTER TABLE messages ADD COLUMN reasoning TEXT;")?;
+    conn.pragma_update(None, "user_version", 12)?;
     Ok(())
 }
 
