@@ -1518,33 +1518,89 @@ function composerNode(
   ) as HTMLSelectElement;
   modeSelect.value = conv.mode;
 
-  // Approval pill chip.
-  const approvalSelect = h(
-    "select",
-    {
-      class: "composer-chip",
-      title: "When Aria must ask before running a tool. Only risky: reads run silently.",
-      "aria-label": "Approval policy for this chat",
-      onchange: async (e: Event) => {
-        const value = (e.target as HTMLSelectElement).value;
-        try {
-          const updated = await call.invoke<ConversationView>(
-            "set_conversation_approval",
-            { conversationId: conv.id, approvalPolicy: value || null },
-          );
-          if (ui.detail) ui.detail.conversation = updated;
-          render();
-        } catch (err) {
-          ui.notice = String(err);
-          render();
-        }
-      },
+  // Adaptive approval chip — a button that cycles through 3 states and whose
+  // label describes what is *actually enforced* given the current context.
+  //
+  // States (the value stored in conv.approval_policy):
+  //   null             → follows global Settings (currently AlwaysAsk)
+  //   "always_ask"     → every tool call asks
+  //   "auto_approve_safe" → reads auto-approved; mutations/shell adapt to scope:
+  //       workspace      → edits + network silent, shell asks
+  //       main system    → only reads silent, everything else asks
+  //
+  // Cycle order: null → auto_approve_safe → always_ask → null
+  const approvalPolicy = conv.approval_policy ?? null;
+  const isMainSystem = conv.main_system;
+
+  // Compute the display label and style class based on effective context.
+  type ApprovalDisplay = { label: string; cls: string; tooltip: string };
+  function approvalDisplay(policy: string | null): ApprovalDisplay {
+    if (policy === "auto_approve_safe") {
+      if (hasFolder) {
+        return {
+          label: "⚡ Auto · edits free",
+          cls: "composer-chip approval-auto",
+          tooltip:
+            "Auto mode (workspace): reads and file edits run silently. " +
+            "Shell and network calls still ask.",
+        };
+      } else if (isMainSystem) {
+        return {
+          label: "⚡ Auto · reads only",
+          cls: "composer-chip approval-auto",
+          tooltip:
+            "Auto mode (device): only reads run silently. File edits, " +
+            "network, and shell still ask for permission.",
+        };
+      } else {
+        return {
+          label: "⚡ Auto",
+          cls: "composer-chip approval-auto",
+          tooltip: "Auto mode: reads run silently; other actions ask.",
+        };
+      }
+    }
+    if (policy === "always_ask") {
+      return {
+        label: "🔒 Ask always",
+        cls: "composer-chip approval-ask",
+        tooltip: "Ask always: every tool call requires your approval.",
+      };
+    }
+    // null = follows global setting (default = always ask)
+    return {
+      label: "🔒 Ask always",
+      cls: "composer-chip approval-default",
+      tooltip: "Following global Settings (currently: ask for every action). Click to switch to Auto.",
+    };
+  }
+
+  function nextPolicy(current: string | null): string | null {
+    if (current === null) return "auto_approve_safe";
+    if (current === "auto_approve_safe") return "always_ask";
+    return null; // always_ask → back to default
+  }
+
+  const display = approvalDisplay(approvalPolicy);
+  const approvalBtn = h("button", {
+    class: display.cls,
+    title: display.tooltip,
+    "aria-label": "Approval policy — click to cycle",
+    onclick: async () => {
+      const next = nextPolicy(conv.approval_policy ?? null);
+      try {
+        const updated = await call.invoke<ConversationView>(
+          "set_conversation_approval",
+          { conversationId: conv.id, approvalPolicy: next },
+        );
+        if (ui.detail) ui.detail.conversation = updated;
+        render();
+      } catch (err) {
+        ui.notice = String(err);
+        render();
+      }
     },
-    h("option", { value: "" }, "Default approval"),
-    h("option", { value: "always_ask" }, "Always ask"),
-    h("option", { value: "auto_approve_safe" }, "Only risky"),
-  ) as HTMLSelectElement;
-  approvalSelect.value = conv.approval_policy ?? "";
+  }, display.label);
 
   // The card: textarea on top, toolbar with chips + send button on bottom.
   const card = h(
@@ -1554,7 +1610,7 @@ function composerNode(
     h(
       "div",
       { class: "composer-footer" },
-      h("div", { class: "composer-chips" }, modeSelect, approvalSelect),
+      h("div", { class: "composer-chips" }, modeSelect, approvalBtn),
       sendBtn,
     ),
   );

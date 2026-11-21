@@ -1351,7 +1351,7 @@ pre {
   flex-wrap: wrap;
 }
 
-/* Pill-shaped select chips — no native select arrow on modern browsers via appearance. */
+/* Pill-shaped select chips and button chips. */
 .composer-chip {
   appearance: none;
   -webkit-appearance: none;
@@ -1363,7 +1363,8 @@ pre {
   font: inherit;
   font-size: var(--fs-xs);
   padding: 3px var(--sp-3);
-  transition: border-color 0.1s, color 0.1s;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  white-space: nowrap;
 }
 
 .composer-chip:hover {
@@ -1375,6 +1376,22 @@ pre {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+
+/* Auto mode: accent-tinted to signal elevated trust. */
+.approval-auto {
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel-2));
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  color: var(--accent);
+}
+
+.approval-auto:hover {
+  background: color-mix(in srgb, var(--accent) 20%, var(--panel-2));
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  color: var(--accent);
+}
+
+/* Ask-always: neutral muted — same as base chip, no extra style needed. */
+/* approval-default and approval-ask both use the base .composer-chip style. */
 
 /* Round icon send button bottom-right. */
 .composer-send {
