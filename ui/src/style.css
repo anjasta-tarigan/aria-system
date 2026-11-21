@@ -616,15 +616,26 @@ button.icon:hover {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
-  padding: var(--sp-3) var(--sp-4);
+  padding: var(--sp-2) var(--sp-4);
   border-bottom: 1px solid var(--line);
   background: var(--panel);
   flex-wrap: wrap;
 }
 
+.conv-header-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
 .conv-header h2 {
   margin: 0;
   font-size: var(--fs-md);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .path {
@@ -641,12 +652,6 @@ button.icon:hover {
   align-items: center;
   gap: 4px;
   font-style: italic;
-}
-
-.mode-select {
-  width: auto;
-  padding: var(--sp-1) var(--sp-2);
-  font-size: var(--fs-sm);
 }
 
 .badge {
@@ -896,6 +901,11 @@ button.icon:hover {
   padding: 0;
   font-size: var(--fs-sm);
   text-align: left;
+}
+/* Override hljs theme background so our pre's --code-bg is used instead. */
+.msg-body.markdown pre code.hljs {
+  background: none;
+  padding: 0;
 }
 .msg-body.markdown table {
   margin: 0 0 var(--sp-3);
@@ -1205,6 +1215,19 @@ pre {
   border-top: 1px solid var(--line);
 }
 
+/* Panel dismiss button (Files / Background tasks panels). */
+.panel-dismiss {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: var(--fs-md);
+  line-height: 1;
+  padding: 0 var(--sp-1);
+}
+
+.panel-dismiss:hover {
+  color: var(--text);
+}
+
 .changed-file {
   display: inline-flex;
   gap: var(--sp-2);
@@ -1257,15 +1280,39 @@ pre {
 
 .composer {
   display: flex;
-  gap: var(--sp-3);
-  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+  flex-direction: column;
+  gap: 0;
+  padding: var(--sp-2) var(--sp-4) var(--sp-4);
   border-top: 1px solid var(--line);
   background: var(--panel);
+}
+
+.composer-toolbar {
+  display: flex;
+  gap: var(--sp-2);
+  padding-bottom: var(--sp-2);
+}
+
+.composer-select {
+  width: auto;
+  padding: 2px var(--sp-2);
+  font-size: var(--fs-xs);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.composer-row {
+  display: flex;
+  gap: var(--sp-3);
   align-items: flex-end;
 }
 
 .composer-input {
   line-height: 1.5;
+  flex: 1;
 }
 
 button.send {
@@ -2234,5 +2281,45 @@ label.checkbox-row {
 @media (prefers-reduced-motion: reduce) {
   * {
     animation: none !important;
+  }
+}
+
+/* -------------------------------------------------------- responsive layout */
+
+/* Narrow: hide sidebar, show pane full-width. */
+@media (max-width: 600px) {
+  .sidebar {
+    display: none;
+  }
+
+  .app-body {
+    grid-template-columns: 1fr;
+  }
+
+  /* Todos panel stacks below transcript on mobile. */
+  .todos {
+    width: 100%;
+    border-left: none;
+    border-top: 1px solid var(--line);
+  }
+
+  .conv-header {
+    padding: var(--sp-2) var(--sp-3);
+  }
+
+  .composer {
+    padding: var(--sp-2) var(--sp-3) var(--sp-3);
+  }
+}
+
+/* Medium: narrow sidebar. */
+@media (max-width: 900px) and (min-width: 601px) {
+  .sidebar {
+    width: 180px;
+    min-width: 180px;
+  }
+
+  .menu-label {
+    display: none;
   }
 }

@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 import * as initialApp from "./app";
 import "katex/dist/katex.min.css";
+import "highlight.js/styles/github-dark.css";
 
 // `?mock=1` runs the same UI against an in-browser fake of the Rust side, for
 // demos and screenshots without a model. The real app always uses IPC.

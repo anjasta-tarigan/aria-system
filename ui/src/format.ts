@@ -12,6 +12,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import remarkRehype from "remark-rehype";
 import rehypeKatex from "rehype-katex";
+import rehypeHighlight from "rehype-highlight";
 import rehypeStringify from "rehype-stringify";
 
 const pipeline = unified()
@@ -20,6 +21,7 @@ const pipeline = unified()
   .use(remarkMath)
   .use(remarkRehype)
   .use(rehypeKatex)
+  .use(rehypeHighlight, { detect: true })
   .use(rehypeStringify);
 
 const DANGEROUS = /^javascript:/i;

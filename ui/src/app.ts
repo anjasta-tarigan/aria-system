@@ -106,6 +106,10 @@ interface Ui {
   systemAccessId: string | null;
   /// Latest system health snapshot for the footer (polled in the background).
   health: HealthView | null;
+  /// Whether the Files panel is visible (user can dismiss it).
+  filesVisible: boolean;
+  /// Whether the Background Tasks panel is visible (user can dismiss it).
+  bgVisible: boolean;
 }
 
 const ui: Ui = {
@@ -127,6 +131,8 @@ const ui: Ui = {
   systemAccessId: null,
   /// Latest system health snapshot for the footer (polled in the background).
   health: null as HealthView | null,
+  filesVisible: true,
+  bgVisible: true,
 };
 
 const root = document.querySelector<HTMLElement>("#app")!;
@@ -195,7 +201,7 @@ function render() {
     { class: "app-body" },
     sidebar(),
     h("main", { class: "pane" }, detail ? conversationPane(detail) : emptyPane()),
-    detail && isBusy(detail.conversation.run) ? todoPanel(detail) : null,
+    detail && detail.todos.length > 0 ? todoPanel(detail) : null,
   );
   const shell = h("div", { class: "app" }, body, footer());
   root.replaceChildren(
@@ -816,98 +822,14 @@ function conversationPane(detail: ConversationDetail): HTMLElement {
           ),
         );
 
-  // Main System chats (no folder) can grant Aria filesystem-wide access.
-  const systemAccess = !hasFolder
-    ? conv.main_system
-      ? h(
-          "button",
-          {
-            class: "badge-system-access",
-            title: "Configure system-wide file access",
-            onclick: () => {
-              ui.systemAccessId = conv.id;
-              render();
-            },
-          },
-          "⚡ System File Access (active)",
-        )
-      : h(
-          "button",
-          {
-            class: "link grant-access",
-            onclick: () => {
-              ui.systemAccessId = conv.id;
-              render();
-            },
-          },
-          "Grant File Access",
-        )
-    : null;
-
-  // Normal is everyday work; Creative is for building or changing Aria itself.
-  const modeSelect = h(
-    "select",
-    {
-      class: "mode-select",
-      title: "Creative mode helps build or change Aria itself.",
-      "aria-label": "Conversation mode",
-      onchange: async (e: Event) => {
-        const mode = (e.target as HTMLSelectElement).value as ConversationMode;
-        try {
-          const updated = await call.invoke<ConversationView>("set_conversation_mode", {
-            conversationId: conv.id,
-            mode,
-          });
-          if (ui.detail) ui.detail.conversation = updated;
-          render();
-        } catch (err) {
-          ui.notice = String(err);
-          render();
-        }
-      },
-    },
-    h("option", { value: "normal" }, "Normal"),
-    h("option", { value: "creative" }, "Creative"),
-  ) as HTMLSelectElement;
-  modeSelect.value = conv.mode;
-
-  // Per-chat approval override; "Settings" keeps following the global policy.
-  const approvalSelect = h(
-    "select",
-    {
-      class: "mode-select",
-      title:
-        "When Aria must ask before running a tool in this chat. Only risky: " +
-        "reads run silently. In a folder, edits and web calls also run; in the " +
-        "Main System they ask, and shell asks unless it is one safe read-only command.",
-      "aria-label": "Approval policy for this chat",
-      onchange: async (e: Event) => {
-        const value = (e.target as HTMLSelectElement).value;
-        try {
-          const updated = await call.invoke<ConversationView>(
-            "set_conversation_approval",
-            { conversationId: conv.id, approvalPolicy: value || null },
-          );
-          if (ui.detail) ui.detail.conversation = updated;
-          render();
-        } catch (err) {
-          ui.notice = String(err);
-          render();
-        }
-      },
-    },
-    h("option", { value: "" }, "Ask: Settings"),
-    h("option", { value: "always_ask" }, "Ask: Always"),
-    h("option", { value: "auto_approve_safe" }, "Ask: Only risky"),
-  ) as HTMLSelectElement;
-  approvalSelect.value = conv.approval_policy ?? "";
-
+  // Stripped-down header: title + path + run state + cancel/continue.
+  // Mode and approval live in the composer; system-access badge removed
+  // (the modal is still reachable via the system access modal triggered
+  // from conversationPane above the composer if needed).
   const header = h(
     "header",
     { class: "conv-header" },
-    h("div", {}, h("h2", {}, convTitle(conv)), folderSlot, systemAccess),
-    modeSelect,
-    approvalSelect,
+    h("div", { class: "conv-header-title" }, h("h2", {}, convTitle(conv)), folderSlot),
     run ? h("span", { class: `badge ${run.state}` }, stateLabel[run.state]) : null,
     run?.state === "cancelled" || run?.state === "errored"
       ? h("span", { class: "error-text" }, run.error ?? run.stop_reason ?? "")
@@ -929,10 +851,11 @@ function conversationPane(detail: ConversationDetail): HTMLElement {
     ...pending.map(approvalNode),
   );
 
-  const composer = composerNode(busy, hasFolder, conv.main_system);
+  const composer = composerNode(busy, hasFolder, conv);
 
-  const filesPanel = hasFiles ? filesPanelNode(conv) : null;
-  const bgPanel = hasFiles ? backgroundTasksNode(conv) : null;
+  // Reset panel visibility when switching conversations.
+  const filesPanel = hasFiles && ui.filesVisible ? filesPanelNode(conv) : null;
+  const bgPanel = hasFiles && ui.bgVisible ? backgroundTasksNode(conv) : null;
 
   return h(
     "section",
@@ -1042,6 +965,18 @@ function filesPanelNode(conv: ConversationView): HTMLElement {
         filesOpen ? "▾" : "▸",
       ),
       h("span", { class: "section-title" }, "Files"),
+      h(
+        "button",
+        {
+          class: "icon panel-dismiss",
+          title: "Hide Files panel",
+          onclick: () => {
+            ui.filesVisible = false;
+            render();
+          },
+        },
+        "×",
+      ),
     ),
     filesOpen
       ? h(
@@ -1122,7 +1057,23 @@ function backgroundTasksNode(conv: ConversationView): HTMLElement {
   const panel = h(
     "div",
     { class: "changed" },
-    h("span", { class: "section-title" }, "Background tasks"),
+    h(
+      "div",
+      { class: "section-row" },
+      h("span", { class: "section-title" }, "Background tasks"),
+      h(
+        "button",
+        {
+          class: "icon panel-dismiss",
+          title: "Hide Background tasks panel",
+          onclick: () => {
+            ui.bgVisible = false;
+            render();
+          },
+        },
+        "×",
+      ),
+    ),
     list,
   );
 
@@ -1490,8 +1441,9 @@ function approvalNode(p: PendingApproval): HTMLElement {
 function composerNode(
   busy: boolean,
   hasFolder: boolean,
-  mainSystem = false,
+  conv: ConversationView,
 ): HTMLElement {
+  const mainSystem = conv.main_system;
   const input = h("textarea", {
     class: "composer-input",
     rows: "1",
@@ -1517,19 +1469,81 @@ function composerNode(
     },
   });
   input.dataset.role = "composer";
+
+  // Mode select (Normal / Creative) — moved from header.
+  const modeSelect = h(
+    "select",
+    {
+      class: "composer-select",
+      title: "Creative mode helps build or change Aria itself.",
+      "aria-label": "Conversation mode",
+      onchange: async (e: Event) => {
+        const mode = (e.target as HTMLSelectElement).value as ConversationMode;
+        try {
+          const updated = await call.invoke<ConversationView>("set_conversation_mode", {
+            conversationId: conv.id,
+            mode,
+          });
+          if (ui.detail) ui.detail.conversation = updated;
+          render();
+        } catch (err) {
+          ui.notice = String(err);
+          render();
+        }
+      },
+    },
+    h("option", { value: "normal" }, "Normal"),
+    h("option", { value: "creative" }, "Creative"),
+  ) as HTMLSelectElement;
+  modeSelect.value = conv.mode;
+
+  // Approval select — moved from header.
+  const approvalSelect = h(
+    "select",
+    {
+      class: "composer-select",
+      title:
+        "When Aria must ask before running a tool. Only risky: reads run silently.",
+      "aria-label": "Approval policy for this chat",
+      onchange: async (e: Event) => {
+        const value = (e.target as HTMLSelectElement).value;
+        try {
+          const updated = await call.invoke<ConversationView>(
+            "set_conversation_approval",
+            { conversationId: conv.id, approvalPolicy: value || null },
+          );
+          if (ui.detail) ui.detail.conversation = updated;
+          render();
+        } catch (err) {
+          ui.notice = String(err);
+          render();
+        }
+      },
+    },
+    h("option", { value: "" }, "Approval: Default"),
+    h("option", { value: "always_ask" }, "Approval: Always"),
+    h("option", { value: "auto_approve_safe" }, "Approval: Only risky"),
+  ) as HTMLSelectElement;
+  approvalSelect.value = conv.approval_policy ?? "";
+
   return h(
     "div",
     { class: "composer" },
-    input,
+    h("div", { class: "composer-toolbar" }, modeSelect, approvalSelect),
     h(
-      "button",
-      {
-        class: "primary send",
-        disabled: busy,
-        title: "Send (Enter)",
-        onclick: () => void send(),
-      },
-      "Send",
+      "div",
+      { class: "composer-row" },
+      input,
+      h(
+        "button",
+        {
+          class: "primary send",
+          disabled: busy,
+          title: "Send (Enter)",
+          onclick: () => void send(),
+        },
+        "Send",
+      ),
     ),
   );
 }
@@ -1584,6 +1598,8 @@ async function selectConversation(id: string) {
   ui.streaming = null;
   ui.toolOutput = {};
   ui.notice = null;
+  ui.filesVisible = true;
+  ui.bgVisible = true;
   await refreshChanged();
   render();
 }
