@@ -1323,6 +1323,6 @@ async fn long_history_is_trimmed_to_fit_the_context() {
             | ChatMessage::Tool { content, .. } => content.len(),
         })
         .sum();
-    assert!(chars <= 400_000, "sent {chars} chars");
+    assert!(chars <= 300_000, "sent {chars} chars");
     assert!(chars > 0);
 }

@@ -40,10 +40,11 @@ const MAX_CONCURRENT_TURNS: usize = 4;
 /// Room the injected memory block may take in the system prompt.
 const MEMORY_BLOCK_CHARS: usize = 4_000;
 
-/// Roughly how much conversation text one request may carry. About four
-/// characters per token, so ~100k tokens, leaving room for the reply and the
-/// Tool definitions.
-const MAX_CONTEXT_CHARS: usize = 400_000;
+/// How much text one request may carry. Sized for the common 128k-token
+/// window with room for the reply and the Tool definitions: 300k characters is
+/// ~75k tokens of English, and at worst ~100k for dense code or non-Latin
+/// scripts (three characters per token), which still leaves ~20k of the window.
+const MAX_CONTEXT_CHARS: usize = 300_000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
@@ -1387,11 +1388,30 @@ fn trim_history(messages: &mut Vec<ChatMessage>) {
 }
 
 fn message_chars(message: &ChatMessage) -> usize {
+    // Tool Call arguments count too: a `write_file` payload is sent to the
+    // provider like any other text, even though it never becomes `content`.
+    let calls = |calls: &[ToolCallRequest]| {
+        calls
+            .iter()
+            .map(|call| call.function.name.len() + call.function.arguments.len())
+            .sum::<usize>()
+    };
     match message {
-        ChatMessage::System { content }
-        | ChatMessage::User { content, .. }
-        | ChatMessage::Assistant { content, .. }
-        | ChatMessage::Tool { content, .. } => content.len(),
+        ChatMessage::System { content } => content.len(),
+        ChatMessage::User {
+            content,
+            tool_calls,
+            tool_call_id,
+        }
+        | ChatMessage::Assistant {
+            content,
+            tool_calls,
+            tool_call_id,
+        } => content.len() + calls(tool_calls) + tool_call_id.as_ref().map_or(0, String::len),
+        ChatMessage::Tool {
+            content,
+            tool_call_id,
+        } => content.len() + tool_call_id.as_ref().map_or(0, String::len),
     }
 }
 
@@ -1404,4 +1424,28 @@ enum TurnOutcome {
 /// Parse a decision from a UI string.
 pub fn parse_decision(s: &str) -> Option<Decision> {
     Decision::from_str(s).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::message_chars;
+    use crate::provider::{ChatMessage, FunctionCall, ToolCallRequest};
+
+    /// Tool Call arguments are sent to the provider, so they must count toward
+    /// the context budget even though they never become `content`.
+    #[test]
+    fn tool_call_arguments_count_toward_the_context() {
+        let message = ChatMessage::Assistant {
+            content: String::new(),
+            tool_calls: vec![ToolCallRequest {
+                id: "call-1".to_string(),
+                function: FunctionCall {
+                    name: "write_file".to_string(),
+                    arguments: "x".repeat(10_000),
+                },
+            }],
+            tool_call_id: None,
+        };
+        assert!(message_chars(&message) >= 10_000);
+    }
 }

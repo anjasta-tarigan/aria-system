@@ -40,7 +40,7 @@ _Avoid_: step, iteration, round.
 
 ## Context window
 
-The model's input limit for one request. Aria sends the system prompt, the injected memories and the conversation so far; when that passes roughly 100k tokens of text it drops the oldest complete Turns, keeping the system prompt and the newest Turn. Trimming cuts at user-message boundaries, because a Tool Result whose assistant Tool Call was dropped is rejected by the provider. The Run's Caps still bound cumulative turns and tokens.
+The model's input limit for one request. Aria sends the system prompt, the injected memories and the conversation so far; when that passes 300k characters — about 75k tokens of English, at most ~100k of dense code — it drops the oldest complete Turns, keeping the system prompt and the newest Turn. Trimming cuts at user-message boundaries, because a Tool Result whose assistant Tool Call was dropped is rejected by the provider. The Run's Caps still bound cumulative turns and tokens.
 
 _Avoid_: prompt limit, token budget (that is `Caps`).
 
