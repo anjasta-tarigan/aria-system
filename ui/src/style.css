@@ -1947,6 +1947,58 @@ button.approval-locked:hover {
   color: var(--bad);
 }
 
+/* Attachments rendered beneath messages (images and documents). */
+.attachment {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  margin: var(--sp-1) 0;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: var(--fs-sm);
+}
+
+.attachment-image .attachment-preview {
+  width: 120px;
+  height: 120px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.attachment-file .attachment-icon {
+  font-size: 24px;
+  flex-shrink: 0;
+}
+
+.attachment-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.attachment-link {
+  color: var(--accent);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-link:hover {
+  text-decoration: underline;
+}
+
+.attachment-meta {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+
 /* Right-side action buttons: attach + send in a row. */
 .composer-actions {
   display: flex;

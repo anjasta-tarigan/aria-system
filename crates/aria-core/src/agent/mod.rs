@@ -46,6 +46,18 @@ const MEMORY_BLOCK_CHARS: usize = 4_000;
 /// scripts (three characters per token), which still leaves ~20k of the window.
 const MAX_CONTEXT_CHARS: usize = 300_000;
 
+/// Input describing one file to attach to the user's message. The caller
+/// (Tauri layer) reads the file and stores its bytes in the blob store;
+/// `blob_hash` is the content-addressed key returned by [`Blobs::put`].
+#[derive(Debug, Clone)]
+pub struct AttachmentInput {
+    pub name: String,
+    pub path: String,
+    pub mime_type: String,
+    pub size: i64,
+    pub blob_hash: String,
+}
+
 /// Floor for the context retry: about 4k tokens, small enough for the
 /// smallest models in common use.
 const MIN_CONTEXT_CHARS: usize = 16_000;
@@ -250,10 +262,16 @@ impl Agent {
     }
 
     /// Append the user's message and start a Run for it.
-    pub async fn start(&self, conversation_id: &str, user_text: &str) -> Result<RunHandle> {
+    pub async fn start(
+        &self,
+        conversation_id: &str,
+        user_text: &str,
+        attachments: impl Into<Vec<AttachmentInput>>,
+    ) -> Result<RunHandle> {
         let db = Arc::clone(&self.db);
         let conv = conversation_id.to_string();
         let text = user_text.to_string();
+        let atts = attachments.into();
         let run = spawn_blocking(move || {
             db.call(|c| {
                 if let Some(run) = db::latest_run(c, &conv)?
@@ -264,7 +282,18 @@ impl Agent {
                         value: format!("{} is still {}", run.id, run.state),
                     });
                 }
-                db::insert_message(c, &conv, None, Role::User, &text, None)?;
+                let msg = db::insert_message(c, &conv, None, Role::User, &text, None)?;
+                for a in &atts {
+                    db::insert_attachment(
+                        c,
+                        &msg.id,
+                        &a.name,
+                        &a.path,
+                        &a.mime_type,
+                        a.size,
+                        &a.blob_hash,
+                    )?;
+                }
                 db::insert_run(c, &conv)
             })
         })

@@ -328,8 +328,7 @@ async fn fix_a_bug_then_undo_it() {
     ]);
     let agent = repo.agent(&stub, Caps::default());
     let handle = agent
-        .start(&repo.conversation_id, "the totals are wrong, fix the bug")
-        .await
+        .start(&repo.conversation_id, "the totals are wrong, fix the bug", vec![]).await
         .unwrap();
 
     assert_eq!(
@@ -394,7 +393,7 @@ async fn the_model_sees_tool_results_in_openai_shape() {
         Reply::say("done "),
     ]);
     let agent = repo.agent(&stub, Caps::default());
-    let handle = agent.start(&repo.conversation_id, "list files").await.unwrap();
+    let handle = agent.start(&repo.conversation_id, "list files", vec![]).await.unwrap();
     assert_eq!(
         settle(&repo, &agent, &handle, Decision::Approve).await,
         RunState::Finished
@@ -435,8 +434,7 @@ async fn path_escape_is_refused_by_the_tool() {
     ]);
     let agent = repo.agent(&stub, Caps::default());
     let handle = agent
-        .start(&repo.conversation_id, "read ../../etc/passwd")
-        .await
+        .start(&repo.conversation_id, "read ../../etc/passwd", vec![]).await
         .unwrap();
     assert_eq!(
         settle(&repo, &agent, &handle, Decision::Approve).await,
@@ -466,7 +464,7 @@ async fn a_symlink_out_of_the_workspace_is_refused() {
         Reply::say("refused "),
     ]);
     let agent = repo.agent(&stub, Caps::default());
-    let handle = agent.start(&repo.conversation_id, "read it").await.unwrap();
+    let handle = agent.start(&repo.conversation_id, "read it", vec![]).await.unwrap();
     assert_eq!(
         settle(&repo, &agent, &handle, Decision::Approve).await,
         RunState::Finished
@@ -496,8 +494,7 @@ async fn reopening_mid_run_shows_the_same_run_and_completes() {
     ]);
     let agent = repo.agent(&stub, Caps::default());
     let handle = agent
-        .start(&repo.conversation_id, "fix the off-by-one")
-        .await
+        .start(&repo.conversation_id, "fix the off-by-one", vec![]).await
         .unwrap();
     assert!(wait_state(&repo, &handle, RunState::AwaitingApproval).await);
 
@@ -559,8 +556,7 @@ async fn new_message_text_is_searchable_immediately() {
     let stub = Stub::start(vec![Reply::say("The xyzzy sentinel is worth remembering. ")]);
     let agent = repo.agent(&stub, Caps::default());
     let handle = agent
-        .start(&repo.conversation_id, "remember the wodka marker")
-        .await
+        .start(&repo.conversation_id, "remember the wodka marker", vec![]).await
         .unwrap();
     assert_eq!(
         settle(&repo, &agent, &handle, Decision::Approve).await,
@@ -610,7 +606,7 @@ async fn a_second_process_sees_the_same_transcript() {
     let repo = Repo::new();
     let stub = Stub::start(vec![Reply::say("All done. ")]);
     let agent = repo.agent(&stub, Caps::default());
-    let handle = agent.start(&repo.conversation_id, "hello").await.unwrap();
+    let handle = agent.start(&repo.conversation_id, "hello", vec![]).await.unwrap();
     assert_eq!(
         settle(&repo, &agent, &handle, Decision::Approve).await,
         RunState::Finished
@@ -669,7 +665,7 @@ async fn memory_is_stored_and_recalled_across_runs() {
         Reply::say("Your name is Sam. "),
     ]);
     let agent = repo.agent(&stub, Caps::default());
-    let handle = agent.start(&repo.conversation_id, "my name is Sam").await.unwrap();
+    let handle = agent.start(&repo.conversation_id, "my name is Sam", vec![]).await.unwrap();
     assert_eq!(
         settle(&repo, &agent, &handle, Decision::Approve).await,
         RunState::Finished
@@ -684,8 +680,7 @@ async fn memory_is_stored_and_recalled_across_runs() {
 
     // A fresh run in the same conversation recalls it from the store.
     let handle2 = agent
-        .start(&repo.conversation_id, "what's my name?")
-        .await
+        .start(&repo.conversation_id, "what's my name?", vec![]).await
         .unwrap();
     assert_eq!(
         settle(&repo, &agent, &handle2, Decision::Approve).await,

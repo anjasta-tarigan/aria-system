@@ -83,10 +83,10 @@ fn migration_is_idempotent_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("aria.db");
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 12);
+    assert_eq!(db.schema_version().unwrap(), 13);
     drop(db);
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 12);
+    assert_eq!(db.schema_version().unwrap(), 13);
     let (_ws, conv) = seed(&db);
     db.call(|c| db::insert_message(c, &conv, None, Role::User, "persisted", None))
         .unwrap();
@@ -201,7 +201,7 @@ fn migrating_v1_keeps_rows_and_allows_a_folderness_conversation() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 12);
+    assert_eq!(db.schema_version().unwrap(), 13);
     db.call(|c| {
         // Existing rows survived the rebuild, and FTS was not disturbed.
         let conv = db::get_conversation(c, "c1")?;
@@ -303,7 +303,7 @@ CREATE TABLE edit_journal (
 #[test]
 fn migration_v4_creates_memories_table() {
     let db = Db::open_in_memory().unwrap();
-    assert_eq!(db.schema_version().unwrap(), 12);
+    assert_eq!(db.schema_version().unwrap(), 13);
     db.call(|c| {
         c.execute_batch("INSERT INTO memories (id, key, content, created_at, updated_at)
                          VALUES ('m1', 'k', 'v', 1, 1)")?;
@@ -464,7 +464,7 @@ fn embedding_roundtrip_and_similarity_search() {
 #[test]
 fn migration_v5_adds_main_system_and_paths_tables() {
     let db = Db::open_in_memory().unwrap();
-    assert_eq!(db.schema_version().unwrap(), 12);
+    assert_eq!(db.schema_version().unwrap(), 13);
     let (ws, conv) = seed(&db);
     db.call(|c| {
         db::set_conversation_scope(c, &conv, true, &[])?;
@@ -561,7 +561,7 @@ fn migration_v7_gives_existing_main_chat_full_access() {
     }
 
     let db = Db::open(&path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 12);
+    assert_eq!(db.schema_version().unwrap(), 13);
     db.call(|c| {
         assert!(db::get_conversation(c, &system_id)?.main_system);
         assert!(db::list_main_system_paths(c, &system_id)?.is_empty());
@@ -646,7 +646,7 @@ fn backup_restores_and_reset_empties() {
     db.reset().unwrap();
     assert!(db.call(|c| db::list_conversations(c)).unwrap().is_empty());
     assert!(db.call(|c| db::search_messages(c, "backup", None, 10)).unwrap().is_empty());
-    assert_eq!(db.schema_version().unwrap(), 12);
+    assert_eq!(db.schema_version().unwrap(), 13);
     db.call(|c| db::insert_conversation(c, None, "fresh")).unwrap();
 }
 

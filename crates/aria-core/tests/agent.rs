@@ -238,7 +238,7 @@ async fn multi_turn_run_persists_messages_calls_and_todos() {
         text("The note says hello world. "),
     ]);
     let agent = fx.agent(Caps::default(), Arc::clone(&provider));
-    let handle = agent.start(&fx.conversation_id, "what does note.txt say?").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "what does note.txt say?", vec![]).await.unwrap();
 
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
     assert_eq!(provider.call_count(), 2);
@@ -279,7 +279,7 @@ async fn approval_parks_the_run_until_answered() {
         text("done "),
     ]);
     let agent = fx.agent(Caps::default(), provider);
-    let handle = agent.start(&fx.conversation_id, "create new.txt").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "create new.txt", vec![]).await.unwrap();
 
     wait_awaiting(&fx, &handle).await;
     assert!(!fx.root().join("new.txt").exists());
@@ -312,7 +312,7 @@ async fn allow_all_this_run_approves_remaining_calls() {
         text("both written "),
     ]);
     let agent = fx.agent(Caps::default(), Arc::clone(&provider));
-    let handle = agent.start(&fx.conversation_id, "write two files").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "write two files", vec![]).await.unwrap();
     wait_awaiting(&fx, &handle).await;
     let ids = pending(&fx, &handle);
     assert_eq!(ids.len(), 2);
@@ -332,7 +332,7 @@ async fn denying_an_approval_yields_an_error_result_and_the_run_continues() {
     ]);
     std::fs::write(fx.root().join("keep.txt"), "precious").unwrap();
     let agent = fx.agent(Caps::default(), provider);
-    let handle = agent.start(&fx.conversation_id, "delete keep.txt").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "delete keep.txt", vec![]).await.unwrap();
 
     wait_awaiting(&fx, &handle).await;
     let id = pending(&fx, &handle).pop().unwrap();
@@ -355,7 +355,7 @@ async fn state_lives_in_rows_so_a_new_loop_continues_the_same_run() {
         text("finished "),
     ]);
     let agent = fx.agent(Caps::default(), provider);
-    let handle = agent.start(&fx.conversation_id, "make a.txt").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "make a.txt", vec![]).await.unwrap();
     wait_awaiting(&fx, &handle).await;
 
     let id = pending(&fx, &handle).pop().unwrap();
@@ -385,7 +385,7 @@ async fn turn_cap_ends_budget_exhausted_and_resume_continues() {
         max_prompt_tokens: 1_000_000,
     };
     let agent = fx.agent(caps, Arc::clone(&provider));
-    let handle = agent.start(&fx.conversation_id, "list forever").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "list forever", vec![]).await.unwrap();
 
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::BudgetExhausted);
     assert_eq!(fx.run_of(&handle).turn_count, 3);
@@ -410,7 +410,7 @@ async fn soft_cap_is_announced_at_seventy_percent() {
         max_prompt_tokens: 1_000_000,
     };
     let agent = fx.agent(caps, provider);
-    let handle = agent.start(&fx.conversation_id, "go").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "go", vec![]).await.unwrap();
     let mut events = handle.subscribe();
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::BudgetExhausted);
 
@@ -460,7 +460,7 @@ async fn cancel_during_streaming_ends_cancelled() {
             approval_policy: ApprovalPolicy::AlwaysAsk,
         },
     );
-    let handle = agent.start(&fx.conversation_id, "talk forever").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "talk forever", vec![]).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
     handle.cancel();
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Cancelled);
@@ -475,7 +475,7 @@ async fn cancel_while_parked_on_an_approval_ends_cancelled() {
         serde_json::json!({"path": "b.txt", "content": "b"}),
     )])]);
     let agent = fx.agent(Caps::default(), provider);
-    let handle = agent.start(&fx.conversation_id, "write b").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "write b", vec![]).await.unwrap();
     wait_awaiting(&fx, &handle).await;
 
     handle.cancel();
@@ -515,7 +515,7 @@ async fn provider_error_ends_errored_with_a_reason() {
             approval_policy: ApprovalPolicy::AlwaysAsk,
         },
     );
-    let handle = agent.start(&fx.conversation_id, "hi").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "hi", vec![]).await.unwrap();
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Errored);
     let run = fx.run_of(&handle);
     assert!(run.error.unwrap().contains("500"));
@@ -529,7 +529,7 @@ async fn a_failing_tool_is_a_result_not_a_run_failure() {
         text("It is missing. "),
     ]);
     let agent = fx.agent(Caps::default(), provider);
-    let handle = agent.start(&fx.conversation_id, "read missing").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "read missing", vec![]).await.unwrap();
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
     let call = fx.tool_calls(&handle).remove(0);
     assert!(call.is_error);
@@ -544,7 +544,7 @@ async fn a_path_outside_the_workspace_is_refused_by_the_tool() {
         text("Refused. "),
     ]);
     let agent = fx.agent(Caps::default(), provider);
-    let handle = agent.start(&fx.conversation_id, "read passwd").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "read passwd", vec![]).await.unwrap();
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
     let call = fx.tool_calls(&handle).remove(0);
     let result = call.result.unwrap();
@@ -561,9 +561,9 @@ async fn starting_while_a_run_is_active_is_refused() {
         serde_json::json!({"path": "c.txt", "content": "c"}),
     )])]);
     let agent = fx.agent(Caps::default(), provider);
-    let handle = agent.start(&fx.conversation_id, "one").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "one", vec![]).await.unwrap();
     wait_awaiting(&fx, &handle).await;
-    assert!(agent.start(&fx.conversation_id, "two").await.is_err());
+    assert!(agent.start(&fx.conversation_id, "two", vec![]).await.is_err());
     handle.cancel();
     wait_terminal(&fx, &handle).await;
 }
@@ -577,7 +577,7 @@ async fn transcript_turns_carry_their_tool_calls_and_results() {
         text("ok "),
     ]);
     let agent = fx.agent(Caps::default(), Arc::clone(&provider));
-    let handle = agent.start(&fx.conversation_id, "read f").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "read f", vec![]).await.unwrap();
     wait_terminal(&fx, &handle).await;
 
     let sent = provider.last_messages();
@@ -604,7 +604,7 @@ async fn shell_tool_results_are_fed_back_to_the_model() {
         text("Ran it. "),
     ]);
     let agent = fx.agent(Caps::default(), provider);
-    let handle = agent.start(&fx.conversation_id, "run echo").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "run echo", vec![]).await.unwrap();
     wait_awaiting(&fx, &handle).await;
     let id = pending(&fx, &handle).pop().unwrap();
     agent.answer_approval(&id, Decision::Approve).unwrap();
@@ -630,7 +630,7 @@ async fn memories_work_without_an_embedder() {
         text("recalled "),
     ]);
     let agent = fx.agent(Caps::default(), provider);
-    let handle = agent.start(&fx.conversation_id, "remember and recall").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "remember and recall", vec![]).await.unwrap();
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
 
     let calls = fx.tool_calls(&handle);
@@ -648,7 +648,7 @@ async fn prompts_carry_house_facts_and_creative_only_in_creative_mode() {
         .agent(Caps::default(), Arc::clone(&provider))
         .with_config(Config::new(fx._blob.path().join("config")));
 
-    let handle = agent.start(&fx.conversation_id, "hi").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "hi", vec![]).await.unwrap();
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
     let normal = system_prompt(&provider.last_messages());
     assert!(normal.contains("About Aria"), "{normal}");
@@ -658,7 +658,7 @@ async fn prompts_carry_house_facts_and_creative_only_in_creative_mode() {
     fx.db
         .call(|c| db::set_conversation_mode(c, &fx.conversation_id, Mode::Creative))
         .unwrap();
-    let handle = agent.start(&fx.conversation_id, "make a tool").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "make a tool", vec![]).await.unwrap();
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
     let creative = system_prompt(&provider.last_messages());
     assert!(creative.contains("You are in Creative mode"), "{creative}");
@@ -687,7 +687,7 @@ async fn workspace_auto_approve_safe_runs_mutate_without_parking() {
         ..Settings::default()
     };
     let agent = fx.agent_with_settings(Caps::default(), settings, Arc::clone(&provider));
-    let handle = agent.start(&fx.conversation_id, "edit f.txt").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "edit f.txt", vec![]).await.unwrap();
 
     // The Mutate edit must run to completion without parking on an approval.
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
@@ -704,7 +704,7 @@ async fn workspace_auto_approve_safe_runs_mutate_without_parking() {
         ..Settings::default()
     };
     let agent2 = fx.agent_with_settings(Caps::default(), settings2, Arc::clone(&provider2));
-    let handle2 = agent2.start(&fx.conversation_id, "run a command").await.unwrap();
+    let handle2 = agent2.start(&fx.conversation_id, "run a command", vec![]).await.unwrap();
     wait_awaiting(&fx, &handle2).await;
     assert!(fx.tool_calls(&handle2)[0].state == ToolCallState::Pending);
 }
@@ -739,7 +739,7 @@ async fn main_system_shell_approval_is_adaptive() {
             approval_policy: ApprovalPolicy::AutoApproveSafe,
         },
     );
-    let handle = agent.start(&conversation_id, "run a read-only command").await.unwrap();
+    let handle = agent.start(&conversation_id, "run a read-only command", vec![]).await.unwrap();
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
     let stored = fx
         .db
@@ -767,7 +767,7 @@ async fn main_system_shell_approval_is_adaptive() {
             approval_policy: ApprovalPolicy::AutoApproveSafe,
         },
     );
-    let handle = agent.start(&conversation_id, "delete something").await.unwrap();
+    let handle = agent.start(&conversation_id, "delete something", vec![]).await.unwrap();
     wait_awaiting(&fx, &handle).await;
     assert_eq!(fx.tool_calls(&handle)[0].state, ToolCallState::Pending);
 }
@@ -807,7 +807,7 @@ async fn caps_are_hardcoded_not_hot_reloaded() {
         },
     )
     .with_config(config);
-    let handle = agent.start(&fx.conversation_id, "list").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "list", vec![]).await.unwrap();
 
     // Settings no longer carry caps; the Run uses the hardcoded default and
     // completes normally. Hot-reload still applies to other fields.
@@ -853,7 +853,7 @@ async fn main_system_outside_path_parks_then_reads_after_approval() {
             approval_policy: ApprovalPolicy::AutoApproveSafe,
         },
     );
-    let handle = agent.start(&conversation_id, "read the secret").await.unwrap();
+    let handle = agent.start(&conversation_id, "read the secret", vec![]).await.unwrap();
 
     // Outside the allowed root, even a Read must ask.
     wait_awaiting(&fx, &handle).await;
@@ -909,7 +909,7 @@ async fn main_system_inside_allowed_path_runs_without_parking() {
             approval_policy: ApprovalPolicy::AutoApproveSafe,
         },
     );
-    let handle = agent.start(&conversation_id, "read the file").await.unwrap();
+    let handle = agent.start(&conversation_id, "read the file", vec![]).await.unwrap();
 
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
     let call = fx
@@ -1000,7 +1000,7 @@ async fn main_system_auto_approve_still_asks_for_mutations_and_network() {
         provider,
         ApprovalPolicy::AutoApproveSafe,
     );
-    let handle = agent.start(&conversation_id, "edit the file").await.unwrap();
+    let handle = agent.start(&conversation_id, "edit the file", vec![]).await.unwrap();
     let id = wait_pending_tool(&fx, &handle, "edit_file").await;
     agent.answer_approval(&id, Decision::Approve).unwrap();
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
@@ -1024,7 +1024,7 @@ async fn main_system_auto_approve_still_asks_for_mutations_and_network() {
         provider,
         ApprovalPolicy::AutoApproveSafe,
     );
-    let handle = agent.start(&conversation_id, "fetch a page").await.unwrap();
+    let handle = agent.start(&conversation_id, "fetch a page", vec![]).await.unwrap();
     let id = wait_pending_tool(&fx, &handle, "web_fetch").await;
     agent.answer_approval(&id, Decision::Deny).unwrap();
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
@@ -1053,7 +1053,7 @@ async fn main_system_restricted_roots_ask_for_safe_shell() {
         provider,
         ApprovalPolicy::AutoApproveSafe,
     );
-    let handle = agent.start(&conversation_id, "run echo").await.unwrap();
+    let handle = agent.start(&conversation_id, "run echo", vec![]).await.unwrap();
     let id = wait_pending_tool(&fx, &handle, "run_shell").await;
     agent.answer_approval(&id, Decision::Deny).unwrap();
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
@@ -1089,7 +1089,7 @@ async fn conversation_policy_change_applies_mid_run() {
         text("done "),
     ]);
     let agent = fx.agent(Caps::default(), provider);
-    let handle = agent.start(&fx.conversation_id, "run then edit").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "run then edit", vec![]).await.unwrap();
 
     // Workspace shell always asks; use it as the parking point.
     let id = wait_pending_tool(&fx, &handle, "run_shell").await;
@@ -1117,7 +1117,7 @@ async fn ids_seen_by_the_model_match_persisted_calls() {
         text("ok "),
     ]);
     let agent = fx.agent(Caps::default(), Arc::clone(&provider));
-    let handle = agent.start(&fx.conversation_id, "list").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "list", vec![]).await.unwrap();
     wait_terminal(&fx, &handle).await;
 
     let stored = fx.tool_calls(&handle).remove(0);
@@ -1142,7 +1142,7 @@ async fn disabled_shell_tool_is_gated_and_returns_error_outcome() {
     let agent = fx
         .agent(Caps::default(), provider)
         .with_disabled_tools(vec!["run_shell".to_string()]);
-    let handle = agent.start(&fx.conversation_id, "run echo").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "run echo", vec![]).await.unwrap();
 
     wait_awaiting(&fx, &handle).await;
     let id = pending(&fx, &handle).pop().unwrap();
@@ -1208,7 +1208,7 @@ async fn transient_provider_errors_are_retried() {
             approval_policy: ApprovalPolicy::AlwaysAsk,
         },
     );
-    let handle = agent.start(&fx.conversation_id, "hello").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "hello", vec![]).await.unwrap();
 
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
     assert_eq!(*provider.calls.lock().unwrap(), 3);
@@ -1229,7 +1229,7 @@ async fn independent_reads_in_one_turn_all_complete() {
         text("both read "),
     ]);
     let agent = fx.agent(Caps::default(), Arc::clone(&provider));
-    let handle = agent.start(&fx.conversation_id, "read both").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "read both", vec![]).await.unwrap();
 
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
     let calls = fx.tool_calls(&handle);
@@ -1267,7 +1267,7 @@ async fn delegate_returns_a_report_without_touching_the_transcript() {
         ..Settings::default()
     };
     let agent = fx.agent_with_settings(Caps::default(), settings, Arc::clone(&provider));
-    let handle = agent.start(&fx.conversation_id, "find the secret").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "find the secret", vec![]).await.unwrap();
 
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
     let calls = fx.tool_calls(&handle);
@@ -1311,7 +1311,7 @@ async fn long_history_is_trimmed_to_fit_the_context() {
     }
     let provider = FakeProvider::new(vec![text("ok ")]);
     let agent = fx.agent(Caps::default(), Arc::clone(&provider));
-    let handle = agent.start(&fx.conversation_id, "hi").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "hi", vec![]).await.unwrap();
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
 
     let sent = provider.last_messages();
@@ -1384,7 +1384,7 @@ async fn context_overflow_retries_with_halved_history() {
             approval_policy: ApprovalPolicy::AlwaysAsk,
         },
     );
-    let handle = agent.start(&fx.conversation_id, "hi").await.unwrap();
+    let handle = agent.start(&fx.conversation_id, "hi", vec![]).await.unwrap();
     assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
 
     // Both attempts were made: first rejected, second succeeded.

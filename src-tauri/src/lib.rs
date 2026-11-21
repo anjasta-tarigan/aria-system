@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use base64::Engine;
 use aria_core::agent::{Agent, PendingApproval, ProviderSource, RunEvent, RunHandle};
 use aria_core::config::{
     AIProvider, EmbeddingConfig, ProviderStatus, Settings, WebSearchConfig,
@@ -104,6 +105,18 @@ pub struct MessageView {
     pub content: String,
     pub created_at: i64,
     pub tool_calls: Vec<ToolCall>,
+    pub attachments: Vec<AttachmentView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentView {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub mime_type: String,
+    pub size: i64,
+    pub blob_hash: String,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -435,12 +448,27 @@ fn message_views(db: &Db, conversation_id: &str) -> CmdResult<Vec<MessageView>> 
                 .collect::<Vec<_>>();
             calls.sort_by_key(|c| c.call_index);
         }
+        let attachments = db
+            .call(|conn| db::list_attachments_for_message(conn, &m.id))
+            .map_err(err)?
+            .into_iter()
+            .map(|a| AttachmentView {
+                id: a.id,
+                name: a.name,
+                path: a.path,
+                mime_type: a.mime_type,
+                size: a.size,
+                blob_hash: a.blob_hash,
+                created_at: a.created_at,
+            })
+            .collect();
         views.push(MessageView {
             id: m.id,
             role: m.role,
             content: m.content,
             created_at: m.created_at,
             tool_calls: calls,
+            attachments,
         });
     }
     Ok(views)
@@ -804,18 +832,70 @@ fn get_conversation(
     detail(&state.inner.db, &conversation_id)
 }
 
+/// Input describing one file to attach, as sent from the UI.
+#[derive(Debug, Deserialize)]
+pub struct AttachmentInput {
+    pub name: String,
+    pub path: String,
+}
+
 #[tauri::command]
 async fn send_message(
     app: AppHandle,
     state: State<'_, App>,
     conversation_id: String,
     text: String,
+    attachments: Option<Vec<AttachmentInput>>,
 ) -> CmdResult<Run> {
     let agent = state.agent()?;
-    let handle = agent.start(&conversation_id, &text).await.map_err(err)?;
+    let attachments = attachments.unwrap_or_default();
+    let att_inputs: Result<Vec<aria_core::agent::AttachmentInput>, String> = attachments
+        .into_iter()
+        .map(|a| {
+            // Read file bytes and store in the content-addressed blob store.
+            let bytes = std::fs::read(&a.path).map_err(err)?;
+            let blob_hash = state.inner.blobs.put(&bytes).map_err(err)?;
+            let mime_type = mime_guess::from_path(&a.path)
+                .first_raw()
+                .unwrap_or("application/octet-stream")
+                .to_string();
+            let meta = std::fs::metadata(&a.path).map_err(err)?;
+            Ok(aria_core::agent::AttachmentInput {
+                name: a.name,
+                path: a.path,
+                mime_type,
+                size: meta.len() as i64,
+                blob_hash,
+            })
+        })
+        .collect();
+    let att_inputs = att_inputs.map_err(err)?;
+    let handle = agent
+        .start(&conversation_id, &text, att_inputs)
+        .await
+        .map_err(err)?;
     let run = agent.snapshot(handle.run_id()).map_err(err)?.run;
     pump(app, &state.inner, handle);
     Ok(run)
+}
+
+/// Return an attachment's stored bytes as a data URL (mime + base64) so the
+/// frontend can render images or offer documents for download.
+#[tauri::command]
+fn read_attachment(
+    state: State<'_, App>,
+    blob_hash: String,
+) -> CmdResult<String> {
+    let bytes = state
+        .inner
+        .blobs
+        .read(&blob_hash)
+        .map_err(err)?;
+    // Re-derive mime from the blob hash is impossible; store mime alongside.
+    // For now return base64 with a generic mime; the frontend knows the mime
+    // from AttachmentView.mime_type.
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:application/octet-stream;base64,{b64}"))
 }
 
 #[tauri::command]
@@ -2234,6 +2314,7 @@ pub fn run() {
             list_built_in_tools,
             set_built_in_tool,
             read_file_raw,
+            read_attachment,
         ])
         .run(tauri::generate_context!())
         .expect("error while running aria");

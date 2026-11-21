@@ -58,6 +58,18 @@ export interface MessageView {
   reasoning?: string;
   created_at: number;
   tool_calls: ToolCall[];
+  /// Files attached to this message (images, documents, ...).
+  attachments: AttachmentView[];
+}
+
+export interface AttachmentView {
+  id: string;
+  name: string;
+  path: string;
+  mime_type: string;
+  size: number;
+  blob_hash: string;
+  created_at: number;
 }
 
 export type ConversationMode = "normal" | "creative";

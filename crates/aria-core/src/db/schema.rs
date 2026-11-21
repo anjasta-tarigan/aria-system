@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use super::{DbError, Result};
 
 /// Maximum schema version understood by this build.
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 
 /// A handle to the application database.
 ///
@@ -190,6 +190,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     if current < 12 {
         migrate_v12(conn)?;
     }
+    if current < 13 {
+        migrate_v13(conn)?;
+    }
     Ok(())
 }
 
@@ -198,6 +201,27 @@ fn migrate(conn: &Connection) -> Result<()> {
 fn migrate_v12(conn: &Connection) -> Result<()> {
     conn.execute_batch("ALTER TABLE messages ADD COLUMN reasoning TEXT;")?;
     conn.pragma_update(None, "user_version", 12)?;
+    Ok(())
+}
+
+/// Version 13: new `attachments` table links uploaded files (images,
+/// documents, ...) to the messages they belong to. File bytes live in the
+/// content-addressed blob store; the table holds metadata + blob hash.
+fn migrate_v13(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS attachments (
+            id            TEXT PRIMARY KEY,
+            message_id    TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+            name          TEXT NOT NULL,
+            path          TEXT NOT NULL,
+            mime_type     TEXT NOT NULL,
+            size          INTEGER NOT NULL,
+            blob_hash     TEXT NOT NULL,
+            created_at    INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS attachments_by_message ON attachments(message_id);",
+    )?;
+    conn.pragma_update(None, "user_version", 13)?;
     Ok(())
 }
 

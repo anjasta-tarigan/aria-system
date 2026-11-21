@@ -185,6 +185,7 @@ async function runChat(detail: ConversationDetail, text: string) {
     role: "user",
     content: text,
     created_at: now(),
+    attachments: [],
     tool_calls: [],
   });
   const setState = (state: Run["state"]) => {
@@ -205,10 +206,10 @@ async function runChat(detail: ConversationDetail, text: string) {
       role: "assistant",
       content: text2,
       created_at: now(),
+      attachments: [],
       tool_calls: [],
     });
-    emit({ type: "assistant_message", message_id: id("msg"), content: text2 }, run.id);
-  };
+    emit({ type: "assistant_message", message_id: id("msg"), content: text2 }, run.id);  };
 
   if (/artifact|app|dashboard|calc|game/i.test(text)) {
     const streamReply = `I'll build an interactive calculator artifact for you:
@@ -304,6 +305,7 @@ async function runScript(detail: ConversationDetail, text: string) {
     role: "user",
     content: text,
     created_at: now(),
+    attachments: [],
     tool_calls: [],
   });
 
@@ -362,6 +364,7 @@ async function runScript(detail: ConversationDetail, text: string) {
       content: a.text,
       reasoning: a.reasoning,
       created_at: now(),
+      attachments: [],
       tool_calls: [],
     });
     emit({ type: "assistant_message", message_id: a.msgId, content: a.text }, run.id);
@@ -1065,6 +1068,7 @@ export function seed(): void {
         role: "user",
         content: "Can you create an interactive counter and dashboard web app?",
         created_at: now() - 120_000,
+        attachments: [],
         tool_calls: [],
       },
       {
@@ -1116,6 +1120,7 @@ export function seed(): void {
 You can interact with it in the Preview pane, view the code, or download it.`,
         created_at: now() - 60_000,
         reasoning: "The user wants a self-contained, interactive counter widget with a visible metrics display. I'll wrap it in a single HTML artifact with inline CSS and JavaScript so it runs entirely in the preview pane without external dependencies or build steps.",
+        attachments: [],
         tool_calls: [],
       },
       {
@@ -1123,6 +1128,7 @@ You can interact with it in the Preview pane, view the code, or download it.`,
         role: "user",
         content: "Can you update it with auto-increment speed controls?",
         created_at: now() - 30_000,
+        attachments: [],
         tool_calls: [],
       },
       {
@@ -1190,6 +1196,7 @@ You can interact with it in the Preview pane, view the code, or download it.`,
 I updated the widget with an automated increment timer. Use the version switcher at the top to toggle between v1 and v2!`,
         created_at: now() - 10_000,
         reasoning: "The user asked to add auto-increment speed controls, so this is a v2 update of the same artifact (reusing identifier metrics-counter). I kept the existing counter UI and added an interval-driven auto-increment toggle. Reusing the identifier lets the version switcher surface both v1 and v2.",
+        attachments: [],
         tool_calls: [],
       },
     );

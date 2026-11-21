@@ -589,6 +589,70 @@ pub fn list_messages(conn: &Connection, conversation_id: &str) -> Result<Vec<Mes
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// Attach one file to a message. `blob_hash` must already exist in the blob
+/// store (caller stores bytes via [`crate::journal::Blobs::put`] first).
+pub fn insert_attachment(
+    conn: &Connection,
+    message_id: &str,
+    name: &str,
+    path: &str,
+    mime_type: &str,
+    size: i64,
+    blob_hash: &str,
+) -> Result<Attachment> {
+    let a = Attachment {
+        id: nid(),
+        message_id: message_id.to_string(),
+        name: name.to_string(),
+        path: path.to_string(),
+        mime_type: mime_type.to_string(),
+        size,
+        blob_hash: blob_hash.to_string(),
+        created_at: now_ms(),
+    };
+    conn.execute(
+        "INSERT INTO attachments (id, message_id, name, path, mime_type, size, blob_hash, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            a.id,
+            a.message_id,
+            a.name,
+            a.path,
+            a.mime_type,
+            a.size,
+            a.blob_hash,
+            a.created_at
+        ],
+    )?;
+    Ok(a)
+}
+
+fn attachment_from_row(r: &Row<'_>) -> rusqlite::Result<Attachment> {
+    Ok(Attachment {
+        id: r.get(0)?,
+        message_id: r.get(1)?,
+        name: r.get(2)?,
+        path: r.get(3)?,
+        mime_type: r.get(4)?,
+        size: r.get(5)?,
+        blob_hash: r.get(6)?,
+        created_at: r.get(7)?,
+    })
+}
+
+pub fn list_attachments_for_message(
+    conn: &Connection,
+    message_id: &str,
+) -> Result<Vec<Attachment>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, message_id, name, path, mime_type, size, blob_hash, created_at
+         FROM attachments WHERE message_id = ?1
+         ORDER BY created_at, id",
+    )?;
+    let rows = stmt.query_map([message_id], attachment_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 // ---------------------------------------------------------------- tool calls
 
 #[allow(clippy::too_many_arguments)]

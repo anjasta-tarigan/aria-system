@@ -453,3 +453,23 @@ pub struct BackgroundTask {
     pub status: BackgroundStatus,
     pub log_blob: String,
 }
+
+/// One file attached to a message. Bytes live in the content-addressed blob
+/// store (`blob_hash`); this row holds metadata so the UI can render or
+/// download the file without re-reading the original path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub id: String,
+    pub message_id: String,
+    /// Original file name.
+    pub name: String,
+    /// Original absolute path (for reference; may not exist anymore).
+    pub path: String,
+    /// MIME type (e.g. `image/png`, `text/markdown`, `application/pdf`).
+    pub mime_type: String,
+    /// Size in bytes.
+    pub size: i64,
+    /// SHA-256 hash used as the blob store file name.
+    pub blob_hash: String,
+    pub created_at: i64,
+}

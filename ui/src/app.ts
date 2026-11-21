@@ -14,6 +14,7 @@ import {
   type Memory,
   type RunEventEnvelope,
   type MessageView,
+  type AttachmentView,
   type PendingApproval,
   type Run,
   type RunEvent,
@@ -1225,7 +1226,63 @@ function messageNode(
     ...bodyNodes,
     ...(m.reasoning ? [reasoningNode(m.id, m.reasoning)] : []),
     ...m.tool_calls.map(toolCard),
+    ...m.attachments.map((a) => attachmentNode(a)),
   );
+}
+
+/// Render one attachment beneath a message. Images become inline thumbnails
+/// (fetched as data URLs from the blob store); other files become named links.
+function attachmentNode(a: AttachmentView): HTMLElement {
+  const isImage = a.mime_type.startsWith("image/");
+  const img = h("img", {
+    class: "attachment-preview",
+    alt: a.name,
+    title: `${a.name} (${fmtSize(a.size)})`,
+    loading: "lazy",
+  });
+  if (isImage) {
+    void call.invoke<string>("read_attachment", { blob_hash: a.blob_hash }).then((url) => {
+      img.src = url;
+    });
+  }
+  return h(
+    "div",
+    { class: `attachment ${isImage ? "attachment-image" : "attachment-file"}` },
+    isImage
+      ? img
+      : h("span", { class: "attachment-icon", "aria-hidden": "true" }, "📄"),
+    h(
+      "div",
+      { class: "attachment-info" },
+      h("a", {
+        class: "attachment-link",
+        href: isImage ? "" : "#",
+        title: a.name,
+        onclick: isImage
+          ? undefined
+          : async () => {
+              const url = await call.invoke<string>("read_attachment", {
+                blob_hash: a.blob_hash,
+              });
+              const aEl = document.createElement("a");
+              aEl.href = url;
+              aEl.download = a.name;
+              aEl.style.display = "none";
+              document.body.appendChild(aEl);
+              aEl.click();
+              document.body.removeChild(aEl);
+            },
+      }, a.name),
+      h("span", { class: "attachment-meta" }, fmtSize(a.size)),
+    ),
+  );
+}
+
+/// Format bytes as a human-readable size.
+function fmtSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 /// Collapsed-by-default reasoning block explaining the model's thought process
@@ -1459,7 +1516,7 @@ function approvalNode(p: PendingApproval): HTMLElement {
 }
 
 // Attachments queued in the composer but not yet sent. Cleared on send/switch.
-interface Attachment { name: string; path: string; content: string }
+interface Attachment { name: string; path: string }
 let pendingAttachments: Attachment[] = [];
 
 function composerNode(
@@ -1554,14 +1611,7 @@ function composerNode(
         for (const p of paths) {
           if (pendingAttachments.some((a) => a.path === p)) continue;
           const name = p.split("/").pop() ?? p;
-          // Read file content via Rust backend (scoped read_file); fall back to path ref.
-          let content = "";
-          try {
-            content = await call.invoke<string>("read_file_raw", { path: p });
-          } catch {
-            content = `[attached: ${p}]`;
-          }
-          pendingAttachments.push({ name, path: p, content });
+          pendingAttachments.push({ name, path: p });
         }
         render();
       } catch (e) {
@@ -2149,18 +2199,14 @@ async function send() {
   const text = input?.value.trim();
   if (!detail || !text) return;
   input!.value = "";
-  // Append any queued attachments as fenced code blocks after the message.
-  const attachSuffix = pendingAttachments.length
-    ? "\n\n" + pendingAttachments.map((a) =>
-        `**${a.name}**\n\`\`\`\n${a.content}\n\`\`\``
-      ).join("\n\n")
-    : "";
+  const atts = pendingAttachments;
   pendingAttachments = [];
   ui.notice = null;
   try {
     await call.invoke<Run>("send_message", {
       conversationId: detail.conversation.id,
-      text: text + attachSuffix,
+      text,
+      attachments: atts.map((a) => ({ name: a.name, path: a.path })),
     });
     await selectConversation(detail.conversation.id);
   } catch (e) {
