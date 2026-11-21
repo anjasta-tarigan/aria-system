@@ -4,6 +4,7 @@
 //! status is watched concurrently. The whole process group is killed on timeout.
 //! A nonzero exit code is a normal result, not an error (issue 09).
 
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -102,6 +103,40 @@ pub fn is_safe_command(cmd: &str) -> bool {
 /// Cap on bytes fed back to the model, split between the head and tail.
 const MODEL_BYTES: usize = 32_000;
 
+/// The user's own bin directories, appended to the app's PATH. A desktop
+/// launch never reads the shell's rc files, so `~/.cargo/bin` and friends are
+/// often missing even though the user's terminal has them.
+fn user_path(base: Option<&std::ffi::OsStr>, home: Option<&std::path::Path>) -> std::ffi::OsString {
+    let mut dirs: Vec<PathBuf> = base
+        .map(std::env::split_paths)
+        .into_iter()
+        .flatten()
+        .collect();
+    let mut extra = Vec::new();
+    if let Some(home) = home {
+        extra.push(home.join(".cargo/bin"));
+        extra.push(home.join(".local/bin"));
+        extra.push(home.join("bin"));
+    }
+    extra.push(PathBuf::from("/usr/local/bin"));
+    extra.push(PathBuf::from("/opt/homebrew/bin"));
+    for dir in extra {
+        if dir.is_dir() && !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    std::env::join_paths(dirs)
+        .unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
+}
+
+/// PATH for shell commands: the app's PATH plus the user's own bins.
+pub(crate) fn shell_path() -> std::ffi::OsString {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    user_path(std::env::var_os("PATH").as_deref(), home.as_deref())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ShellArgs {
     pub cmd: String,
@@ -150,6 +185,7 @@ pub async fn execute(
         .arg("-c")
         .arg(cmd)
         .current_dir(root)
+        .env("PATH", shell_path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -337,7 +373,20 @@ fn head_tail(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::is_safe_command;
+    use super::{is_safe_command, user_path};
+
+    #[test]
+    fn user_path_appends_existing_user_bins_once() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".cargo/bin")).unwrap();
+        let base = std::ffi::OsStr::new("/usr/bin");
+        let path = user_path(Some(base), Some(home.path()));
+        let dirs: Vec<_> = std::env::split_paths(&path).collect();
+        assert_eq!(dirs[0], std::path::PathBuf::from("/usr/bin"));
+        let cargo = home.path().join(".cargo/bin");
+        assert_eq!(dirs.iter().filter(|d| **d == cargo).count(), 1);
+        assert!(!dirs.iter().any(|d| d.ends_with(".local/bin")));
+    }
 
     #[test]
     fn read_only_commands_are_safe() {

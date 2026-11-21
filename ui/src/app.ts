@@ -1861,14 +1861,40 @@ function applyRunEvent(runId: string, event: RunEvent) {
 }
 
 let reloading = false;
+let reloadAgain = false;
+
+/// Terminal Run states; a snapshot that says "running" is older than one of
+/// these, whatever the request order.
+const isTerminal = (state: string) => state !== "running" && state !== "awaiting_approval";
+
 async function reloadTranscript() {
   const detail = ui.detail;
-  if (!detail || reloading) return;
+  if (!detail) return;
+  // A tool result and the assistant message can land together. Remember the
+  // second request instead of dropping it, so the finished answer is shown.
+  if (reloading) {
+    reloadAgain = true;
+    return;
+  }
   reloading = true;
   try {
+    const conversationId = detail.conversation.id;
     const fresh = await call.invoke<ConversationDetail>("get_conversation", {
-      conversationId: detail.conversation.id,
+      conversationId,
     });
+    // The reader may have switched chats while this was in flight.
+    if (ui.detail?.conversation.id !== conversationId) return;
+    // A state event can land mid-request; never let the older snapshot put a
+    // finished Run back into "running" (which hid the final answer).
+    const current = ui.detail.conversation.run;
+    if (
+      current &&
+      fresh.conversation.run?.id === current.id &&
+      isTerminal(current.state) &&
+      !isTerminal(fresh.conversation.run.state)
+    ) {
+      fresh.conversation.run = current;
+    }
     // Keep a live stream that started after the snapshot.
     const live = ui.streaming;
     ui.detail = fresh;
@@ -1879,6 +1905,10 @@ async function reloadTranscript() {
     render();
   } finally {
     reloading = false;
+    if (reloadAgain) {
+      reloadAgain = false;
+      void reloadTranscript();
+    }
   }
 }
 

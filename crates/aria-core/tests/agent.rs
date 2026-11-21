@@ -1278,3 +1278,51 @@ async fn delegate_returns_a_report_without_touching_the_transcript() {
     assert!(report.contains("42"), "{report}");
     assert!(fx.messages().last().unwrap().content.contains("Delegation reported"));
 }
+
+/// A conversation longer than the context budget is trimmed at Turn
+/// boundaries, so the provider never receives the whole history.
+#[tokio::test]
+async fn long_history_is_trimmed_to_fit_the_context() {
+    let fx = fixture();
+    for i in 0..40 {
+        fx.db
+            .call(|c| {
+                db::insert_message(
+                    c,
+                    &fx.conversation_id,
+                    None,
+                    Role::User,
+                    &format!("{i} {}", "u".repeat(20_000)),
+                )
+            })
+            .unwrap();
+        fx.db
+            .call(|c| {
+                db::insert_message(
+                    c,
+                    &fx.conversation_id,
+                    None,
+                    Role::Assistant,
+                    &format!("{i} {}", "a".repeat(20_000)),
+                )
+            })
+            .unwrap();
+    }
+    let provider = FakeProvider::new(vec![text("ok ")]);
+    let agent = fx.agent(Caps::default(), Arc::clone(&provider));
+    let handle = agent.start(&fx.conversation_id, "hi").await.unwrap();
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
+
+    let sent = provider.last_messages();
+    let chars: usize = sent
+        .iter()
+        .map(|m| match m {
+            ChatMessage::System { content }
+            | ChatMessage::User { content, .. }
+            | ChatMessage::Assistant { content, .. }
+            | ChatMessage::Tool { content, .. } => content.len(),
+        })
+        .sum();
+    assert!(chars <= 400_000, "sent {chars} chars");
+    assert!(chars > 0);
+}

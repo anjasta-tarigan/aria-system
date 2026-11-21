@@ -37,6 +37,14 @@ const POLL: Duration = Duration::from_millis(20);
 /// chat. `delegate` sub-turns run inside their parent's slot.
 const MAX_CONCURRENT_TURNS: usize = 4;
 
+/// Room the injected memory block may take in the system prompt.
+const MEMORY_BLOCK_CHARS: usize = 4_000;
+
+/// Roughly how much conversation text one request may carry. About four
+/// characters per token, so ~100k tokens, leaving room for the reply and the
+/// Tool definitions.
+const MAX_CONTEXT_CHARS: usize = 400_000;
+
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
     #[error("db: {0}")]
@@ -1262,16 +1270,24 @@ impl LoopCtx {
     /// mind, so it does not have to recall on every turn. Global memories always
     /// accompany the folder's own, newest first.
     fn memory_block(&self, workspace_id: Option<&str>) -> Result<String> {
-        let memories = self
+        let mut lines = Vec::new();
+        let mut used = 0;
+        for memory in self
             .call(|c| db::list_memories(c, workspace_id))?
             .into_iter()
             .take(20)
-            .map(|m| format!("- [{}] {}", m.key, m.content))
-            .collect::<Vec<_>>();
-        Ok(if memories.is_empty() {
+        {
+            let line = format!("- [{}] {}", memory.key, memory.content);
+            if used + line.len() > MEMORY_BLOCK_CHARS {
+                break;
+            }
+            used += line.len();
+            lines.push(line);
+        }
+        Ok(if lines.is_empty() {
             String::new()
         } else {
-            format!("\n\nStored memories:\n{}", memories.join("\n"))
+            format!("\n\nStored memories:\n{}", lines.join("\n"))
         })
     }
 
@@ -1345,7 +1361,37 @@ impl LoopCtx {
                 }
             }
         }
+        trim_history(&mut messages);
         Ok(messages)
+    }
+}
+
+/// Drop the oldest complete Turns until the request fits the context budget.
+/// Cuts at User boundaries, so an assistant message never loses the Tool
+/// Results that answer its Tool Calls (the API rejects that pairing).
+fn trim_history(messages: &mut Vec<ChatMessage>) {
+    let size = |msgs: &[ChatMessage]| msgs.iter().map(message_chars).sum::<usize>();
+    while size(messages) > MAX_CONTEXT_CHARS {
+        let users: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| matches!(message, ChatMessage::User { .. }))
+            .map(|(index, _)| index)
+            .collect();
+        // Keep the system prompt and the newest Turn.
+        let Some(&second) = users.get(1) else {
+            break;
+        };
+        messages.drain(1..second);
+    }
+}
+
+fn message_chars(message: &ChatMessage) -> usize {
+    match message {
+        ChatMessage::System { content }
+        | ChatMessage::User { content, .. }
+        | ChatMessage::Assistant { content, .. }
+        | ChatMessage::Tool { content, .. } => content.len(),
     }
 }
 

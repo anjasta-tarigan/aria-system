@@ -124,7 +124,7 @@ pub async fn recall(ctx: &ToolContext, args: RecallArgs) -> Result<String> {
         .map(|m| format!("- [{}] {}", m.key, m.content))
         .collect::<Vec<_>>()
         .join("\n");
-    Ok(format!("Memories ({scope}), {scope} scope:\n{body}"))
+    Ok(format!("Memories ({scope}):\n{body}"))
 }
 
 /// Reciprocal-rank fusion: a memory found by both keyword and semantic search

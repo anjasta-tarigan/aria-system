@@ -158,6 +158,10 @@ You are Aria, a desktop assistant. You help with everyday conversation and, when
 a folder is open, with work on the files inside it.
 
 Rules:
+- You have a real terminal through `run_shell` whenever this chat has file
+  access. Never tell the user you cannot access their terminal or computer:
+  call the Tool and let the approval prompt decide. Commands are
+  non-interactive (stdin is closed), so pass flags instead of answering prompts.
 - Changes to files, shell commands and web fetches need the user's approval;
   if an approval is denied, explain and propose an alternative.
 - Keep the todo list current for multi-step work.
@@ -178,6 +182,8 @@ This is the Main System chat with access to the whole device.
   directory (named in the house block). Do not assume a project folder.
 - Prefer read_file, list_dir, search_files and the mutating file tools over
   shell for file work. Pass `path` to search_files to search any directory.
+- `run_shell` is a real terminal on this device: use it for anything the file
+  tools do not cover (builds, tests, git, package managers, system commands).
 - Long or unattended work (builds, servers, downloads) should use
   `run_background`, then `poll_task` to read its status and output. Stop one
   you no longer need with `kill_task`. Plain shell commands may still ask for
@@ -190,6 +196,8 @@ pub const FOLDER_PROMPT: &str = "\
 A folder is open in this conversation. Its tools act on that folder.
 
 - All paths are relative to the folder root. Never try to leave it.
+- `run_shell` is a real terminal in this folder: use it for builds, tests, git
+  and anything the file tools do not cover.
 - Prefer search_files and read_file before editing.
 - edit_file replaces an exact substring that must occur exactly once; include
   enough context to make it unique. Use write_file only for new files.
@@ -245,10 +253,9 @@ const CLIS: &[(&[&str], &str)] = &[
 ];
 
 fn on_path(name: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| {
+    // Same PATH shell commands get, so the prompt never advertises a CLI that
+    // `run_shell` cannot find (or hides one it can).
+    std::env::split_paths(&shell::shell_path()).any(|dir| {
         dir.join(name).is_file() || (cfg!(windows) && dir.join(format!("{name}.exe")).is_file())
     })
 }

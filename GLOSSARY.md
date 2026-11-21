@@ -38,6 +38,12 @@ One request/response pair with the model inside a Run. A Turn may contain severa
 
 _Avoid_: step, iteration, round.
 
+## Context window
+
+The model's input limit for one request. Aria sends the system prompt, the injected memories and the conversation so far; when that passes roughly 100k tokens of text it drops the oldest complete Turns, keeping the system prompt and the newest Turn. Trimming cuts at user-message boundaries, because a Tool Result whose assistant Tool Call was dropped is rejected by the provider. The Run's Caps still bound cumulative turns and tokens.
+
+_Avoid_: prompt limit, token budget (that is `Caps`).
+
 ## Tool Call
 
 A request from the model, in a Turn, to invoke one of the agent's Tools, with a JSON argument object. Its outcome is a Tool Result.
