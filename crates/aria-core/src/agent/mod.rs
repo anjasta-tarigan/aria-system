@@ -46,6 +46,10 @@ const MEMORY_BLOCK_CHARS: usize = 4_000;
 /// scripts (three characters per token), which still leaves ~20k of the window.
 const MAX_CONTEXT_CHARS: usize = 300_000;
 
+/// Floor for the context retry: about 4k tokens, small enough for the
+/// smallest models in common use.
+const MIN_CONTEXT_CHARS: usize = 16_000;
+
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
     #[error("db: {0}")]
@@ -1082,14 +1086,28 @@ impl LoopCtx {
             .max()
             .unwrap_or(0)
             .max(self.assistant_turns(&run)?);
-        let messages = self.request_messages(&run, scope)?;
         let specs = ToolRegistry::describe(scope, &self.disabled_tools);
         self.emit(RunEvent::TurnStarted { turn_index });
 
         // Bound concurrent provider calls. Held only for this Turn, so an
         // Approval wait or a long tool never blocks another chat.
         let _permit = self.turn_permits.clone().acquire_owned().await.ok();
-        let result = self.stream(&messages, &specs, turn_index).await?;
+        // A model with a smaller window than the budget rejects the request
+        // before generating, so halve the history and try again instead of
+        // failing the Run. Stops at a few thousand tokens; if the newest Turn
+        // alone is still too long, the error stands.
+        let mut budget = MAX_CONTEXT_CHARS;
+        let result = loop {
+            let messages = self.request_messages(&run, scope, budget)?;
+            match self.stream(&messages, &specs, turn_index).await {
+                Err(AgentError::Provider(e))
+                    if e.is_context_overflow() && budget > MIN_CONTEXT_CHARS =>
+                {
+                    budget = (budget / 2).max(MIN_CONTEXT_CHARS);
+                }
+                other => break other?,
+            }
+        };
         let result = match result {
             Some(result) => result,
             None => return Ok(TurnOutcome::Cancelled),
@@ -1294,7 +1312,12 @@ impl LoopCtx {
 
     /// System prompt plus the conversation so far, with each Turn's Tool Calls
     /// (as the assistant asked them) and Tool Results (as the tools returned).
-    fn request_messages(&self, run: &Run, scope: &Scope) -> Result<Vec<ChatMessage>> {
+    fn request_messages(
+        &self,
+        run: &Run,
+        scope: &Scope,
+        budget: usize,
+    ) -> Result<Vec<ChatMessage>> {
         let conversation = self.call(|c| db::get_conversation(c, &run.conversation_id))?;
         let memory_block = self.memory_block(conversation.workspace_id.as_deref())?;
 
@@ -1362,7 +1385,7 @@ impl LoopCtx {
                 }
             }
         }
-        trim_history(&mut messages);
+        trim_history(&mut messages, budget);
         Ok(messages)
     }
 }
@@ -1370,9 +1393,9 @@ impl LoopCtx {
 /// Drop the oldest complete Turns until the request fits the context budget.
 /// Cuts at User boundaries, so an assistant message never loses the Tool
 /// Results that answer its Tool Calls (the API rejects that pairing).
-fn trim_history(messages: &mut Vec<ChatMessage>) {
+fn trim_history(messages: &mut Vec<ChatMessage>, budget: usize) {
     let size = |msgs: &[ChatMessage]| msgs.iter().map(message_chars).sum::<usize>();
-    while size(messages) > MAX_CONTEXT_CHARS {
+    while size(messages) > budget {
         let users: Vec<usize> = messages
             .iter()
             .enumerate()

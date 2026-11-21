@@ -1326,3 +1326,67 @@ async fn long_history_is_trimmed_to_fit_the_context() {
     assert!(chars <= 300_000, "sent {chars} chars");
     assert!(chars > 0);
 }
+
+/// A model with a small window rejects the first request; the agent retries
+/// with half the history and the Run still finishes.
+#[tokio::test]
+async fn context_overflow_retries_with_halved_history() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use aria_core::provider::{ChatMessage, Provider, ProviderEvent, ProviderError, ToolSpec, TurnResult};
+    use tokio::sync::mpsc;
+
+    struct SmallWindow {
+        calls: AtomicU32,
+    }
+
+    impl Provider for SmallWindow {
+        fn stream_chat<'a>(
+            &'a self,
+            messages: &'a [ChatMessage],
+            _tools: &'a [ToolSpec],
+            events: mpsc::UnboundedSender<ProviderEvent>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = aria_core::provider::Result<TurnResult>> + Send + 'a>> {
+            let calls = self.calls.fetch_add(1, Ordering::SeqCst);
+            let events = events.clone();
+            Box::pin(async move {
+                if calls == 0 {
+                    // First request is too long for this small model.
+                    return Err(ProviderError::Status {
+                        status: 400,
+                        body: "This model's maximum context length is 32768 tokens".to_string(),
+                    });
+                }
+                // Retry with less history fits.
+                let _ = events.send(ProviderEvent::TextDelta("ok ".to_string()));
+                Ok(TurnResult {
+                    text: "ok".to_string(),
+                    tool_calls: Vec::new(),
+                    prompt_tokens: Some(10),
+                })
+            })
+        }
+    }
+
+    let fx = fixture();
+    fx.db.call(|c| {
+        db::insert_message(c, &fx.conversation_id, None, Role::User, &"x".repeat(200_000))
+    }).unwrap();
+    let small = Arc::new(SmallWindow { calls: AtomicU32::new(0) });
+    let provider: Arc<dyn Provider> = Arc::clone(&small) as Arc<dyn Provider>;
+    let agent = Agent::new(
+        Arc::clone(&fx.db),
+        Arc::new(Blobs::new(fx._blob.path(), Arc::clone(&fx.db))),
+        Caps::default(),
+        ProviderSource::Fixed {
+            provider,
+            approval_policy: ApprovalPolicy::AlwaysAsk,
+        },
+    );
+    let handle = agent.start(&fx.conversation_id, "hi").await.unwrap();
+    assert_eq!(wait_terminal(&fx, &handle).await, RunState::Finished);
+
+    // Both attempts were made: first rejected, second succeeded.
+    assert_eq!(small.calls.load(Ordering::SeqCst), 2);
+}
+
+

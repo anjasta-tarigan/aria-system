@@ -52,6 +52,32 @@ impl ProviderError {
             _ => false,
         }
     }
+
+    /// The provider refused the request because it is longer than the model's
+    /// window. Every provider words this differently, so match the usual
+    /// phrasings; an unrecognized rejection still fails the Run as before.
+    pub fn is_context_overflow(&self) -> bool {
+        let Self::Status { status, body } = self else {
+            return false;
+        };
+        if !matches!(status, 400 | 413) {
+            return false;
+        }
+        let body = body.to_ascii_lowercase();
+        [
+            "context length",
+            "context_length",
+            "context window",
+            "maximum context",
+            "too many tokens",
+            "reduce the length",
+            "prompt is too long",
+            "input is too long",
+            "exceeds the maximum",
+        ]
+        .iter()
+        .any(|needle| body.contains(needle))
+    }
 }
 
 /// One message as the API sees it.
@@ -607,5 +633,47 @@ impl Accumulator {
             tool_calls,
             prompt_tokens: self.prompt_tokens,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderError;
+
+    #[test]
+    fn status_400_with_context_length_is_context_overflow() {
+        assert!(ProviderError::Status {
+            status: 400,
+            body: "This model's maximum context length is 8192 tokens".to_string(),
+        }
+        .is_context_overflow());
+    }
+
+    #[test]
+    fn status_413_with_input_too_long_is_context_overflow() {
+        assert!(ProviderError::Status {
+            status: 413,
+            body: "input is too long for the requested model".to_string(),
+        }
+        .is_context_overflow());
+    }
+
+    #[test]
+    fn status_400_auth_error_is_not_context_overflow() {
+        assert!(!ProviderError::Status {
+            status: 400,
+            body: "Invalid API key".to_string(),
+        }
+        .is_context_overflow());
+    }
+
+    #[test]
+    fn non_status_error_is_not_context_overflow() {
+        assert!(!ProviderError::Unreachable("dns".to_string()).is_context_overflow());
+        assert!(!ProviderError::Status {
+            status: 500,
+            body: "context length exceeded".to_string(),
+        }
+        .is_context_overflow());
     }
 }
