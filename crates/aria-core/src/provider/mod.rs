@@ -456,6 +456,68 @@ impl Reranker for CosineReranker {
     }
 }
 
+/// Reranks `(query, candidate)` pairs by normalized keyword overlap.
+///
+/// Tokenizes both sides into alphanumeric terms and scores a candidate by the
+/// frequency-weighted fraction of query terms it contains, normalized by
+/// candidate length. Result is in `[0, 1]`.
+///
+/// A zero-dependency, deterministic alternative to the cross-encoder endpoint
+/// and the cosine reranker: it needs no network, no embeddings, and no model.
+/// Use it when reranking is wanted but no reranker model is configured, e.g.
+/// `ToolContext.reranker = Some(Arc::new(TermOverlapReranker::new()))`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TermOverlapReranker;
+
+impl TermOverlapReranker {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+/// Split text into lowercased alphanumeric terms.
+fn overlap_terms(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_ascii_lowercase())
+        .collect()
+}
+
+/// Score one `(query, candidate)` pair by normalized keyword overlap, in
+/// `[0, 1]`. Higher = more relevant. Pure computation: no network, no model.
+fn overlap_score(query: &str, candidate: &str) -> f32 {
+    let q_terms = overlap_terms(query);
+    let c_terms = overlap_terms(candidate);
+    if q_terms.is_empty() || c_terms.is_empty() {
+        return 0.0;
+    }
+    // Frequency of each candidate term.
+    let mut freq: BTreeMap<String, usize> = BTreeMap::new();
+    for t in &c_terms {
+        *freq.entry(t.clone()).or_insert(0) += 1;
+    }
+    let c_len = c_terms.len() as f32;
+    let mut score: f32 = 0.0;
+    for q in &q_terms {
+        if let Some(&f) = freq.get(q) {
+            // Sub-linear term frequency so one repeated term can't dominate,
+            // then normalize by candidate length.
+            score += (f as f32).sqrt() / c_len;
+        }
+    }
+    score.min(1.0)
+}
+
+impl Reranker for TermOverlapReranker {
+    fn rerank<'a>(
+        &'a self,
+        query: &'a str,
+        candidate: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<f32>> + Send + 'a>> {
+        Box::pin(async move { Ok(overlap_score(query, candidate)) })
+    }
+}
+
 impl Reranker for OpenAiProvider {
     fn rerank<'a>(
         &'a self,
@@ -982,4 +1044,56 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     dot / (na * nb)
+}
+
+#[cfg(test)]
+mod term_overlap_reranker_tests {
+    use super::*;
+
+    #[test]
+    fn term_overlap_ranks_containing_candidate_higher() {
+        assert!(overlap_score("alpha beta", "alpha gamma delta")
+            > overlap_score("alpha beta", "zeta eta theta"));
+        assert!(overlap_score("alpha beta", "alpha gamma delta") > 0.0);
+        assert_eq!(overlap_score("alpha beta", "zeta eta theta"), 0.0);
+    }
+
+    #[test]
+    fn term_overlap_rewards_more_matching_terms() {
+        assert!(
+            overlap_score("alpha beta gamma", "alpha beta zeta")
+                > overlap_score("alpha beta gamma", "alpha zeta")
+        );
+    }
+
+    #[test]
+    fn term_overlap_is_case_insensitive_and_bounded() {
+        let s = overlap_score("ALPHA Beta", "Alpha alpha BETA");
+        assert!(s > 0.0);
+        assert!(s <= 1.0);
+    }
+
+    #[test]
+    fn term_overlap_empty_input_is_zero() {
+        assert_eq!(overlap_score("", "anything"), 0.0);
+        assert_eq!(overlap_score("anything", ""), 0.0);
+        assert_eq!(overlap_score("", ""), 0.0);
+    }
+
+    #[test]
+    fn term_overlap_rerank_returns_score() {
+        let reranker = TermOverlapReranker::new();
+        let fut = reranker.rerank("alpha beta", "alpha gamma delta");
+        // Drive the future to completion with a no-op waker (std only).
+        let waker = futures_util::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut pin = Box::pin(fut);
+        match pin.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(Ok(score)) => {
+                assert!(score > 0.0);
+                assert!(score <= 1.0);
+            }
+            other => panic!("expected Ready(Ok(score)), got {other:?}"),
+        }
+    }
 }
