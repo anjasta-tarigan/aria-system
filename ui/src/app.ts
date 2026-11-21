@@ -897,6 +897,9 @@ function conversationPane(
   // Mode and approval live in the composer; system-access badge removed
   // (the modal is still reachable via the system access modal triggered
   // from conversationPane above the composer if needed).
+  // Side panel toggle icon: close (X) when open, menu (hamburger) when closed.
+  const toggleIcon = ui.sidePanelOpen ? "✕" : "☰";
+
   const header = h(
     "header",
     { class: "conv-header" },
@@ -933,7 +936,7 @@ function conversationPane(
         ui.sidePanelOpen = !ui.sidePanelOpen;
         render();
       },
-    }, ui.sidePanelOpen ? "◀" : "▶"),
+    }, toggleIcon),
   );
 
   const transcript = h(
@@ -2053,7 +2056,8 @@ function sidePanelNode(
   }
   if (ui.sidePanelTab === "files") return renderSidePanelFiles(detail.conversation);
   if (detail.todos.length > 0) return todoPanel(detail);
-  return null;
+  // Default: show files view when panel is open but no artifact/todos yet.
+  return renderSidePanelFiles(detail.conversation);
 }
 
 // ---------------------------------------------------------------- behaviour
