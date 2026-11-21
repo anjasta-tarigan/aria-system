@@ -27,7 +27,7 @@ pub use background::BackgroundTasks;
 pub use crate::db::{BackgroundStatus, BackgroundTask};
 pub use fetch::{FetchOutcome, classify_ip, fetch_url};
 pub use search::{SearchConfig, SearchProvider, SearchHit, web_search};
-pub use shell::{ShellArgs, ShellOutcome, is_safe_command, run_shell};
+pub use shell::{ShellArgs, ShellOutcome, is_harmful_command, is_safe_command, run_shell};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
@@ -386,6 +386,18 @@ pub fn exec_is_safe(tool: &str, args_json: &str) -> bool {
         .ok()
         .and_then(|v| v.get("cmd").and_then(|c| c.as_str()).map(str::to_string))
         .is_some_and(|cmd| is_safe_command(&cmd))
+}
+
+/// Whether an Exec tool call is a destructive shell command that needs user
+/// approval even under `AutoApproveSafe`. Everything else runs silently.
+pub fn needs_shell_approval(tool: &str, args_json: &str) -> bool {
+    if !matches!(tool, RUN_SHELL | RUN_BACKGROUND) {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(args_json)
+        .ok()
+        .and_then(|v| v.get("cmd").and_then(|c| c.as_str()).map(str::to_string))
+        .is_some_and(|cmd| is_harmful_command(&cmd))
 }
 
 /// Whether a file Tool call names a path outside a restricted Main System's

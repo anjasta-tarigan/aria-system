@@ -62,11 +62,12 @@ pub enum ApprovalPolicy {
     /// Every mutate/exec/network call waits for the user (current behavior).
     #[default]
     AlwaysAsk,
-    /// Read everywhere. In a workspace, file mutations (edit/write/delete/move)
-    /// and network (web search/fetch) also run automatically, and shell stays
-    /// gated. In the Main System only reads run silently: mutations and network
-    /// ask, and shell asks too unless it is one safe read-only command. A Main
-    /// System restricted to allowed roots asks for every shell command.
+    /// Read everywhere. File mutations (edit/write/delete/move) and network
+    /// (web search/fetch) run without asking in every scope. Shell runs
+    /// silently too unless the command is destructive (`rm -rf`, `sudo`,
+    /// `npm install`, ...); only those harmful commands still ask. A
+    /// restricted Main System still asks for file calls naming a path outside
+    /// its allowed roots.
     AutoApproveSafe,
 }
 

@@ -100,6 +100,36 @@ pub fn is_safe_command(cmd: &str) -> bool {
     is_read_only_command(program, &argv)
 }
 
+/// Whether `cmd` is a destructive/harmful command that requires user approval
+/// even under `AutoApproveSafe`. Conservative by design: only well-known
+/// destructive programs and clearly destructive flags are caught; chained,
+/// quoted or otherwise complex commands fall through and run without asking.
+pub fn is_harmful_command(cmd: &str) -> bool {
+    let cmd = cmd.trim();
+    if cmd.is_empty() || cmd.chars().any(|c| SHELL_SYNTAX.contains(&c)) {
+        return false;
+    }
+    let argv: Vec<&str> = cmd.split_whitespace().collect();
+    let Some(program) = argv.first() else {
+        return false;
+    };
+    let program = program.rsplit('/').next().unwrap_or(program);
+    match program {
+        "sudo" | "su" | "doas" => true,
+        "rm" => argv.iter().any(|a| {
+            a.starts_with('-') && a.chars().any(|c| c == 'r' || c == 'R')
+        }) || argv.iter().any(|a| *a == "/"),
+        "npm" | "npx" | "yarn" | "pnpm" => argv.iter().any(|a| {
+            matches!(
+                *a,
+                "install" | "uninstall" | "remove" | "publish" | "add" | "rm"
+            )
+        }),
+        "dd" | "mkfs" | "mkfs.ext4" | "mkfs.vfat" | "fdisk" | "parted" => true,
+        _ => false,
+    }
+}
+
 /// Cap on bytes fed back to the model, split between the head and tail.
 const MODEL_BYTES: usize = 32_000;
 
@@ -373,7 +403,7 @@ fn head_tail(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_safe_command, user_path};
+    use super::{is_harmful_command, is_safe_command, user_path};
 
     #[test]
     fn user_path_appends_existing_user_bins_once() {
@@ -451,6 +481,50 @@ mod tests {
             "zoxide add /tmp",
         ] {
             assert!(!is_safe_command(cmd), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn harmful_commands_need_approval() {
+        for cmd in [
+            "sudo ls",
+            "sudo rm -rf /tmp/x",
+            "su -c rm -rf /",
+            "rm -rf /",
+            "rm -rf /tmp/x",
+            "rm -R /tmp/x",
+            "rm --recursive /tmp/x",
+            "rm /",
+            "npm install",
+            "npm uninstall left-pad",
+            "npm publish",
+            "yarn add lodash",
+            "pnpm remove lodash",
+            "dd if=/dev/zero of=/dev/sda",
+            "mkfs.ext4 /dev/sdb1",
+            "fdisk /dev/sda",
+        ] {
+            assert!(is_harmful_command(cmd), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn non_harmful_commands_run_without_approval() {
+        for cmd in [
+            "ls -la",
+            "cat notes.txt",
+            "rm notes.txt",
+            "rm -f notes.txt",
+            "git status",
+            "git commit -m change",
+            "npm run build",
+            "npm version patch",
+            "node script.js",
+            "python3 -m http.server",
+            "cargo build",
+            "echo hello",
+        ] {
+            assert!(!is_harmful_command(cmd), "{cmd}");
         }
     }
 }

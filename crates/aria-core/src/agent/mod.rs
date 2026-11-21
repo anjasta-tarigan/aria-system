@@ -578,29 +578,23 @@ fn pending_approval(approval: &Approval, call: &ToolCall) -> PendingApproval {
 fn needs_approval(
     class: ApprovalClass,
     policy: ApprovalPolicy,
-    scope: &Scope,
+    _scope: &Scope,
     tool: &str,
     args_json: &str,
 ) -> bool {
     match policy {
         ApprovalPolicy::AlwaysAsk => class.requires_approval(),
-        // AutoApproveSafe: reads run everywhere. In a workspace, mutations and
-        // network stay automatic because the folder bounds them. The Main
-        // System reaches the whole device, so there only reads (and a single
-        // read-only shell command) run silently; mutations and egress ask.
-        // A restricted Main System asks for every command: shell cannot be
-        // confined to the allowed roots.
+        // AutoApproveSafe: reads run everywhere. File mutations (edit/write/
+        // delete/move) and network (web search/fetch) run without asking in
+        // every scope. Only a destructive shell command (rm -rf, sudo, npm
+        // install, ...) still waits for the user; every other shell command
+        // runs silently. A restricted Main System still asks for file calls
+        // that name a path outside its allowed roots (via outside_scope).
         ApprovalPolicy::AutoApproveSafe => match class {
             ApprovalClass::Read => false,
-            ApprovalClass::Mutate | ApprovalClass::Network => {
-                matches!(scope, Scope::MainSystem { .. })
-            }
-            ApprovalClass::Exec => match scope {
-                Scope::MainSystem { roots, .. } => {
-                    !roots.is_empty() || !tools::exec_is_safe(tool, args_json)
-                }
-                _ => true,
-            },
+            ApprovalClass::Mutate => false,
+            ApprovalClass::Network => false,
+            ApprovalClass::Exec => tools::needs_shell_approval(tool, args_json),
         },
     }
 }
