@@ -21,8 +21,12 @@ use super::{BackgroundStatus, BackgroundTask, Result, ToolContext, ToolError};
 /// Reap a background task that runs longer than this; a hung command would
 /// otherwise stream into the temp log forever.
 // shortcut: 8h cap reaps runaway tasks; raise it for legitimately longer jobs.
-/// The temp log can still grow large within the cap (not bounded today).
 const MAX_RUNTIME: Duration = Duration::from_secs(8 * 3600);
+
+/// Cap the temp log size so a runaway task cannot fill disk within the
+/// runtime cap. Once full, the channel is still drained (so the child process
+/// isn't blocked) but no more bytes are written to disk.
+const MAX_LOG_BYTES: u64 = 1_048_576; // 1 MB
 
 /// Owns background tasks for one conversation's workspace root.
 pub struct BackgroundTasks {
@@ -95,12 +99,22 @@ impl BackgroundTasks {
                 Err(_) => return,
             };
             let writer = tokio::spawn(async move {
+                let mut written: u64 = 0;
                 while let Some(line) = rx.recv().await {
-                    if tokio::io::AsyncWriteExt::write_all(&mut file, line.as_bytes()).await.is_err()
+                    let bytes = line.as_bytes();
+                    let with_newline = bytes.len() + 1;
+                    if written + with_newline as u64 > MAX_LOG_BYTES {
+                        // Log cap reached: keep draining the channel so the
+                        // child process is not blocked, but stop writing to
+                        // disk. poll() tails the last 2KB of what we captured.
+                        continue;
+                    }
+                    if tokio::io::AsyncWriteExt::write_all(&mut file, bytes).await.is_err()
                         || tokio::io::AsyncWriteExt::write_all(&mut file, b"\n").await.is_err()
                     {
                         break;
                     }
+                    written += with_newline as u64;
                 }
             });
             // Record the process-group leader pid so kill() can target it.
